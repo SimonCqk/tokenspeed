@@ -43,7 +43,7 @@ TEST_F(PagedCacheEvictionTest, PassiveEvictionReleasesPagedCachePages) {
     const std::int32_t fh_before = fh_alloc_->AvailablePages();
     const std::int32_t swa_before = swa_alloc_->AvailablePages();
 
-    hybrid_->AttachPagedCacheSnapshotToNode(attach_a, MakeCompleteSnapshot(kLcm));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, attach_a, MakeCompleteSnapshot(kLcm));
     EXPECT_TRUE(attach_a->HasPagedCacheSnapshot());
     // The snapshot must hold *some* pages from each group, otherwise the test
     // below ("eviction returns them") is vacuous. We do NOT assert the exact
@@ -72,6 +72,53 @@ TEST_F(PagedCacheEvictionTest, PassiveEvictionReleasesPagedCachePages) {
     // DetachPagedCacheSnapshotFromNode).
     EXPECT_EQ(fh_alloc_->AvailablePages(), fh_before);
     EXPECT_EQ(swa_alloc_->AvailablePages(), swa_before);
+}
+
+TEST_F(PagedCacheEvictionTest, StatePressurePrunesOnlyStateWhenHistoryHasCapacity) {
+    TreeNode* terminal = InsertDevicePages(/*num_pages=*/2, /*token_start=*/1);
+    ASSERT_NE(terminal, nullptr);
+
+    TreeNode* attach = kv_cache_->GetRadixTree().SplitAt(terminal, kLcm);
+    ASSERT_NE(attach, nullptr);
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, attach, MakeCompleteSnapshot(kLcm));
+    ASSERT_TRUE(attach->HasPagedCacheSnapshot());
+    ASSERT_TRUE(attach->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::History));
+    ASSERT_TRUE(attach->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::State));
+
+    const std::int32_t fh_available_before_admit = fh_alloc_->AvailablePages();
+    ASSERT_GE(fh_available_before_admit, 1);
+
+    std::vector<std::int32_t> state_saturator = swa_alloc_->Allocate(swa_alloc_->AvailablePages());
+    ASSERT_FALSE(state_saturator.empty());
+    ASSERT_EQ(swa_alloc_->AvailablePages(), 0);
+
+    auto simulated_free = hybrid_->InitialSimulatedFree();
+    MatchResult match = kv_cache_->Match(token_vec_t{});
+    AdmissionRequest request{
+        .request_id = "state-pressure",
+        .device_pages_needed = 0,
+        .tokens_this_round = kLcm,
+        .first_raw_position_of_op = 0,
+        .target_raw_tokens_exclusive = kLcm,
+        .compat_match = &match,
+        .auxiliary_tree_slots_needed = 2,
+        .compute_branching_checkpoint = true,
+    };
+
+    auto result = hybrid_->Admit(request, simulated_free);
+
+    ASSERT_TRUE(result.admitted);
+    ASSERT_TRUE(attach->HasPagedCacheSnapshot())
+        << "History had enough free pages; State pressure must not full-prune the snapshot";
+    const auto* snap = attach->GetPagedCacheSnapshot();
+    ASSERT_NE(snap, nullptr);
+    EXPECT_TRUE(snap->IsCompleteFor(PagedCacheGroupFamily::History));
+    EXPECT_FALSE(snap->IsCompleteFor(PagedCacheGroupFamily::State));
+    EXPECT_NE(snap->groups.find("fh"), snap->groups.end());
+    EXPECT_EQ(snap->groups.find("swa"), snap->groups.end());
+
+    HybridPrefixCacheTestPeer::ReleaseRequest(*hybrid_, "state-pressure");
+    swa_alloc_->Deallocate(state_saturator);
 }
 
 }  // namespace tokenspeed::test

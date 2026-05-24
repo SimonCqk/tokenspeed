@@ -152,13 +152,13 @@ public:
             state_);
     }
 
-    const TreeNode* GetDeviceNode() const {
+    TreeNode* GetMutableDeviceNode() {
         return std::visit(Overloaded{
-            []<typename T>(const T& s) -> const TreeNode*
+            []<typename T>(T& s) -> TreeNode*
                 requires(std::derived_from<T, fsm::BaseState>)
-            { return s.GetDeviceNode(); },
-            [this](const auto&) -> const TreeNode* {
-                throw std::logic_error("Request::GetDeviceNode: expected a base request state; got state=" +
+            { return s.GetMutableDeviceNode(); },
+            [this](auto&) -> TreeNode* {
+                throw std::logic_error("Request::GetMutableDeviceNode: expected a base request state; got state=" +
                                        StateName());
             },
             },

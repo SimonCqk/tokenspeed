@@ -16,14 +16,75 @@
 
 #pragma once
 
-// Test-only friend of HybridPrefixCache; exposes hooks needed to drive prune
-// paths whose direct public surface is non-trivial to set up via AdmitChunk.
+// Test-only friend of HybridPrefixCache; exposes narrow hooks needed to seed or
+// inspect internals while production callers use the scheduler-facing facades.
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
 #include "resource/radix_tree/tree_node.h"
 
 namespace tokenspeed {
 
-class HybridPrefixCacheTestPeer {};
+class HybridPrefixCacheTestPeer {
+public:
+    static void InsertMamba(HybridPrefixCache& cache, TreeNode* terminal_node, std::unique_ptr<MambaSlot> slot) {
+        cache.InsertMamba(terminal_node, std::move(slot));
+    }
+
+    static TreeNode* FindLastMambaNode(const HybridPrefixCache& cache, TreeNode* from) {
+        return cache.FindLastMambaNode(from);
+    }
+
+    static TreeNode* FindLastMambaHostNode(const HybridPrefixCache& cache, TreeNode* from) {
+        return cache.FindLastMambaHostNode(from);
+    }
+
+    static std::vector<TransferPair> PrepareMambaHostWriteBack(HybridPrefixCache& cache,
+                                                               const std::vector<TreeNode*>& nodes) {
+        return cache.PrepareMambaHostWriteBack(nodes);
+    }
+
+    static std::vector<TransferPair> PrepareMambaDeviceLoadBack(HybridPrefixCache& cache,
+                                                                const std::vector<TreeNode*>& nodes) {
+        return cache.PrepareMambaDeviceLoadBack(nodes);
+    }
+
+    static void PublishFinishMambaState(HybridPrefixCache& cache,
+                                        const std::vector<std::span<const std::int32_t>>& full_paged_tokens,
+                                        LocalMambaAllocator* local_mamba_allocator) {
+        cache.PublishFinishMambaState(full_paged_tokens, local_mamba_allocator);
+    }
+
+    static void AcquireForRequest(HybridPrefixCache& cache, const std::string& request_id,
+                                  std::int32_t first_raw_position_of_op, std::int32_t target_raw_tokens_exclusive,
+                                  const MatchResult::PagedCache& paged_cache_hit = {}) {
+        cache.AcquireForRequest(request_id, first_raw_position_of_op, target_raw_tokens_exclusive, paged_cache_hit);
+    }
+
+    static void ReleaseRequest(HybridPrefixCache& cache, const std::string& request_id) {
+        cache.ReleaseRequest(request_id);
+    }
+
+    static void CommitChunk(HybridPrefixCache& cache, const std::string& request_id, TreeNode* terminal) {
+        cache.CommitChunk(request_id, terminal);
+    }
+
+    static bool AttachPagedCacheSnapshotToNode(HybridPrefixCache& cache, TreeNode* node,
+                                               std::unique_ptr<PagedCacheSnapshot> snapshot) {
+        return cache.AttachPagedCacheSnapshotToNode(node, std::move(snapshot));
+    }
+
+    static std::unique_ptr<PagedCacheSnapshot> DetachPagedCacheSnapshotFromNode(HybridPrefixCache& cache,
+                                                                                TreeNode* node) {
+        return cache.DetachPagedCacheSnapshotFromNode(node);
+    }
+};
 
 }  // namespace tokenspeed

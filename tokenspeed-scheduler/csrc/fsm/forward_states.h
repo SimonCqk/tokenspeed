@@ -115,6 +115,7 @@ public:
     }
 
     const TreeNode* GetDeviceNode() const { return device_node_ref_->Node(); }
+    TreeNode* GetMutableDeviceNode() const { return device_node_ref_->Node(); }
 
     std::int32_t TailPageAvailableTokens() const { return local_kv_allocator_->TailPageAvailableTokens(); }
 

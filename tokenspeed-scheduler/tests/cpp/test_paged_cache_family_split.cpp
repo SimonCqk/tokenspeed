@@ -41,9 +41,9 @@ TEST_F(PagedCacheFamilySplitTest, HistoryCompleteStateMissingFallback) {
     ASSERT_NE(n512, nullptr);
     ASSERT_NE(n768, nullptr);
 
-    hybrid_->AttachPagedCacheSnapshotToNode(n256, MakeCompleteSnapshot(256));
-    hybrid_->AttachPagedCacheSnapshotToNode(n512, MakeCompleteSnapshot(512));
-    hybrid_->AttachPagedCacheSnapshotToNode(n768, MakeCompleteSnapshot(768));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n256, MakeCompleteSnapshot(256));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n512, MakeCompleteSnapshot(512));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n768, MakeCompleteSnapshot(768));
 
     // Downgrade only the deepest snapshot: history-only at 768.
     DowngradeSnapshotToHistoryOnly(n768);
@@ -51,7 +51,7 @@ TEST_F(PagedCacheFamilySplitTest, HistoryCompleteStateMissingFallback) {
     EXPECT_TRUE(n768->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::History));
     EXPECT_FALSE(n768->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::State));
 
-    auto match = hybrid_->Match(MakeAlignedTokens(num_pages, kPageSize, /*start=*/1));
+    auto match = hybrid_->MatchPrefix(MakeAlignedTokens(num_pages, kPageSize, /*start=*/1)).compat_match;
     ASSERT_NE(match.paged_cache.last_node, nullptr);
     // History chain reaches 768 but state at 768 is missing; segments_needed=1
     // forces fallback to 512.
@@ -74,13 +74,13 @@ TEST_F(PagedCacheFamilyWideWindowTest, StateWindowDiscontinuityFallback) {
     ASSERT_NE(n512, nullptr);
     ASSERT_NE(n768, nullptr);
 
-    hybrid_->AttachPagedCacheSnapshotToNode(n256, MakeCompleteSnapshot(256));
-    hybrid_->AttachPagedCacheSnapshotToNode(n512, MakeCompleteSnapshot(512));
-    hybrid_->AttachPagedCacheSnapshotToNode(n768, MakeCompleteSnapshot(768));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n256, MakeCompleteSnapshot(256));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n512, MakeCompleteSnapshot(512));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n768, MakeCompleteSnapshot(768));
 
     DowngradeSnapshotToHistoryOnly(n512);
 
-    auto match = hybrid_->Match(MakeAlignedTokens(num_pages, kPageSize, /*start=*/1));
+    auto match = hybrid_->MatchPrefix(MakeAlignedTokens(num_pages, kPageSize, /*start=*/1)).compat_match;
     ASSERT_NE(match.paged_cache.last_node, nullptr);
     EXPECT_EQ(match.paged_cache.last_node, n256);
     EXPECT_EQ(match.paged_cache.prefix_len_tokens, 256);
@@ -100,9 +100,9 @@ TEST_F(PagedCacheFamilySplitTest, StateDetachDoesNotBreakHistoryChain) {
     ASSERT_NE(n512, nullptr);
     ASSERT_NE(n768, nullptr);
 
-    hybrid_->AttachPagedCacheSnapshotToNode(n256, MakeCompleteSnapshot(256));
-    hybrid_->AttachPagedCacheSnapshotToNode(n512, MakeCompleteSnapshot(512));
-    hybrid_->AttachPagedCacheSnapshotToNode(n768, MakeCompleteSnapshot(768));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n256, MakeCompleteSnapshot(256));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n512, MakeCompleteSnapshot(512));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n768, MakeCompleteSnapshot(768));
 
     DowngradeSnapshotToHistoryOnly(n512);
     ASSERT_TRUE(n512->HasPagedCacheSnapshot());
@@ -110,7 +110,7 @@ TEST_F(PagedCacheFamilySplitTest, StateDetachDoesNotBreakHistoryChain) {
     EXPECT_FALSE(n512->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::State));
     EXPECT_TRUE(n768->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::State));
 
-    auto match = hybrid_->Match(MakeAlignedTokens(num_pages, kPageSize, /*start=*/1));
+    auto match = hybrid_->MatchPrefix(MakeAlignedTokens(num_pages, kPageSize, /*start=*/1)).compat_match;
     ASSERT_NE(match.paged_cache.last_node, nullptr);
     // History chain unbroken; state at 768 (only the trailing segment) is fine.
     EXPECT_EQ(match.paged_cache.last_node, n768);

@@ -39,9 +39,11 @@ add_library(tokenspeed_scheduler_core STATIC
     csrc/resource/radix_tree/radix_tree.cpp
     csrc/resource/radix_tree/tree_node.cpp
     csrc/resource/kv_prefix_cache/kv_prefix_cache.cpp
-    csrc/resource/kv_prefix_cache/cache_coordinator.cpp
+    csrc/resource/hybrid_prefix_cache/family_registry.cpp
     csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
+    csrc/resource/hybrid_prefix_cache/mamba_family_ops.cpp
     csrc/resource/hybrid_prefix_cache/mamba_eviction_manager.cpp
+    csrc/resource/hybrid_prefix_cache/paged_cache_family_ops.cpp
     csrc/resource/allocator/mamba_chunk_allocator.cpp
     csrc/resource/allocator/mamba_host_allocator.cpp
     csrc/resource/allocator/local_mamba_allocator.cpp
@@ -50,7 +52,6 @@ add_library(tokenspeed_scheduler_core STATIC
     csrc/fsm/cache_events.cpp
     csrc/fsm/pd_events.cpp
 
-    csrc/scheduler/operations/cache.cpp
     csrc/scheduler/operations/forward.cpp
 
     csrc/scheduler/kv_cache_events.cpp
@@ -112,6 +113,7 @@ if(TOKENSPEED_SCHEDULER_BUILD_TESTS)
         tests/cpp/test_batch_scheduling.cpp
         tests/cpp/test_prefetch.cpp
         tests/cpp/test_owned_pages.cpp
+        tests/cpp/test_hybrid_cache_registry.cpp
         tests/cpp/test_paged_cache_prefix_match.cpp
         tests/cpp/test_paged_cache_attach_loop.cpp
         tests/cpp/test_paged_cache_eviction.cpp
@@ -119,6 +121,8 @@ if(TOKENSPEED_SCHEDULER_BUILD_TESTS)
         tests/cpp/test_paged_cache_prefix_hit_commit.cpp
         tests/cpp/test_paged_cache_replay.cpp
         tests/cpp/test_retract_abort_pages.cpp
+        tests/cpp/test_request_cache_context.cpp
+        tests/cpp/test_scheduler_memory_diagnostics.cpp
         tests/cpp/test_req_pool_allocator.cpp
         tests/cpp/test_mamba_slot.cpp
         tests/cpp/test_mamba_eviction.cpp

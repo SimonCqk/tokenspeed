@@ -42,27 +42,27 @@ TEST_F(PagedCachePrefixHitCommitTest, PrefixHitFollowedByCheckpointDoesNotOverfl
 
     TreeNode* n256 = kv_cache_->GetRadixTree().SplitAt(terminal, 256);
     ASSERT_NE(n256, nullptr);
-    hybrid_->AttachPagedCacheSnapshotToNode(n256, MakeCompleteSnapshot(256));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n256, MakeCompleteSnapshot(256));
     ASSERT_TRUE(n256->HasPagedCacheSnapshot());
 
     const auto tokens = MakeAlignedTokens(num_pages, kPageSize, /*start=*/1);
 
     // The second request: prefix-cache match returns the depth-256 hit.
-    auto pre_match = hybrid_->Match(tokens);
+    auto pre_match = hybrid_->MatchPrefix(tokens).compat_match;
     ASSERT_NE(pre_match.paged_cache.last_node, nullptr);
     EXPECT_EQ(pre_match.paged_cache.last_node, n256);
     EXPECT_EQ(pre_match.paged_cache.prefix_len_tokens, 256);
 
     // Import borrowed prefix + acquire fresh pages for the remaining LCM segment.
     const std::string request_id = "r-prefix-hit";
-    hybrid_->AcquireForRequest(request_id,
-                               /*first_raw_position_of_op=*/256,
-                               /*target_raw_tokens_exclusive=*/512, pre_match.paged_cache);
+    HybridPrefixCacheTestPeer::AcquireForRequest(*hybrid_, request_id,
+                                                 /*first_raw_position_of_op=*/256,
+                                                 /*target_raw_tokens_exclusive=*/512, pre_match.paged_cache);
 
     // Trigger CheckpointStateToSnapshot at the next LCM boundary. Pre-fix this
     // throws std::logic_error("not enough owned pages for window"); post-fix it
     // commits only the new LCM segment's delta to the snapshot.
-    ASSERT_NO_THROW(hybrid_->CommitChunk(request_id, terminal));
+    ASSERT_NO_THROW(HybridPrefixCacheTestPeer::CommitChunk(*hybrid_, request_id, terminal));
 
     // After commit, n512 (=terminal) must hold a complete snapshot covering
     // both required families.
@@ -75,7 +75,7 @@ TEST_F(PagedCachePrefixHitCommitTest, PrefixHitFollowedByCheckpointDoesNotOverfl
     // Observable: a fresh Match now reconstructs the full trailing window
     // (state_span = [n256, n512]) and exposes window/raw_per_page page ids
     // for the sliding "swa" group.
-    auto post_match = hybrid_->Match(tokens);
+    auto post_match = hybrid_->MatchPrefix(tokens).compat_match;
     ASSERT_NE(post_match.paged_cache.last_node, nullptr);
     EXPECT_EQ(post_match.paged_cache.prefix_len_tokens, 512);
 
@@ -92,7 +92,7 @@ TEST_F(PagedCachePrefixHitCommitTest, PrefixHitFollowedByCheckpointDoesNotOverfl
     EXPECT_EQ(static_cast<std::int32_t>(swa_ids.size()), expected_state_pages);
 
     // Clean up the request tables; owned pages return via RAII / ReleaseAll.
-    hybrid_->ReleaseRequest(request_id);
+    HybridPrefixCacheTestPeer::ReleaseRequest(*hybrid_, request_id);
 }
 
 }  // namespace tokenspeed::test

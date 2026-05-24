@@ -45,13 +45,12 @@
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
 
 #include "fsm/forward_events.h"
-#include "fsm/cache_events.h"
-#include "fsm/pd_events.h"
 namespace tokenspeed {
 
 class Scheduler {
 public:
     explicit Scheduler(SchedulerConfig config);
+    ~Scheduler();
 
     void SubmitRequests(const std::vector<RequestSpec>& request_specs);
     std::vector<std::string> CalcRollingHash(const std::vector<std::int32_t>& input_tokens, bool apply_match = false);
@@ -91,9 +90,6 @@ private:
     DecodeOperation applyEventAndGenerateOp(Request* request, fsm::ScheduleDecodeEvent event);
     DecodeOperation applyEventAndGenerateOp(Request* request, fsm::ScheduleDecodeFromRetractedEvent event);
     std::optional<WriteBackOperation> applyEventAndGenerateOp(Request* request, fsm::ScheduleRetractEvent event);
-    PrefetchOperation applyEventAndGenerateOp(Request* request, fsm::SchedulePrefetchEvent event);
-
-    std::optional<fsm::SchedulePrefetchEvent> schedulePrefetch(Request* request, const MatchResult& match);
 
     std::optional<fsm::SchedulePrefillFirstChunkEvent> schedulePrefillFirstChunk(
         Request* request, std::int32_t remaining, std::int32_t reserve_num_tokens_in_next_schedule_event,
@@ -136,8 +132,8 @@ private:
     std::optional<MambaChunkAllocator> mamba_allocator_{};
     std::optional<MambaHostAllocator> mamba_host_allocator_{};
     KVPrefixCache kv_prefix_cache_;
+    HybridPrefixCache hybrid_prefix_cache_;
     ReqPoolAllocator req_pool_allocator_;
-    std::optional<HybridPrefixCache> hybrid_prefix_cache_{};
 
 private:
     std::unordered_map<std::string, std::unique_ptr<Request>> requests_;

@@ -30,6 +30,7 @@
 #include "resource/allocator/page_allocator.h"
 #include "resource/allocator/paged_cache_group.h"
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
+#include "hybrid_prefix_cache_test_peer.h"
 #include "resource/kv_prefix_cache/kv_prefix_cache.h"
 #include "resource/radix_tree/paged_cache_snapshot.h"
 #include "resource/radix_tree/radix_tree.h"
@@ -72,13 +73,12 @@ protected:
         fh_alloc_ = fh_owner.get();
         swa_alloc_ = swa_owner.get();
 
-        hybrid_ = std::make_unique<HybridPrefixCache>(*kv_cache_, /*mamba=*/nullptr,
+        hybrid_ = std::make_unique<HybridPrefixCache>(*kv_cache_, *device_alloc_, /*mamba=*/nullptr,
                                                       /*mamba_chunk_size=*/0);
         hybrid_->RegisterPagedCacheGroup(std::move(fh_owner));
         hybrid_->RegisterPagedCacheGroup(std::move(swa_owner));
         std::unordered_map<std::string, std::int32_t> sliding{{"swa", kSlidingWindow}};
         hybrid_->EnablePagedCacheAdjunct(/*required=*/{"fh", "swa"}, std::move(sliding));
-        kv_cache_->GetDeviceManager().SetEvictionCallback([this](TreeNode* node) { hybrid_->OnKVEvict(node); });
     }
 
     // Insert pages from `start_node` (nullptr=root); returns terminal node.
@@ -114,10 +114,10 @@ protected:
     // Detach and reattach without the state group; re-attach recomputes
     // `complete_families` and leaves only History present.
     void DowngradeSnapshotToHistoryOnly(TreeNode* node) {
-        auto snap = hybrid_->DetachPagedCacheSnapshotFromNode(node);
+        auto snap = HybridPrefixCacheTestPeer::DetachPagedCacheSnapshotFromNode(*hybrid_, node);
         ASSERT_NE(snap, nullptr);
         snap->groups.erase("swa");
-        hybrid_->AttachPagedCacheSnapshotToNode(node, std::move(snap));
+        HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, node, std::move(snap));
     }
 
     std::unique_ptr<PageAllocator> device_alloc_;

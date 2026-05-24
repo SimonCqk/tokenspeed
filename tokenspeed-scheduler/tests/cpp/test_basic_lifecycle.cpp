@@ -18,6 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <cstddef>
+
 #include "integration_test_helper.h"
 
 namespace tokenspeed::test {
@@ -115,10 +117,62 @@ TEST_F(BasicLifecycleTestSuite, GetRequestTokenSize_UnknownRequest) {
 
 TEST_F(BasicLifecycleTestSuite, AvailableKvPages_DecreasesAfterPrefill) {
     auto before = scheduler_->AvailableKvPages();
+    EXPECT_EQ(before, static_cast<std::size_t>(Config().device_allocator.total_pages - 1));
     Submit(MakeRequestSpec("r1", 2));
     PlanOnce();
     auto after = scheduler_->AvailableKvPages();
     EXPECT_LT(after, before);
+    EXPECT_EQ(before - after, scheduler_->ActiveKvPages());
+}
+
+TEST_F(BasicLifecycleTestSuite, ActiveKvPagesCountsOnlyForwardStates) {
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 0u);
+
+    Submit(MakeRequestSpec("r1", 1));
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 0u) << "submitted requests must not contribute";
+
+    PlanOnce();
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 2u) << "active forward state contributes occupied prefix/local pages";
+
+    SendForwardDone("r1", {42});
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 2u);
+
+    PlanOnce();
+    EXPECT_EQ(scheduler_->DecodingSize(), 1u);
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 2u) << "Decoding remains active";
+
+    SendFinish("r1");
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 0u) << "Draining/finished requests must not contribute";
+
+    const auto writeback_plan = PlanOnce();
+    EXPECT_FALSE(ExtractCacheOpsOfKind<FlatWriteBackOperation>(writeback_plan).empty());
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 0u) << "WritingBack requests must not contribute";
+}
+
+TEST_F(BasicLifecycleTestSuite, ActiveKvPagesDeduplicatesSharedPrefixPages) {
+    Submit(MakeRequestSpec("r_seed", 2, 1));
+    PlanOnce();
+    SendForwardDone("r_seed", {101});
+    PlanOnce();
+    ASSERT_EQ(scheduler_->DecodingSize(), 1u);
+    ASSERT_EQ(scheduler_->ActiveKvPages(), 3u);
+
+    Submit(MakeRequestSpec("r_reuse", 2, 1));
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 3u) << "submitted requests must not add pages";
+
+    auto reuse_plan = PlanOnce();
+    auto* reuse_fwd = GetForwardOp(reuse_plan);
+    ASSERT_NE(reuse_fwd, nullptr);
+    ASSERT_EQ(reuse_fwd->request_ids.size(), 1u);
+    EXPECT_EQ(reuse_fwd->request_ids[0], "r_reuse");
+    ASSERT_EQ(reuse_fwd->extend_prefix_lens.size(), 1u);
+    EXPECT_EQ(reuse_fwd->extend_prefix_lens[0], PageSize());
+
+    // r_seed and r_reuse both observe the same prefix-cache page for the same
+    // prompt. ActiveKvPages counts that shared page id once; summing per-request
+    // occupied-page snapshots would report 6 pages instead of the 5 unique page
+    // ids visible through the public statistic.
+    EXPECT_EQ(scheduler_->ActiveKvPages(), 5u);
 }
 
 }  // namespace tokenspeed::test

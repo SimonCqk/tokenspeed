@@ -1,0 +1,293 @@
+// Copyright (c) 2026 LightSeek Foundation
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#pragma once
+
+#include <cstdint>
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "resource/allocator/owned_pages.h"
+#include "resource/types.h"
+#include "scheduler/operations/cache.h"
+
+namespace tokenspeed {
+
+class ForwardOperationBase;
+class LocalKVAllocator;
+class LocalMambaAllocator;
+class TreeNode;
+
+enum class CacheFamily {
+    TokenPage,
+    CompressedPage,
+    SlidingWindowState,
+    CompressionTailState,
+    RecurrentState,
+    ConvState,
+};
+
+enum class TreeAttachmentKind {
+    ReusableTree,
+    NoneForRequestLocal,
+};
+
+enum class Recoverability {
+    Exact,
+    AlignedCheckpoint,
+    WindowRepairable,
+    RequestLocalOnly,
+};
+
+enum class PublicationKind {
+    CanonicalPrefixIndex,
+    AuxiliaryLocalOnly,
+    RequestLocalOnly,
+};
+
+enum class SplitPolicy {
+    CarrierKV,
+    CheckpointBoundary,
+    SnapshotBoundary,
+    RequestLocalOnly,
+};
+
+struct CacheResourceSpec {
+    std::string id;
+    std::int32_t family_index{-1};
+    CacheFamily family{CacheFamily::TokenPage};
+    TreeAttachmentKind attachment_kind{TreeAttachmentKind::NoneForRequestLocal};
+    Recoverability recoverability{Recoverability::RequestLocalOnly};
+    PublicationKind publication{PublicationKind::RequestLocalOnly};
+    SplitPolicy split_policy{SplitPolicy::RequestLocalOnly};
+    std::int32_t rows_per_page{0};
+    std::int32_t entry_stride_tokens{0};
+    std::int32_t checkpoint_chunk_tokens{0};
+    std::optional<std::int32_t> sliding_window_tokens{};
+    std::string state_cohort_id{};
+    bool required_for_recovery{false};
+};
+
+struct FamilyRegistry {
+    std::vector<CacheResourceSpec> specs;
+    std::vector<std::int32_t> active_match_family_indices;
+    std::vector<std::int32_t> active_admit_family_indices;
+    std::vector<std::int32_t> active_commit_family_indices;
+    std::vector<std::int32_t> active_evict_family_indices;
+    std::vector<std::int32_t> active_finish_family_indices;
+    std::vector<std::int32_t> active_stats_family_indices;
+    std::vector<std::int32_t> active_compatibility_family_indices;
+
+    void Clear();
+    const CacheResourceSpec* FindById(const std::string& id) const;
+    const CacheResourceSpec& At(std::int32_t family_index) const;
+    std::int32_t Register(CacheResourceSpec spec, bool active_match, bool active_admit, bool active_commit,
+                          bool active_evict, bool active_finish, bool active_stats, bool active_compatibility);
+
+private:
+    std::unordered_map<std::string, std::int32_t> id_to_index_;
+};
+
+struct FamilySlice {
+    std::int32_t family_index{-1};
+    std::string family_id{};
+    CacheFamily family{CacheFamily::TokenPage};
+    TreeNode* hit_node{nullptr};
+    std::int32_t recoverable_end_tokens{0};
+    std::int32_t replay_from_tokens{0};
+    std::int32_t replay_to_tokens{0};
+    std::vector<std::int32_t> borrowed_ids{};
+    std::int32_t base_logical_page{0};
+    bool required_for_recovery{false};
+};
+
+struct RecoveryPlan {
+    std::int32_t raw_token_match_end_tokens{0};
+    std::int32_t recoverable_prefix_end_tokens{0};
+    std::int32_t execution_resume_tokens{0};
+    bool recovery_state_available{true};
+    TreeNode* protected_recovery_node{nullptr};
+    std::vector<FamilySlice> slices{};
+    MatchResult compat_match{};
+};
+
+struct ResourceDemand {
+    std::int32_t family_index{-1};
+    std::string family_id{};
+    std::int32_t new_units_needed{0};
+    std::int32_t releasable_units{0};
+    std::int32_t borrowed_prefix_units{0};
+    std::string state_cohort_id{};
+};
+
+struct AdmissionRequest {
+    std::string request_id{};
+    std::int32_t device_pages_needed{0};
+    std::int32_t host_pages_needed{0};
+    std::int32_t tokens_this_round{0};
+    std::int32_t first_raw_position_of_op{0};
+    std::int32_t target_raw_tokens_exclusive{0};
+    const RecoveryPlan* recovery_plan{nullptr};
+    const MatchResult* compat_match{nullptr};
+    TreeNode* protected_recovery_node{nullptr};
+    std::int32_t auxiliary_tree_slots_needed{0};
+    bool protect_host_match_node{false};
+    bool fresh_request_table_view{false};
+    bool compute_branching_checkpoint{false};
+    bool refresh_mamba_checkpoint{false};
+    std::vector<ResourceDemand> demands{};
+};
+
+struct AdmissionVerdict {
+    bool admitted{false};
+    std::optional<std::int32_t> mamba_branching_seqlen{};
+    std::optional<std::int32_t> mamba_cow_src_index{};
+    std::vector<TransferPair> cache_transfer_pairs{};
+    std::vector<ResourceDemand> demands{};
+};
+
+struct PrefixMaterializationRequest {
+    const RecoveryPlan* recovery_plan{nullptr};
+    const MatchResult* compat_match{nullptr};
+    bool require_all_pages{false};
+};
+
+struct RequestLocalKVStateRequest {
+    bool create_allocator{false};
+    LocalKVAllocator* allocator{nullptr};
+    std::int32_t initial_tokens{0};
+    std::int32_t acquire_tokens{0};
+};
+
+struct RequestLocalMambaStateRequest {
+    bool create_allocator{false};
+    bool require_allocator{false};
+    LocalMambaAllocator* refresh_checkpoint_allocator{nullptr};
+    std::optional<std::int32_t> checkpoint_raw_position{};
+};
+
+struct DevicePrefixPublicationRequest {
+    const std::vector<std::span<const std::int32_t>>* full_paged_tokens{nullptr};
+    std::unique_ptr<DeviceNodeRef>* device_node_ref{nullptr};
+    LocalKVAllocator* local_kv_allocator{nullptr};
+    LocalMambaAllocator* local_mamba_allocator{nullptr};
+};
+
+struct FinishedRequestPublicationRequest {
+    const std::vector<std::span<const std::int32_t>>* full_paged_tokens{nullptr};
+    const TreeNode* current_device_node{nullptr};
+    LocalKVAllocator* local_kv_allocator{nullptr};
+    LocalMambaAllocator* local_mamba_allocator{nullptr};
+    const std::vector<std::string>* page_hashes{nullptr};
+};
+
+struct DevicePrefixInsertionPlanRequest {
+    const std::vector<std::span<const std::int32_t>>* full_paged_tokens{nullptr};
+    const TreeNode* current_device_node{nullptr};
+};
+
+struct DevicePrefixInsertionRequest {
+    const std::vector<std::span<const std::int32_t>>* full_paged_tokens{nullptr};
+    const TreeNode* current_device_node{nullptr};
+    OwnedPages pages_to_insert{};
+};
+
+struct HostWritebackMaterializationRequest {
+    const std::vector<TreeNode*>* write_diff{nullptr};
+    bool ensure_capacity_before_allocate{false};
+};
+
+struct TreeOwnedRequestStatePublicationRequest {
+    TreeNode* terminal{nullptr};
+    std::unique_ptr<LocalMambaAllocator>* local_mamba_allocator_owner{nullptr};
+};
+
+struct WorkerCompatibilityCommitRequest {
+    ForwardOperationBase* op_base{nullptr};
+    TreeNode* terminal{nullptr};
+    const RecoveryPlan* recovery_plan{nullptr};
+    const MatchResult* compat_match{nullptr};
+    const LocalMambaAllocator* local_mamba_allocator_view{nullptr};
+    MatchResult::PagedCache paged_cache_hit{};
+    std::int32_t first_raw_position_of_op{0};
+    std::int32_t target_raw_tokens_exclusive{0};
+    bool commit_tree_prefix_before_acquire{false};
+    bool import_paged_cache_hit{false};
+    bool populate_prefix_reuse_metadata{false};
+    bool populate_recovery_metadata{false};
+    bool release_request_state_before_acquire{false};
+};
+
+struct StepCommitRequest {
+    std::optional<PrefixMaterializationRequest> materialize_prefix{};
+    std::optional<DevicePrefixPublicationRequest> publish_device_prefix{};
+    std::optional<FinishedRequestPublicationRequest> publish_finished_request{};
+    std::optional<DevicePrefixInsertionPlanRequest> plan_device_prefix_insertion{};
+    std::optional<DevicePrefixInsertionRequest> publish_device_prefix_insertion{};
+    std::optional<HostWritebackMaterializationRequest> materialize_host_writeback{};
+    std::optional<TreeOwnedRequestStatePublicationRequest> publish_tree_owned_request_state{};
+    std::optional<RequestLocalKVStateRequest> request_local_kv{};
+    std::optional<RequestLocalMambaStateRequest> request_local_mamba{};
+    std::optional<WorkerCompatibilityCommitRequest> worker_metadata{};
+};
+
+struct StepCommitResult {
+    bool ok{true};
+    MatchResult match_result{};
+    std::int32_t device_insert_page_count{0};
+    std::unique_ptr<LocalKVAllocator> local_kv_allocator{};
+    std::unique_ptr<LocalMambaAllocator> local_mamba_allocator{};
+    std::vector<TransferPair> cache_transfer_pairs{};
+    std::vector<TreeNode*> mamba_writeback_nodes{};
+};
+
+struct CacheDeviceMemoryDiagnosticsSnapshot {
+    std::unordered_map<std::int32_t, int> tree_device_pages{};
+    std::int32_t free_device_pages{0};
+    // Usable device pages; page id 0 remains reserved/invalid.
+    std::int32_t total_device_pages{0};
+};
+
+struct StatsRequest {
+    std::optional<std::string> request_id{};
+    std::vector<std::string> paged_cache_group_ids{};
+    bool include_device_memory_diagnostics{false};
+};
+
+struct CacheStatsSnapshot {
+    std::size_t available_device_pages{0};
+    std::vector<std::string> paged_cache_group_ids{};
+    std::map<std::string, std::int32_t> paged_cache_total_pages{};
+    std::map<std::string, std::int32_t> paged_cache_available_pages{};
+    std::map<std::string, std::int64_t> paged_cache_failed_alloc_count{};
+    std::map<std::string, std::vector<std::int32_t>> request_paged_cache_page_ids{};
+    std::map<std::string, std::int32_t> request_paged_cache_base_logical_page{};
+    std::optional<CacheDeviceMemoryDiagnosticsSnapshot> device_memory_diagnostics{};
+};
+
+}  // namespace tokenspeed

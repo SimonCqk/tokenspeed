@@ -20,14 +20,24 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <span>
 #include <stdexcept>
+#include <utility>
 #include <variant>
+#include <vector>
 
 #include "core/token_container.h"
 #include "fsm/forward_events.h"
 #include "fsm/forward_states.h"
 
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
+#include "hybrid_prefix_cache_test_peer.h"
+#include "resource/allocator/kv_allocator.h"
+#include "resource/allocator/local_mamba_allocator.h"
 #include "resource/allocator/mamba_chunk_allocator.h"
 #include "resource/allocator/mamba_host_allocator.h"
 #include "scheduler/operations/cache.h"
@@ -36,6 +46,7 @@
 #include "resource/radix_tree/node_range.h"
 #include "resource/allocator/page_allocator.h"
 #include "resource/allocator/req_pool_allocator.h"
+#include "scheduler/operations/forward.h"
 #include "unit_test_helper.h"
 #include "scheduler/types.h"
 
@@ -54,8 +65,8 @@ protected:
         host_alloc_ = std::make_unique<PageAllocator>(kPageSize, kHostPages);
         prefix_cache_ = std::make_unique<KVPrefixCache>(device_alloc_.get(), host_alloc_.get());
         mamba_alloc_ = std::make_unique<MambaChunkAllocator>(kMambaSlots);
-        hybrid_prefix_cache_ =
-            std::make_unique<HybridPrefixCache>(*prefix_cache_, mamba_alloc_.get(), kMambaCacheChunkSize);
+        hybrid_prefix_cache_ = std::make_unique<HybridPrefixCache>(*prefix_cache_, *device_alloc_, mamba_alloc_.get(),
+                                                                   kMambaCacheChunkSize);
     }
 
     std::vector<std::int32_t> CollectPrefixPages(TreeNode* matched_node) {
@@ -63,7 +74,7 @@ protected:
         return DevicePagesFromRoot(matched_node);
     }
 
-    void InsertKVAndMamba(const token_vec_t& tokens) {
+    TreeNode* InsertKVAndMamba(const token_vec_t& tokens) {
         auto match = prefix_cache_->Match(tokens);
         std::int32_t matched_pages = match.device.DepthInPage();
         std::int32_t total_pages = static_cast<std::int32_t>(tokens.size()) / kPageSize;
@@ -74,20 +85,46 @@ protected:
                 prefix_cache_->Insert<ResourceType::Device>(tokens, prefix_pages, device_alloc_->Allocate(new_pages));
             auto slot = mamba_alloc_->Allocate();
             if (slot.has_value()) {
-                hybrid_prefix_cache_->InsertMamba(result.last_node, std::make_unique<MambaSlot>(std::move(*slot)));
+                HybridPrefixCacheTestPeer::InsertMamba(*hybrid_prefix_cache_, result.last_node,
+                                                       std::make_unique<MambaSlot>(std::move(*slot)));
             }
+            return result.last_node;
         }
+        return match.device.last_node;
     }
 
-    void InsertKVOnly(const token_vec_t& tokens) {
+    TreeNode* InsertKVOnly(const token_vec_t& tokens) {
         auto match = prefix_cache_->Match(tokens);
         std::int32_t matched_pages = match.device.DepthInPage();
         std::int32_t total_pages = static_cast<std::int32_t>(tokens.size()) / kPageSize;
         std::int32_t new_pages = total_pages - matched_pages;
         if (new_pages > 0) {
             auto prefix_pages = CollectPrefixPages(match.device.last_node);
-            prefix_cache_->Insert<ResourceType::Device>(tokens, prefix_pages, device_alloc_->Allocate(new_pages));
+            auto result =
+                prefix_cache_->Insert<ResourceType::Device>(tokens, prefix_pages, device_alloc_->Allocate(new_pages));
+            return result.last_node;
         }
+        return match.device.last_node;
+    }
+
+    std::vector<std::span<const std::int32_t>> PagedTokenSpans(const token_vec_t& tokens) const {
+        std::vector<std::span<const std::int32_t>> pages;
+        const auto page_count = static_cast<std::int32_t>(tokens.size()) / kPageSize;
+        pages.reserve(static_cast<std::size_t>(page_count));
+        for (std::int32_t page = 0; page < page_count; ++page) {
+            pages.emplace_back(tokens.data() + page * kPageSize, static_cast<std::size_t>(kPageSize));
+        }
+        return pages;
+    }
+
+    std::vector<TreeNode*> FillMambaSlots() {
+        std::vector<TreeNode*> nodes;
+        nodes.reserve(kMambaSlots);
+        for (std::int32_t i = 0; i < kMambaSlots; ++i) {
+            TreeNode* node = InsertKVAndMamba(MakeAlignedTokens(1, kPageSize, /*start=*/1000 + i * 10));
+            nodes.push_back(node);
+        }
+        return nodes;
     }
 
     std::unique_ptr<PageAllocator> device_alloc_;
@@ -101,8 +138,33 @@ TEST_F(MambaCacheTest, MatchWithoutMambaTruncatesToRoot) {
     auto tokens = MakeAlignedTokens(3, kPageSize);
     InsertKVOnly(tokens);
 
-    auto match = hybrid_prefix_cache_->Match(tokens);
+    auto match = hybrid_prefix_cache_->MatchPrefix(tokens).compat_match;
     EXPECT_EQ(match.device.DepthInPage(), 0);
+    EXPECT_EQ(match.mamba_cow_src_index, -1);
+    EXPECT_EQ(match.mamba_branching_seqlen, 4);
+}
+
+TEST(HybridPrefixCacheMambaRecoverablePrefixTest, HostOnlyKVWithoutMambaDoesNotProduceLoadBackPrefix) {
+    static constexpr std::int32_t kPageSize = 2;
+    PageAllocator device_alloc{kPageSize, 4};
+    PageAllocator host_alloc{kPageSize, 16};
+    KVPrefixCache prefix_cache{&device_alloc, &host_alloc, false};
+    MambaChunkAllocator mamba_alloc{2};
+    HybridPrefixCache hybrid_prefix_cache{prefix_cache, device_alloc, &mamba_alloc,
+                                          /*mamba_cache_chunk_size=*/4};
+
+    auto tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize);
+    prefix_cache.Insert<ResourceType::Host>(tokens, /*prefix_pages=*/{}, host_alloc.Allocate(/*num_pages=*/2));
+    auto raw_match = prefix_cache.Match(tokens);
+    ASSERT_EQ(raw_match.device.DepthInPage(), 0);
+    ASSERT_EQ(raw_match.host.DepthInPage(), 2);
+
+    auto match = hybrid_prefix_cache.MatchPrefix(tokens).compat_match;
+
+    EXPECT_EQ(match.device.DepthInPage(), 0);
+    EXPECT_EQ(match.host.DepthInPage(), 0);
+    EXPECT_TRUE(match.NodesWithout<ResourceType::Device>().empty())
+        << "host-only KV without tree-owned Mamba state must not plan LoadBack";
     EXPECT_EQ(match.mamba_cow_src_index, -1);
     EXPECT_EQ(match.mamba_branching_seqlen, 4);
 }
@@ -111,7 +173,7 @@ TEST_F(MambaCacheTest, MatchWithFullMambaKeepsDepth) {
     auto tokens = MakeAlignedTokens(3, kPageSize);
     InsertKVAndMamba(tokens);
 
-    auto match = hybrid_prefix_cache_->Match(tokens);
+    auto match = hybrid_prefix_cache_->MatchPrefix(tokens).compat_match;
     EXPECT_EQ(match.device.DepthInPage(), 3);
     EXPECT_NE(match.mamba_cow_src_index, -1);
     EXPECT_EQ(match.mamba_branching_seqlen, -1);
@@ -124,7 +186,7 @@ TEST_F(MambaCacheTest, MatchWithPartialMambaTruncatesToMambaDepth) {
     auto tokens4 = MakeAlignedTokens(4, kPageSize);
     InsertKVOnly(tokens4);
 
-    auto match = hybrid_prefix_cache_->Match(tokens4);
+    auto match = hybrid_prefix_cache_->MatchPrefix(tokens4).compat_match;
     EXPECT_EQ(match.device.DepthInPage(), 2);
     EXPECT_NE(match.mamba_cow_src_index, -1);
     EXPECT_NE(match.mamba_branching_seqlen, -1);
@@ -140,7 +202,7 @@ TEST_F(MambaCacheTest, SplitPrefixWithoutMambaStillRequestsBranchingSnapshot) {
     diverged[2 * kPageSize] = 1001;
     diverged[2 * kPageSize + 1] = 1002;
 
-    auto match = hybrid_prefix_cache_->Match(diverged);
+    auto match = hybrid_prefix_cache_->MatchPrefix(diverged).compat_match;
     EXPECT_EQ(match.device.DepthInPage(), 0);
     EXPECT_EQ(match.mamba_cow_src_index, -1);
     EXPECT_EQ(match.mamba_branching_seqlen, 4);
@@ -153,7 +215,7 @@ TEST_F(MambaCacheTest, BranchingSeqlenIsSuppressedWhenAlignedInsideMambaPrefix) 
     auto tokens3 = MakeAlignedTokens(3, kPageSize);
     InsertKVOnly(tokens3);
 
-    auto match = hybrid_prefix_cache_->Match(tokens3);
+    auto match = hybrid_prefix_cache_->MatchPrefix(tokens3).compat_match;
     EXPECT_EQ(match.device.DepthInPage(), 2);
     EXPECT_NE(match.mamba_cow_src_index, -1);
     EXPECT_EQ(match.mamba_branching_seqlen, -1);
@@ -180,11 +242,363 @@ TEST_F(MambaCacheTest, FindLastMambaNodeWalksUp) {
 
     auto match = prefix_cache_->Match(tokens4);
     TreeNode* terminal = match.device.last_node;
-    TreeNode* mamba_node = hybrid_prefix_cache_->FindLastMambaNode(terminal);
+    TreeNode* mamba_node = HybridPrefixCacheTestPeer::FindLastMambaNode(*hybrid_prefix_cache_, terminal);
 
     ASSERT_NE(mamba_node, nullptr);
     EXPECT_TRUE(mamba_node->HasMamba());
     EXPECT_EQ(mamba_node->DepthInPage(kPageSize), 2);
+}
+
+TEST_F(MambaCacheTest, MatchPrefixStateRecoverySetsCowSourceAndProtection) {
+    auto tokens = MakeAlignedTokens(2, kPageSize);
+    TreeNode* recovery_source = InsertKVAndMamba(tokens);
+    ASSERT_NE(recovery_source, nullptr);
+    ASSERT_TRUE(recovery_source->HasMamba());
+
+    RecoveryPlan recovery = hybrid_prefix_cache_->MatchPrefix(tokens, MatchIntent::StateRecovery);
+
+    EXPECT_TRUE(recovery.recovery_state_available);
+    EXPECT_EQ(recovery.protected_recovery_node, recovery_source);
+    EXPECT_EQ(recovery.compat_match.mamba_cow_src_index, recovery_source->MambaSlotIndex());
+}
+
+TEST_F(MambaCacheTest, MatchPrefixStateRecoveryReportsMissingMambaState) {
+    auto tokens = MakeAlignedTokens(2, kPageSize);
+    InsertKVOnly(tokens);
+
+    RecoveryPlan recovery = hybrid_prefix_cache_->MatchPrefix(tokens, MatchIntent::StateRecovery);
+
+    EXPECT_FALSE(recovery.recovery_state_available);
+    EXPECT_EQ(recovery.protected_recovery_node, nullptr);
+    EXPECT_EQ(recovery.compat_match.mamba_cow_src_index, -1);
+}
+
+TEST(HybridPrefixCacheRecoveryPlanTest, StateRecoverySucceedsWithoutMambaAdjunct) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/4);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, /*allocator=*/nullptr,
+                                          /*mamba_cache_chunk_size=*/4);
+    RecoveryPlan recovery = hybrid_prefix_cache.MatchPrefix(token_vec_t{}, MatchIntent::StateRecovery);
+
+    EXPECT_TRUE(recovery.recovery_state_available);
+    EXPECT_EQ(recovery.protected_recovery_node, nullptr);
+    EXPECT_EQ(recovery.compat_match.mamba_cow_src_index, -1);
+}
+
+TEST_F(MambaCacheTest, WorkerMetadataReceivesPrefixRecoveryAndRequestLocalInfo) {
+    MatchResult prefix_match{};
+    prefix_match.mamba_cow_src_index = 7;
+    prefix_match.mamba_branching_seqlen = 12;
+    ForwardOperationBase prefix_op{};
+
+    hybrid_prefix_cache_->StepCommit({
+        .worker_metadata =
+            WorkerCompatibilityCommitRequest{
+                .op_base = &prefix_op,
+                .compat_match = &prefix_match,
+                .populate_prefix_reuse_metadata = true,
+            },
+    });
+
+    EXPECT_EQ(prefix_op.mamba_cow_src_idx, 7);
+    EXPECT_EQ(prefix_op.mamba_branching_seqlen, 12);
+
+    MatchResult recovery_match{};
+    recovery_match.mamba_cow_src_index = 5;
+    recovery_match.mamba_branching_seqlen = 12;
+    ForwardOperationBase recovery_op{};
+    recovery_op.mamba_branching_seqlen = 99;
+
+    hybrid_prefix_cache_->StepCommit({
+        .worker_metadata =
+            WorkerCompatibilityCommitRequest{
+                .op_base = &recovery_op,
+                .compat_match = &recovery_match,
+                .populate_recovery_metadata = true,
+            },
+    });
+
+    EXPECT_EQ(recovery_op.mamba_cow_src_idx, 5);
+    EXPECT_EQ(recovery_op.mamba_branching_seqlen, 99);
+
+    LocalMambaAllocator local_mamba(mamba_alloc_.get());
+    ASSERT_TRUE(local_mamba.AllocateWorking());
+    ASSERT_TRUE(local_mamba.AllocateCheckpoint());
+    ForwardOperationBase request_local_op{};
+
+    hybrid_prefix_cache_->StepCommit({
+        .worker_metadata =
+            WorkerCompatibilityCommitRequest{
+                .op_base = &request_local_op,
+                .local_mamba_allocator_view = &local_mamba,
+            },
+    });
+
+    EXPECT_EQ(request_local_op.mamba_working_idx, local_mamba.WorkingIndex());
+    EXPECT_EQ(request_local_op.mamba_checkpoint_dst_idx, local_mamba.CheckpointIndex());
+    EXPECT_EQ(request_local_op.mamba_cow_src_idx, -1);
+    EXPECT_EQ(request_local_op.mamba_branching_seqlen, -1);
+
+    ForwardOperationBase defaults_op{};
+
+    hybrid_prefix_cache_->StepCommit({
+        .worker_metadata =
+            WorkerCompatibilityCommitRequest{
+                .op_base = &defaults_op,
+            },
+    });
+
+    EXPECT_EQ(defaults_op.mamba_working_idx, -1);
+    EXPECT_EQ(defaults_op.mamba_checkpoint_dst_idx, -1);
+}
+
+TEST(HybridPrefixCacheMambaCompatibilityFieldsTest, WorkerMetadataLeavesDefaultsWithoutMambaAdjunct) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/4);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, /*allocator=*/nullptr,
+                                          /*mamba_cache_chunk_size=*/4);
+    MatchResult match{};
+    match.mamba_cow_src_index = 3;
+    match.mamba_branching_seqlen = 8;
+    MambaChunkAllocator mamba_alloc(/*num_slots=*/2);
+    LocalMambaAllocator local_mamba(&mamba_alloc);
+    ASSERT_TRUE(local_mamba.AllocateWorking());
+    ASSERT_TRUE(local_mamba.AllocateCheckpoint());
+    ForwardOperationBase op{};
+
+    hybrid_prefix_cache.StepCommit({
+        .worker_metadata =
+            WorkerCompatibilityCommitRequest{
+                .op_base = &op,
+                .compat_match = &match,
+                .local_mamba_allocator_view = &local_mamba,
+                .populate_prefix_reuse_metadata = true,
+            },
+    });
+
+    EXPECT_EQ(op.mamba_working_idx, -1);
+    EXPECT_EQ(op.mamba_checkpoint_dst_idx, -1);
+    EXPECT_EQ(op.mamba_cow_src_idx, -1);
+    EXPECT_EQ(op.mamba_branching_seqlen, -1);
+}
+
+TEST(HybridPrefixCacheKVAllocationTest, PrefillFirstChunkCreatesRequestLocalStateAndPreservesAccounting) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/5);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    MambaChunkAllocator mamba_alloc(/*num_slots=*/4);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, &mamba_alloc, /*mamba_cache_chunk_size=*/4);
+
+    auto result = hybrid_prefix_cache.StepCommit({
+        .request_local_kv =
+            RequestLocalKVStateRequest{
+                .create_allocator = true,
+                .initial_tokens = 1,
+                .acquire_tokens = 2,
+            },
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .create_allocator = true,
+            },
+    });
+    auto local_kv = std::move(result.local_kv_allocator);
+    auto local_mamba = std::move(result.local_mamba_allocator);
+
+    ASSERT_NE(local_kv, nullptr);
+    EXPECT_EQ(local_kv->Pages().size(), 2u);
+    EXPECT_EQ(local_kv->TailPageAvailableTokens(), 1);
+    EXPECT_EQ(device_alloc.AvailablePages(), 2);
+    ASSERT_NE(local_mamba, nullptr);
+    EXPECT_TRUE(local_mamba->HasWorking());
+    EXPECT_TRUE(local_mamba->HasCheckpoint());
+    EXPECT_EQ(mamba_alloc.AvailableSlots(), 2);
+
+    local_kv.reset();
+    local_mamba.reset();
+    EXPECT_EQ(device_alloc.AvailablePages(), 4);
+    EXPECT_EQ(mamba_alloc.AvailableSlots(), 4);
+}
+
+TEST(HybridPrefixCacheKVAllocationTest, PrefillFirstChunkAllocationFailurePreservesPageAccounting) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/2);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, /*allocator=*/nullptr,
+                                          /*mamba_cache_chunk_size=*/4);
+
+    EXPECT_THROW((void)hybrid_prefix_cache.StepCommit({
+                     .request_local_kv =
+                         RequestLocalKVStateRequest{
+                             .create_allocator = true,
+                             .initial_tokens = 2,
+                             .acquire_tokens = 1,
+                         },
+                 }),
+                 std::runtime_error);
+    EXPECT_EQ(device_alloc.AvailablePages(), 1);
+}
+
+TEST(HybridPrefixCacheKVAllocationTest, PrefillContinuationRefreshesCheckpointWithoutLeakingPages) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/5);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    MambaChunkAllocator mamba_alloc(/*num_slots=*/4);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, &mamba_alloc, /*mamba_cache_chunk_size=*/4);
+
+    {
+        LocalKVAllocator local_kv(&device_alloc, /*num_tokens=*/1);
+        LocalKVAllocator* original_allocator = &local_kv;
+        const std::vector<std::int32_t> original_pages = local_kv.Pages();
+        ASSERT_EQ(original_pages.size(), 1u);
+        ASSERT_EQ(local_kv.TailPageAvailableTokens(), 1);
+        LocalMambaAllocator local_mamba(&mamba_alloc);
+        ASSERT_TRUE(local_mamba.AllocateWorking());
+        ASSERT_TRUE(local_mamba.AllocateCheckpoint());
+        const std::int32_t original_checkpoint = local_mamba.CheckpointIndex();
+
+        (void)hybrid_prefix_cache.StepCommit({
+            .request_local_kv =
+                RequestLocalKVStateRequest{
+                    .allocator = &local_kv,
+                    .acquire_tokens = 2,
+                },
+            .request_local_mamba =
+                RequestLocalMambaStateRequest{
+                    .refresh_checkpoint_allocator = &local_mamba,
+                },
+        });
+
+        EXPECT_EQ(&local_kv, original_allocator);
+        ASSERT_EQ(local_kv.Pages().size(), 2u);
+        EXPECT_EQ(local_kv.Pages().front(), original_pages.front());
+        EXPECT_EQ(local_kv.TailPageAvailableTokens(), 1);
+        EXPECT_EQ(device_alloc.AvailablePages(), 2);
+        EXPECT_TRUE(local_mamba.HasWorking());
+        EXPECT_TRUE(local_mamba.HasCheckpoint());
+        EXPECT_NE(local_mamba.CheckpointIndex(), original_checkpoint);
+        EXPECT_EQ(mamba_alloc.AvailableSlots(), 2);
+    }
+
+    EXPECT_EQ(device_alloc.AvailablePages(), 4);
+    EXPECT_EQ(mamba_alloc.AvailableSlots(), 4);
+}
+
+TEST(HybridPrefixCacheKVAllocationTest, DecodeRetractFailureReleasesPartialResources) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/2);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, /*allocator=*/nullptr,
+                                          /*mamba_cache_chunk_size=*/4);
+
+    {
+        LocalKVAllocator local_kv(&device_alloc, /*num_tokens=*/1);
+        const std::vector<std::int32_t> original_pages = local_kv.Pages();
+        ASSERT_EQ(original_pages.size(), 1u);
+        ASSERT_EQ(local_kv.TailPageAvailableTokens(), 1);
+        ASSERT_EQ(device_alloc.AvailablePages(), 0);
+
+        EXPECT_THROW((void)hybrid_prefix_cache.StepCommit({
+                         .request_local_kv =
+                             RequestLocalKVStateRequest{
+                                 .allocator = &local_kv,
+                                 .acquire_tokens = 3,
+                             },
+                     }),
+                     std::runtime_error);
+
+        EXPECT_EQ(local_kv.Pages(), original_pages);
+        EXPECT_EQ(local_kv.TailPageAvailableTokens(), 1);
+        EXPECT_EQ(device_alloc.AvailablePages(), 0);
+    }
+
+    EXPECT_EQ(device_alloc.AvailablePages(), 1);
+
+    PageAllocator mamba_device_alloc(/*page_size=*/2, /*total_pages=*/4);
+    PageAllocator mamba_host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache mamba_prefix_cache(&mamba_device_alloc, &mamba_host_alloc);
+    MambaChunkAllocator mamba_alloc(/*num_slots=*/1);
+    HybridPrefixCache mamba_hybrid(mamba_prefix_cache, mamba_device_alloc, &mamba_alloc,
+                                   /*mamba_cache_chunk_size=*/4);
+    EXPECT_THROW((void)mamba_hybrid.StepCommit({
+                     .request_local_mamba =
+                         RequestLocalMambaStateRequest{
+                             .create_allocator = true,
+                             .require_allocator = true,
+                         },
+                 }),
+                 std::logic_error);
+    EXPECT_EQ(mamba_alloc.AvailableSlots(), 1);
+}
+
+TEST(HybridPrefixCacheMambaAllocationTest, RequestLocalMambaAllocationFailureReturnsNullAndReleasesPartialSlot) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/4);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    MambaChunkAllocator mamba_alloc(/*num_slots=*/1);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, &mamba_alloc, /*mamba_cache_chunk_size=*/4);
+
+    auto mamba_result = hybrid_prefix_cache.StepCommit({
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .create_allocator = true,
+            },
+    });
+    auto local_mamba = std::move(mamba_result.local_mamba_allocator);
+
+    EXPECT_EQ(local_mamba, nullptr);
+    EXPECT_EQ(mamba_alloc.AvailableSlots(), 1);
+}
+
+TEST(HybridPrefixCacheMambaAllocationTest, RequestLocalAllocationsReturnNullWithoutMambaAdjunct) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/4);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, /*allocator=*/nullptr,
+                                          /*mamba_cache_chunk_size=*/4);
+
+    auto prefill_result = hybrid_prefix_cache.StepCommit({
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .create_allocator = true,
+            },
+    });
+    auto retracted_result = hybrid_prefix_cache.StepCommit({
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .create_allocator = true,
+                .require_allocator = true,
+            },
+    });
+
+    EXPECT_EQ(prefill_result.local_mamba_allocator, nullptr);
+    EXPECT_EQ(retracted_result.local_mamba_allocator, nullptr);
+}
+
+TEST(HybridPrefixCacheMambaAllocationTest, PrefillContinuationLeavesMambaStateUntouchedWithoutAdjunct) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/4);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, /*allocator=*/nullptr,
+                                          /*mamba_cache_chunk_size=*/4);
+    MambaChunkAllocator mamba_alloc(/*num_slots=*/2);
+    LocalMambaAllocator local_mamba(&mamba_alloc);
+    ASSERT_TRUE(local_mamba.AllocateWorking());
+
+    (void)hybrid_prefix_cache.StepCommit({
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .refresh_checkpoint_allocator = &local_mamba,
+            },
+    });
+    (void)hybrid_prefix_cache.StepCommit({
+        .request_local_mamba = RequestLocalMambaStateRequest{},
+    });
+
+    EXPECT_TRUE(local_mamba.HasWorking());
+    EXPECT_FALSE(local_mamba.HasCheckpoint());
+    EXPECT_EQ(mamba_alloc.AvailableSlots(), 1);
 }
 
 TEST_F(MambaCacheTest, KVEvictionTriggersMambaEviction) {
@@ -194,8 +608,6 @@ TEST_F(MambaCacheTest, KVEvictionTriggersMambaEviction) {
     auto match = prefix_cache_->Match(tokens);
     TreeNode* node = match.device.last_node;
     EXPECT_TRUE(node->HasMamba());
-
-    prefix_cache_->GetDeviceManager().SetEvictionCallback([this](TreeNode* n) { hybrid_prefix_cache_->OnKVEvict(n); });
 
     prefix_cache_->EnsureCapacityByEvict<ResourceType::Device>(kDevicePages);
 
@@ -217,7 +629,7 @@ protected:
         prefix_cache_ = std::make_unique<KVPrefixCache>(device_alloc_.get(), host_alloc_.get());
         mamba_alloc_ = std::make_unique<MambaChunkAllocator>(kMambaSlots);
         mamba_host_alloc_ = std::make_unique<MambaHostAllocator>(kMambaHostSlots);
-        hybrid_prefix_cache_ = std::make_unique<HybridPrefixCache>(*prefix_cache_, mamba_alloc_.get(),
+        hybrid_prefix_cache_ = std::make_unique<HybridPrefixCache>(*prefix_cache_, *device_alloc_, mamba_alloc_.get(),
                                                                    kMambaCacheChunkSize, mamba_host_alloc_.get());
     }
 
@@ -243,7 +655,7 @@ TEST_F(MambaL2CacheTest, HostKVRequiresHostMambaForHybridMatch) {
     ASSERT_TRUE(device_slot.has_value());
     node->AttachMamba(std::make_unique<MambaSlot>(std::move(*device_slot)));
 
-    auto mismatch = hybrid_prefix_cache_->Match(tokens);
+    auto mismatch = hybrid_prefix_cache_->MatchPrefix(tokens).compat_match;
     EXPECT_EQ(mismatch.host.DepthInPage(), 0);
     EXPECT_EQ(mismatch.device.DepthInPage(), 0);
 
@@ -253,7 +665,7 @@ TEST_F(MambaL2CacheTest, HostKVRequiresHostMambaForHybridMatch) {
     const std::int32_t host_idx = host_slot->Index();
     node->AttachMambaHost(std::make_unique<MambaSlot>(std::move(*host_slot)));
 
-    auto match = hybrid_prefix_cache_->Match(tokens);
+    auto match = hybrid_prefix_cache_->MatchPrefix(tokens).compat_match;
     EXPECT_EQ(match.host.DepthInPage(), 3);
     EXPECT_EQ(match.device.DepthInPage(), 0);
     EXPECT_EQ(match.mamba_host_src_index, host_idx);
@@ -276,36 +688,12 @@ TEST_F(MambaL2CacheTest, DeeperHostMambaMatchTakesPriorityOverShallowDeviceMamba
     const std::int32_t host_idx = host_slot->Index();
     host_node->AttachMambaHost(std::make_unique<MambaSlot>(std::move(*host_slot)));
 
-    auto match = hybrid_prefix_cache_->Match(tokens4);
+    auto match = hybrid_prefix_cache_->MatchPrefix(tokens4).compat_match;
 
     EXPECT_EQ(match.device.DepthInPage(), 2);
     EXPECT_EQ(match.host.DepthInPage(), 4);
     EXPECT_EQ(match.mamba_host_src_index, host_idx);
     EXPECT_EQ(match.mamba_cow_src_index, -1) << "deeper host hit must trigger Mamba L2 loadback";
-}
-
-TEST_F(MambaL2CacheTest, PrefillFirstChunkRequiresCheckpointSlot) {
-    MambaChunkAllocator one_slot_mamba_alloc(1);
-    ReqPoolAllocator req_pool_alloc(1);
-    auto tokens = MakeAlignedTokens(1, kPageSize);
-    TokenContainer token_container(tokens);
-    auto match = prefix_cache_->Match(token_container.GetFullPagedTokens(kPageSize, true));
-
-    fsm::SchedulePrefillFirstChunkEvent event{
-        static_cast<std::int32_t>(tokens.size()),
-        0,
-        device_alloc_.get(),
-        &req_pool_alloc,
-        match,
-        Role::kP,
-        prefix_cache_.get(),
-        false,
-        {},
-        hybrid_prefix_cache_.get(),
-        &one_slot_mamba_alloc,
-    };
-
-    EXPECT_THROW((void)event(fsm::Submitted{&token_container, kPageSize}), std::logic_error);
 }
 
 TEST_F(MambaL2CacheTest, PrepareMambaLoadBackAllocatesDeviceSlotAndTransferPair) {
@@ -316,7 +704,7 @@ TEST_F(MambaL2CacheTest, PrepareMambaLoadBackAllocatesDeviceSlotAndTransferPair)
     const std::int32_t host_idx = host_slot->Index();
     node->AttachMambaHost(std::make_unique<MambaSlot>(std::move(*host_slot)));
 
-    auto transfers = hybrid_prefix_cache_->PrepareMambaDeviceLoadBack({node});
+    auto transfers = HybridPrefixCacheTestPeer::PrepareMambaDeviceLoadBack(*hybrid_prefix_cache_, {node});
 
     ASSERT_TRUE(node->HasMamba());
     ASSERT_EQ(transfers.size(), 1u);
@@ -341,8 +729,9 @@ TEST_F(MambaL2CacheTest, ExactWriteBackAckDoesNotPublishUnackedAncestor) {
     ASSERT_TRUE(descendant_slot.has_value());
     descendant->AttachMamba(std::make_unique<MambaSlot>(std::move(*descendant_slot)));
 
-    auto ancestor_transfers = hybrid_prefix_cache_->PrepareMambaHostWriteBack({ancestor});
-    auto descendant_transfers = hybrid_prefix_cache_->PrepareMambaHostWriteBack({descendant});
+    auto ancestor_transfers = HybridPrefixCacheTestPeer::PrepareMambaHostWriteBack(*hybrid_prefix_cache_, {ancestor});
+    auto descendant_transfers =
+        HybridPrefixCacheTestPeer::PrepareMambaHostWriteBack(*hybrid_prefix_cache_, {descendant});
     ASSERT_EQ(ancestor_transfers.size(), 1u);
     ASSERT_EQ(descendant_transfers.size(), 1u);
 
@@ -366,7 +755,7 @@ TEST_F(MambaL2CacheTest, PrepareMambaWriteBackPublishesHostSlotOnlyAfterAck) {
     const std::int32_t device_idx = device_slot->Index();
     node->AttachMamba(std::make_unique<MambaSlot>(std::move(*device_slot)));
 
-    auto transfers = hybrid_prefix_cache_->PrepareMambaHostWriteBack({node});
+    auto transfers = HybridPrefixCacheTestPeer::PrepareMambaHostWriteBack(*hybrid_prefix_cache_, {node});
 
     ASSERT_EQ(transfers.size(), 1u);
     EXPECT_EQ(transfers[0].kind, CacheKind::kMamba);
@@ -374,7 +763,7 @@ TEST_F(MambaL2CacheTest, PrepareMambaWriteBackPublishesHostSlotOnlyAfterAck) {
     const std::int32_t host_idx = transfers[0].dst;
     EXPECT_FALSE(node->HasMambaOnHost()) << "host mamba must remain invisible until writeback ack";
 
-    auto pending_match = hybrid_prefix_cache_->Match(tokens);
+    auto pending_match = hybrid_prefix_cache_->MatchPrefix(tokens).compat_match;
     EXPECT_EQ(pending_match.host.DepthInPage(), 0);
 
     hybrid_prefix_cache_->OnMambaHostWriteBackDone(node);
@@ -382,7 +771,7 @@ TEST_F(MambaL2CacheTest, PrepareMambaWriteBackPublishesHostSlotOnlyAfterAck) {
     ASSERT_TRUE(node->HasMambaOnHost());
     EXPECT_EQ(node->MambaHostSlotIndex(), host_idx);
     EXPECT_FALSE(node->HasMamba()) << "idle device mamba copy should demote once host writeback is acknowledged";
-    auto host_match = hybrid_prefix_cache_->Match(tokens);
+    auto host_match = hybrid_prefix_cache_->MatchPrefix(tokens).compat_match;
     EXPECT_EQ(host_match.host.DepthInPage(), 2);
     EXPECT_EQ(host_match.mamba_host_src_index, host_idx);
     EXPECT_EQ(host_match.mamba_cow_src_index, -1);
@@ -398,7 +787,7 @@ TEST_F(MambaL2CacheTest, HostWriteBackDemotesAfterDeviceRefUnlock) {
     ASSERT_TRUE(device_slot.has_value());
     node->AttachMamba(std::make_unique<MambaSlot>(std::move(*device_slot)));
 
-    auto transfers = hybrid_prefix_cache_->PrepareMambaHostWriteBack({node});
+    auto transfers = HybridPrefixCacheTestPeer::PrepareMambaHostWriteBack(*hybrid_prefix_cache_, {node});
     ASSERT_EQ(transfers.size(), 1u);
 
     {
@@ -441,6 +830,372 @@ TEST_F(MambaL2CacheTest, WriteBackDoneDropsDeviceMambaWhenKVChildKeepsDeviceNode
     EXPECT_TRUE(node->OnDevice()) << "KV device node is kept because a child still uses the device tier";
     EXPECT_FALSE(node->HasMamba()) << "Mamba device state must still demote to host after writeback";
     EXPECT_TRUE(node->HasMambaOnHost());
+}
+
+TEST(HybridPrefixCacheEvictionCallbackTest, KVOnlyEvictionIsNoOpCompatible) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/4);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, /*allocator=*/nullptr,
+                                          /*mamba_cache_chunk_size=*/4);
+
+    auto tokens = MakeAlignedTokens(/*num_pages=*/1, /*page_size=*/2);
+    auto insert_result =
+        prefix_cache.Insert<ResourceType::Device>(tokens, /*prefix_pages=*/{}, device_alloc.Allocate(1));
+    ASSERT_NE(insert_result.last_node, nullptr);
+    const std::int32_t pages_before_evict = device_alloc.AvailablePages();
+    ASSERT_LT(pages_before_evict, device_alloc.TotalPages());
+
+    EXPECT_TRUE(prefix_cache.EnsureCapacityByEvict<ResourceType::Device>(pages_before_evict + 1));
+    EXPECT_GT(device_alloc.AvailablePages(), pages_before_evict);
+}
+
+TEST(HybridPrefixCacheEvictionCallbackTest, DestroyingWrapperClearsKVEvictionCallback) {
+    PageAllocator device_alloc(/*page_size=*/2, /*total_pages=*/4);
+    PageAllocator host_alloc(/*page_size=*/2, /*total_pages=*/0);
+    MambaChunkAllocator mamba_alloc(/*num_slots=*/1);
+    KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
+
+    TreeNode* node = nullptr;
+    {
+        HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, &mamba_alloc, /*mamba_cache_chunk_size=*/4);
+
+        auto tokens = MakeAlignedTokens(/*num_pages=*/1, /*page_size=*/2);
+        auto insert_result =
+            prefix_cache.Insert<ResourceType::Device>(tokens, /*prefix_pages=*/{}, device_alloc.Allocate(1));
+        node = insert_result.last_node;
+        ASSERT_NE(node, nullptr);
+
+        auto slot = mamba_alloc.Allocate();
+        ASSERT_TRUE(slot.has_value());
+        HybridPrefixCacheTestPeer::InsertMamba(hybrid_prefix_cache, node,
+                                               std::make_unique<MambaSlot>(std::move(*slot)));
+        ASSERT_TRUE(node->HasMamba());
+        ASSERT_EQ(mamba_alloc.AvailableSlots(), 0);
+    }
+
+    ASSERT_TRUE(node->HasMamba());
+    auto evicted = prefix_cache.GetDeviceManager().Evict(/*num_pages=*/1);
+
+    ASSERT_EQ(evicted.size(), 1);
+    EXPECT_EQ(evicted.front(), node);
+    EXPECT_TRUE(node->HasMamba());
+    EXPECT_EQ(mamba_alloc.AvailableSlots(), 0);
+}
+
+TEST_F(MambaCacheTest, StepCommitFinishStateInsertsKvPagesHashesAndMamba) {
+    auto tokens = MakeAlignedTokens(3, kPageSize);
+    auto page_hashes = MakePageHashes(/*num_pages=*/3);
+    TreeNode* root = prefix_cache_->Match(token_vec_t{}).device.last_node;
+
+    LocalKVAllocator local_kv(device_alloc_.get(), static_cast<std::int32_t>(tokens.size()));
+    LocalMambaAllocator local_mamba(mamba_alloc_.get());
+    ASSERT_TRUE(local_mamba.AllocateWorking());
+    const std::int32_t working_index = local_mamba.WorkingIndex();
+    ASSERT_TRUE(local_mamba.AllocateCheckpoint());
+    const std::int32_t checkpoint_index = local_mamba.CheckpointIndex();
+
+    const auto full_pages = PagedTokenSpans(tokens);
+    StepCommitRequest request{
+        .publish_finished_request =
+            FinishedRequestPublicationRequest{
+                .full_paged_tokens = &full_pages,
+                .current_device_node = root,
+                .local_kv_allocator = &local_kv,
+                .local_mamba_allocator = &local_mamba,
+                .page_hashes = &page_hashes,
+            },
+    };
+    MatchResult match = hybrid_prefix_cache_->StepCommit(std::move(request)).match_result;
+
+    EXPECT_EQ(match.device.DepthInPage(), 3);
+    TreeNode* terminal = match.device.last_node;
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_TRUE(terminal->HasMamba());
+    EXPECT_EQ(terminal->MambaSlotIndex(), checkpoint_index);
+    EXPECT_EQ(terminal->PageHashes(), page_hashes);
+    EXPECT_TRUE(local_kv.Pages().empty());
+    EXPECT_FALSE(local_mamba.HasCheckpoint());
+    EXPECT_TRUE(local_mamba.HasWorking());
+    EXPECT_EQ(local_mamba.WorkingIndex(), working_index);
+}
+
+TEST_F(MambaCacheTest, StepCommitFinishStateSkipsPublicationWhenNoNewPages) {
+    auto tokens = MakeAlignedTokens(2, kPageSize);
+    TreeNode* terminal = InsertKVOnly(tokens);
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_FALSE(terminal->HasMamba());
+
+    LocalKVAllocator local_kv(device_alloc_.get(), /*num_tokens=*/0);
+    LocalMambaAllocator local_mamba(mamba_alloc_.get());
+    ASSERT_TRUE(local_mamba.AllocateWorking());
+    ASSERT_TRUE(local_mamba.AllocateCheckpoint());
+    const std::int32_t checkpoint_index = local_mamba.CheckpointIndex();
+
+    const auto full_pages = PagedTokenSpans(tokens);
+    const auto page_hashes = MakePageHashes(/*num_pages=*/2);
+    StepCommitRequest request{
+        .publish_finished_request =
+            FinishedRequestPublicationRequest{
+                .full_paged_tokens = &full_pages,
+                .current_device_node = terminal,
+                .local_kv_allocator = &local_kv,
+                .local_mamba_allocator = &local_mamba,
+                .page_hashes = &page_hashes,
+            },
+    };
+    MatchResult match = hybrid_prefix_cache_->StepCommit(std::move(request)).match_result;
+
+    EXPECT_EQ(match.device.DepthInPage(), 2);
+    EXPECT_EQ(match.device.last_node, terminal);
+    EXPECT_FALSE(terminal->HasMamba());
+    EXPECT_TRUE(local_mamba.HasCheckpoint());
+    EXPECT_EQ(local_mamba.CheckpointIndex(), checkpoint_index);
+    EXPECT_TRUE(local_kv.Pages().empty());
+}
+
+TEST_F(MambaCacheTest, StepCommitRetractPublicationInsertsKvAndReturnsRawStateRecoveryMatch) {
+    auto tokens = MakeAlignedTokens(3, kPageSize);
+    token_vec_t prefix_tokens(tokens.begin(), tokens.begin() + kPageSize);
+    TreeNode* prefix = InsertKVOnly(prefix_tokens);
+    ASSERT_NE(prefix, nullptr);
+    ASSERT_FALSE(prefix->HasMamba());
+
+    const auto full_pages = PagedTokenSpans(tokens);
+    StepCommitRequest count_request{
+        .plan_device_prefix_insertion =
+            DevicePrefixInsertionPlanRequest{
+                .full_paged_tokens = &full_pages,
+                .current_device_node = prefix,
+            },
+    };
+    EXPECT_EQ(hybrid_prefix_cache_->StepCommit(std::move(count_request)).device_insert_page_count, 2);
+
+    const std::vector<std::int32_t> existing_pages = DevicePagesFromRoot(prefix);
+    auto pages_to_insert = device_alloc_->Allocate(/*num_pages=*/2);
+    const std::vector<std::int32_t> inserted_pages = pages_to_insert.Ids();
+
+    StepCommitRequest request{
+        .publish_device_prefix_insertion =
+            DevicePrefixInsertionRequest{
+                .full_paged_tokens = &full_pages,
+                .current_device_node = prefix,
+                .pages_to_insert = std::move(pages_to_insert),
+            },
+    };
+    MatchResult match = hybrid_prefix_cache_->StepCommit(std::move(request)).match_result;
+
+    EXPECT_EQ(match.device.DepthInPage(), 3);
+    EXPECT_EQ(match.host.DepthInPage(), 0);
+    EXPECT_EQ(match.mamba_cow_src_index, -1);
+    EXPECT_EQ(match.mamba_branching_seqlen, -1);
+
+    std::vector<std::int32_t> expected_pages = existing_pages;
+    expected_pages.insert(expected_pages.end(), inserted_pages.begin(), inserted_pages.end());
+    EXPECT_EQ(DevicePagesFromRoot(match.device.last_node), expected_pages);
+
+    // The retract facade intentionally returns the raw KV state-recovery match
+    // used for host writeback planning, not the Mamba-capped hybrid match.
+    MatchResult hybrid_match = hybrid_prefix_cache_->MatchPrefix(full_pages, MatchIntent::StateRecovery).compat_match;
+    EXPECT_EQ(hybrid_match.device.DepthInPage(), 0);
+}
+
+TEST_F(MambaCacheTest, PublishFinishMambaStatePrefersCheckpointOverWorking) {
+    auto tokens = MakeAlignedTokens(2, kPageSize);
+    TreeNode* terminal = InsertKVOnly(tokens);
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_FALSE(terminal->HasMamba());
+
+    LocalMambaAllocator local_mamba(mamba_alloc_.get());
+    ASSERT_TRUE(local_mamba.AllocateWorking());
+    const std::int32_t working_index = local_mamba.WorkingIndex();
+    ASSERT_TRUE(local_mamba.AllocateCheckpoint());
+    const std::int32_t checkpoint_index = local_mamba.CheckpointIndex();
+
+    HybridPrefixCacheTestPeer::PublishFinishMambaState(*hybrid_prefix_cache_, PagedTokenSpans(tokens), &local_mamba);
+
+    ASSERT_TRUE(terminal->HasMamba());
+    EXPECT_EQ(terminal->MambaSlotIndex(), checkpoint_index);
+    EXPECT_FALSE(local_mamba.HasCheckpoint());
+    EXPECT_TRUE(local_mamba.HasWorking());
+    EXPECT_EQ(local_mamba.WorkingIndex(), working_index);
+}
+
+TEST_F(MambaCacheTest, PublishFinishMambaStateSkipsTerminalWithExistingMamba) {
+    auto tokens = MakeAlignedTokens(2, kPageSize);
+    TreeNode* terminal = InsertKVAndMamba(tokens);
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_TRUE(terminal->HasMamba());
+    const std::int32_t original_index = terminal->MambaSlotIndex();
+
+    LocalMambaAllocator local_mamba(mamba_alloc_.get());
+    ASSERT_TRUE(local_mamba.AllocateWorking());
+    ASSERT_TRUE(local_mamba.AllocateCheckpoint());
+
+    HybridPrefixCacheTestPeer::PublishFinishMambaState(*hybrid_prefix_cache_, PagedTokenSpans(tokens), &local_mamba);
+
+    EXPECT_TRUE(terminal->HasMamba());
+    EXPECT_EQ(terminal->MambaSlotIndex(), original_index);
+    EXPECT_TRUE(local_mamba.HasWorking());
+    EXPECT_TRUE(local_mamba.HasCheckpoint());
+}
+
+TEST_F(MambaCacheTest, StepCommitRetractMambaStateAttachesCheckpointAndReleasesRequestLocalSlots) {
+    auto tokens = MakeAlignedTokens(2, kPageSize);
+    TreeNode* terminal = InsertKVOnly(tokens);
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_FALSE(terminal->HasMamba());
+
+    auto local_mamba = std::make_unique<LocalMambaAllocator>(mamba_alloc_.get());
+    ASSERT_TRUE(local_mamba->AllocateWorking());
+    ASSERT_TRUE(local_mamba->AllocateCheckpoint());
+    const std::int32_t checkpoint_index = local_mamba->CheckpointIndex();
+
+    hybrid_prefix_cache_->StepCommit({
+        .publish_tree_owned_request_state =
+            TreeOwnedRequestStatePublicationRequest{
+                .terminal = terminal,
+                .local_mamba_allocator_owner = &local_mamba,
+            },
+    });
+
+    EXPECT_EQ(local_mamba, nullptr);
+    ASSERT_TRUE(terminal->HasMamba());
+    EXPECT_EQ(terminal->MambaSlotIndex(), checkpoint_index);
+    EXPECT_EQ(mamba_alloc_->AvailableSlots(), kMambaSlots - 1);
+}
+
+TEST_F(MambaCacheTest, StepCommitRetractMambaStateFallsBackToWorkingAndReleasesRequestLocalSlots) {
+    auto tokens = MakeAlignedTokens(2, kPageSize);
+    TreeNode* terminal = InsertKVOnly(tokens);
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_FALSE(terminal->HasMamba());
+
+    auto local_mamba = std::make_unique<LocalMambaAllocator>(mamba_alloc_.get());
+    ASSERT_TRUE(local_mamba->AllocateWorking());
+    const std::int32_t working_index = local_mamba->WorkingIndex();
+
+    hybrid_prefix_cache_->StepCommit({
+        .publish_tree_owned_request_state =
+            TreeOwnedRequestStatePublicationRequest{
+                .terminal = terminal,
+                .local_mamba_allocator_owner = &local_mamba,
+            },
+    });
+
+    EXPECT_EQ(local_mamba, nullptr);
+    ASSERT_TRUE(terminal->HasMamba());
+    EXPECT_EQ(terminal->MambaSlotIndex(), working_index);
+    EXPECT_EQ(mamba_alloc_->AvailableSlots(), kMambaSlots - 1);
+}
+
+TEST_F(MambaCacheTest, StepCommitRetractMambaStateReleasesRequestLocalSlotsWhenTerminalAlreadyHasMamba) {
+    auto tokens = MakeAlignedTokens(2, kPageSize);
+    TreeNode* terminal = InsertKVAndMamba(tokens);
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_TRUE(terminal->HasMamba());
+    const std::int32_t original_index = terminal->MambaSlotIndex();
+
+    auto local_mamba = std::make_unique<LocalMambaAllocator>(mamba_alloc_.get());
+    ASSERT_TRUE(local_mamba->AllocateWorking());
+    ASSERT_TRUE(local_mamba->AllocateCheckpoint());
+
+    hybrid_prefix_cache_->StepCommit({
+        .publish_tree_owned_request_state =
+            TreeOwnedRequestStatePublicationRequest{
+                .terminal = terminal,
+                .local_mamba_allocator_owner = &local_mamba,
+            },
+    });
+
+    EXPECT_EQ(local_mamba, nullptr);
+    EXPECT_TRUE(terminal->HasMamba());
+    EXPECT_EQ(terminal->MambaSlotIndex(), original_index);
+    EXPECT_EQ(mamba_alloc_->AvailableSlots(), kMambaSlots - 1);
+}
+
+TEST_F(MambaCacheTest, AdmitComputesBranchingCheckpointWithoutMutatingMatch) {
+    FillMambaSlots();
+    ASSERT_EQ(mamba_alloc_->AvailableSlots(), 0);
+
+    MatchResult match{};
+    std::map<std::string, std::int32_t> simulated_free;
+    AdmissionRequest request{
+        .request_id = "r-prefill-first",
+        .device_pages_needed = 0,
+        .tokens_this_round = 5,
+        .first_raw_position_of_op = 0,
+        .target_raw_tokens_exclusive = 5,
+        .compat_match = &match,
+        .auxiliary_tree_slots_needed = 2,
+        .compute_branching_checkpoint = true,
+    };
+    AdmissionVerdict result = hybrid_prefix_cache_->Admit(request, simulated_free);
+
+    EXPECT_TRUE(result.admitted);
+    ASSERT_TRUE(result.mamba_branching_seqlen.has_value());
+    EXPECT_EQ(*result.mamba_branching_seqlen, 4);
+    EXPECT_EQ(match.mamba_branching_seqlen, -1);
+    EXPECT_GE(mamba_alloc_->AvailableSlots(), 2);
+}
+
+TEST_F(MambaCacheTest, AdmitContinuePrefillReservesOneMambaSlot) {
+    FillMambaSlots();
+    ASSERT_EQ(mamba_alloc_->AvailableSlots(), 0);
+
+    std::map<std::string, std::int32_t> simulated_free;
+    AdmissionRequest request{
+        .request_id = "r-prefill",
+        .device_pages_needed = 0,
+        .first_raw_position_of_op = 4,
+        .target_raw_tokens_exclusive = 8,
+        .auxiliary_tree_slots_needed = 1,
+    };
+    EXPECT_TRUE(hybrid_prefix_cache_->Admit(request, simulated_free).admitted);
+
+    EXPECT_GE(mamba_alloc_->AvailableSlots(), 1);
+}
+
+TEST_F(MambaCacheTest, AdmitDecodeDoesNotReserveMambaSlots) {
+    auto nodes = FillMambaSlots();
+    ASSERT_EQ(mamba_alloc_->AvailableSlots(), 0);
+
+    std::map<std::string, std::int32_t> simulated_free;
+    AdmissionRequest request{
+        .request_id = "r-decode",
+        .device_pages_needed = 0,
+        .first_raw_position_of_op = 8,
+        .target_raw_tokens_exclusive = 9,
+    };
+    EXPECT_TRUE(hybrid_prefix_cache_->Admit(request, simulated_free).admitted);
+
+    EXPECT_EQ(mamba_alloc_->AvailableSlots(), 0);
+    EXPECT_EQ(std::count_if(nodes.begin(), nodes.end(), [](const TreeNode* node) { return node->HasMamba(); }),
+              kMambaSlots);
+}
+
+TEST_F(MambaCacheTest, AdmitRecoverDecodeProtectsMambaRecoverySource) {
+    auto nodes = FillMambaSlots();
+    ASSERT_EQ(mamba_alloc_->AvailableSlots(), 0);
+    TreeNode* recovery_source = nodes.front();
+    ASSERT_NE(recovery_source, nullptr);
+    ASSERT_TRUE(recovery_source->HasMamba());
+
+    std::map<std::string, std::int32_t> simulated_free;
+    MatchResult match{};
+    AdmissionRequest request{
+        .request_id = "r-retracted",
+        .device_pages_needed = 0,
+        .target_raw_tokens_exclusive = 8,
+        .compat_match = &match,
+        .protected_recovery_node = recovery_source,
+        .auxiliary_tree_slots_needed = 2,
+        .fresh_request_table_view = true,
+    };
+    EXPECT_TRUE(hybrid_prefix_cache_->Admit(request, simulated_free).admitted);
+
+    EXPECT_TRUE(recovery_source->HasMamba());
+    EXPECT_GE(mamba_alloc_->AvailableSlots(), 2);
 }
 
 }  // namespace tokenspeed::test
