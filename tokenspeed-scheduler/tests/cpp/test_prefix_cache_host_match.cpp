@@ -24,13 +24,30 @@
 #include <memory>
 
 #include "unit_test_helper.h"
+#include "resource/allocator/mamba_chunk_allocator.h"
 #include "resource/allocator/owned_pages.h"
 #include "resource/allocator/page_allocator.h"
+#include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
 #include "resource/kv_prefix_cache/kv_prefix_cache.h"
 #include "resource/radix_tree/tree_node.h"
 #include "resource/types.h"
+#include "scheduler/page_hasher.h"
 
 namespace tokenspeed::test {
+
+namespace {
+
+std::vector<std::span<const std::int32_t>> TokenPages(const token_vec_t& tokens, std::int32_t page_size) {
+    const std::size_t num_pages = tokens.size() / page_size;
+    std::vector<std::span<const std::int32_t>> pages;
+    pages.reserve(num_pages);
+    for (std::size_t i = 0; i < num_pages; ++i) {
+        pages.emplace_back(tokens.data() + i * page_size, static_cast<std::size_t>(page_size));
+    }
+    return pages;
+}
+
+}  // namespace
 
 // page_size=2, device_total=2, host_total=16.
 // Step 1: Insert<Device>([1,2], pages=[0]) → node([1,2]) has device=[0].
@@ -114,6 +131,52 @@ TEST(PrefixCacheHostMatchDiag, HostCacheMatchAfterDirectAttachResource) {
     MatchResult match12c = cache.Match(tokens12);
     EXPECT_EQ(match12c.device.DepthInPage(), 0) << "device evicted";
     EXPECT_EQ(match12c.host.DepthInPage(), 1) << "host still matches";
+}
+
+TEST(PrefixCacheHostMatchDiag, RawHostStorageHashSeedIgnoresAugmentedMambaMatchCapping) {
+    static constexpr std::int32_t kPageSize = 2;
+    PageAllocator device_alloc{kPageSize, 16};
+    PageAllocator host_alloc{kPageSize, 16};
+    KVPrefixCache cache{&device_alloc, &host_alloc, false};
+    MambaChunkAllocator mamba_alloc{2};
+    HybridPrefixCache hybrid_cache{cache, device_alloc, &mamba_alloc, /*mamba_cache_chunk_size=*/4};
+
+    token_vec_t stored_tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1);
+    auto stored_pages = TokenPages(stored_tokens, kPageSize);
+    const auto stored_hashes = ComputePagedHashes(stored_pages, "");
+
+    cache.Insert<ResourceType::Device>(stored_pages, {}, device_alloc.Allocate(2), stored_hashes);
+    cache.Insert<ResourceType::Host>(stored_pages, {}, host_alloc.Allocate(2), stored_hashes);
+
+    const MatchResult augmented_match = hybrid_cache.MatchPrefix(stored_pages).compat_match;
+    ASSERT_EQ(augmented_match.host.DepthInPage(), 0)
+        << "regular HybridPrefixCache::Match is Mamba-recovery capped when no Mamba slot exists";
+
+    token_vec_t lookup_tokens = MakeAlignedTokens(/*num_pages=*/3, kPageSize, /*start=*/1);
+    auto lookup_pages = TokenPages(lookup_tokens, kPageSize);
+    const auto seed = hybrid_cache.LookupRawHostStorageHashSeed(lookup_pages);
+
+    EXPECT_EQ(seed.host_matched_pages, 2);
+    EXPECT_EQ(seed.prior_hash_seed, stored_hashes.back());
+}
+
+TEST(PrefixCacheHostMatchDiag, RawHostStorageHashSeedReturnsEmptyPriorWhenHostNodeHasNoPageHashes) {
+    static constexpr std::int32_t kPageSize = 2;
+    PageAllocator device_alloc{kPageSize, 16};
+    PageAllocator host_alloc{kPageSize, 16};
+    KVPrefixCache cache{&device_alloc, &host_alloc, false};
+    HybridPrefixCache hybrid_cache{cache, device_alloc, nullptr, /*mamba_cache_chunk_size=*/0};
+
+    token_vec_t stored_tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1);
+    auto stored_pages = TokenPages(stored_tokens, kPageSize);
+    cache.Insert<ResourceType::Host>(stored_pages, {}, host_alloc.Allocate(2));
+
+    token_vec_t lookup_tokens = MakeAlignedTokens(/*num_pages=*/3, kPageSize, /*start=*/1);
+    auto lookup_pages = TokenPages(lookup_tokens, kPageSize);
+    const auto seed = hybrid_cache.LookupRawHostStorageHashSeed(lookup_pages);
+
+    EXPECT_EQ(seed.host_matched_pages, 2);
+    EXPECT_TRUE(seed.prior_hash_seed.empty());
 }
 
 }  // namespace tokenspeed::test

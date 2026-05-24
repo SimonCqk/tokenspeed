@@ -40,10 +40,11 @@ std::int32_t LocalMambaAllocator::WorkingIndex() const {
     return working_ ? working_->Index() : -1;
 }
 
-bool LocalMambaAllocator::AllocateCheckpoint() {
+bool LocalMambaAllocator::AllocateCheckpoint(std::int32_t raw_position) {
     auto slot = allocator_->Allocate();
     if (!slot.has_value()) return false;
     checkpoint_ = std::make_unique<MambaSlot>(std::move(*slot));
+    checkpoint_position_ = raw_position;
     return true;
 }
 
@@ -52,6 +53,7 @@ std::int32_t LocalMambaAllocator::CheckpointIndex() const {
 }
 
 std::unique_ptr<MambaSlot> LocalMambaAllocator::DetachCheckpoint() {
+    checkpoint_position_ = -1;
     return std::move(checkpoint_);
 }
 

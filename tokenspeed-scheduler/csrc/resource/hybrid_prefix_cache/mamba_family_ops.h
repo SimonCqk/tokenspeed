@@ -20,34 +20,17 @@
 
 #pragma once
 
-#include <optional>
-#include <unordered_map>
-#include <vector>
-
-#include "resource/radix_tree/tree_node.h"
-#include "resource/types.h"
+#include <cstdint>
 
 namespace tokenspeed {
 
-namespace cache {
-struct WriteBackDone;
-}
+class TreeNode;
 
-class CacheCoordinator {
-public:
-    explicit CacheCoordinator(bool enable_l3_storage = false) : enable_l3_storage_(enable_l3_storage) {}
+namespace hybrid_prefix_cache::detail {
 
-    void HandleEvent(const cache::WriteBackDone& event);
+std::int32_t AlignMambaCacheSeqlen(std::int32_t seqlen, std::int32_t chunk_size);
+TreeNode* FindLastMambaNode(TreeNode* from);
+TreeNode* FindLastMambaHostNode(TreeNode* from);
 
-    void EnqueueTransfer(TreeNode* last_node);
-    std::vector<TreeNode*> DrainTransferQueue();
-
-private:
-    std::optional<CacheOpSpec> takeOpSpec(cache_op_id op_id);
-
-    bool enable_l3_storage_;
-    std::unordered_map<cache_op_id, CacheOpSpec> pending_ops_;
-    std::vector<TreeNode*> waiting_last_nodes_;
-};
-
+}  // namespace hybrid_prefix_cache::detail
 }  // namespace tokenspeed

@@ -26,6 +26,7 @@
 #include "scheduler/page_hasher.h"
 #include "scheduler/scheduler.h"
 
+#include "fsm/cache_events.h"
 #include "fsm/forward_events.h"
 #include "fsm/pd_events.h"
 
@@ -92,8 +93,7 @@ void Scheduler::handleEvent(const pd::FailedEvent& event) {}
 void Scheduler::handleEvent(const pd::SucceededEvent& event) {
     std::vector<std::string> page_hashes;
     requests_.at(event.request_id)
-        ->Apply(fsm::FinishEvent{&kv_prefix_cache_, &host_allocator_, std::move(page_hashes), config_.disable_l2_cache,
-                                 hybrid_prefix_cache_ ? &*hybrid_prefix_cache_ : nullptr});
+        ->Apply(fsm::FinishEvent{std::move(page_hashes), config_.disable_l2_cache, hybrid_prefix_cache_});
 }
 
 void Scheduler::handleEvent(const pd::RemotePrefillDoneEvent& event) {
@@ -114,8 +114,7 @@ void Scheduler::handleEvent(const forward::Finish& event) {
                 page_hashes = ComputePagedHashes(token_pages, "");
             }
         }
-        req->Apply(fsm::FinishEvent{&kv_prefix_cache_, &host_allocator_, std::move(page_hashes),
-                                    config_.disable_l2_cache, hybrid_prefix_cache_ ? &*hybrid_prefix_cache_ : nullptr});
+        req->Apply(fsm::FinishEvent{std::move(page_hashes), config_.disable_l2_cache, hybrid_prefix_cache_});
     }
 }
 
@@ -149,13 +148,9 @@ void Scheduler::handleEvent(const cache::WriteBackDone& event) {
     auto spec = std::move(it->second);
     cache_op_tracker_.erase(it);
 
-    auto now = std::chrono::steady_clock::now();
-    for (TreeNode* n : spec.nodes) n->Touch(now);
-
     if (!spec.request_id.empty()) {
         if (auto* req = find_request(spec.request_id)) {
-            req->Apply(
-                fsm::WriteBackDoneEvent{&kv_prefix_cache_, hybrid_prefix_cache_ ? &*hybrid_prefix_cache_ : nullptr});
+            req->Apply(fsm::WriteBackDoneEvent{&kv_prefix_cache_, &hybrid_prefix_cache_});
         }
     }
 }

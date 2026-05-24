@@ -108,13 +108,11 @@ struct WalkResult {
 
 struct CacheOpSpec {
     std::string request_id;
-    TreeNode* last_node{nullptr};
-    std::vector<TreeNode*> nodes;
 
-    CacheOpSpec();
-    ~CacheOpSpec();
-    CacheOpSpec(CacheOpSpec&&) noexcept;
-    CacheOpSpec& operator=(CacheOpSpec&&) noexcept;
+    CacheOpSpec() = default;
+    ~CacheOpSpec() = default;
+    CacheOpSpec(CacheOpSpec&&) noexcept = default;
+    CacheOpSpec& operator=(CacheOpSpec&&) noexcept = default;
     CacheOpSpec(const CacheOpSpec&) = delete;
     CacheOpSpec& operator=(const CacheOpSpec&) = delete;
 };

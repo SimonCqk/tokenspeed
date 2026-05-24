@@ -32,7 +32,7 @@ TEST_F(PagedCachePrefixMatchTest, CapVsNoCap320) {
     const auto tokens = MakeAlignedTokens(num_pages, kPageSize, /*start=*/1);
 
     // No snapshot: paged_cache empty; device/host capped to root.
-    auto match = hybrid_->Match(tokens);
+    auto match = hybrid_->MatchPrefix(tokens).compat_match;
     EXPECT_EQ(match.paged_cache.last_node, nullptr);
     EXPECT_EQ(match.paged_cache.prefix_len_tokens, 0);
     ASSERT_NE(match.device.last_node, nullptr);
@@ -46,12 +46,12 @@ TEST_F(PagedCachePrefixMatchTest, CapVsNoCap320) {
     TreeNode* boundary_256 = kv_cache_->GetRadixTree().SplitAt(terminal, 256);
     ASSERT_NE(boundary_256, nullptr);
     EXPECT_EQ(boundary_256->DepthInTokens(), 256u);
-    hybrid_->AttachPagedCacheSnapshotToNode(boundary_256, MakeCompleteSnapshot(256));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, boundary_256, MakeCompleteSnapshot(256));
     ASSERT_TRUE(boundary_256->HasPagedCacheSnapshot());
     EXPECT_TRUE(boundary_256->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::History));
     EXPECT_TRUE(boundary_256->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::State));
 
-    match = hybrid_->Match(tokens);
+    match = hybrid_->MatchPrefix(tokens).compat_match;
     ASSERT_NE(match.paged_cache.last_node, nullptr);
     EXPECT_EQ(match.paged_cache.last_node, boundary_256);
     EXPECT_EQ(match.paged_cache.prefix_len_tokens, 256);
@@ -73,18 +73,18 @@ TEST_F(PagedCachePrefixMatchTest, ContiguousChainBreakMid) {
     ASSERT_NE(n512, nullptr);
     ASSERT_NE(n768, nullptr);
 
-    hybrid_->AttachPagedCacheSnapshotToNode(n256, MakeCompleteSnapshot(256));
-    hybrid_->AttachPagedCacheSnapshotToNode(n512, MakeCompleteSnapshot(512));
-    hybrid_->AttachPagedCacheSnapshotToNode(n768, MakeCompleteSnapshot(768));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n256, MakeCompleteSnapshot(256));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n512, MakeCompleteSnapshot(512));
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, n768, MakeCompleteSnapshot(768));
 
     // Drop the middle snapshot; chain scan must stop at the gap.
-    auto dropped = hybrid_->DetachPagedCacheSnapshotFromNode(n512);
+    auto dropped = HybridPrefixCacheTestPeer::DetachPagedCacheSnapshotFromNode(*hybrid_, n512);
     EXPECT_TRUE(dropped != nullptr);
     EXPECT_FALSE(n512->HasPagedCacheSnapshot());
     ASSERT_TRUE(n768->HasPagedCacheSnapshot());
     EXPECT_TRUE(n768->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::History));
 
-    auto match = hybrid_->Match(MakeAlignedTokens(num_pages, kPageSize, /*start=*/1));
+    auto match = hybrid_->MatchPrefix(MakeAlignedTokens(num_pages, kPageSize, /*start=*/1)).compat_match;
     ASSERT_NE(match.paged_cache.last_node, nullptr);
     EXPECT_EQ(match.paged_cache.last_node, n256);
     EXPECT_EQ(match.paged_cache.prefix_len_tokens, 256);

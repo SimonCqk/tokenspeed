@@ -33,10 +33,7 @@
 #include "fsm/forward_events.h"
 #include "fsm/forward_states.h"
 #include "resource/allocator/kv_allocator.h"
-#include "resource/allocator/owned_pages.h"
 #include "resource/allocator/req_pool_allocator.h"
-#include "resource/radix_tree/node_range.h"
-#include "resource/kv_prefix_cache/kv_prefix_cache.h"
 #include "resource/radix_tree/tree_node.h"
 #include "resource/types.h"
 #include "scheduler/operations/cache.h"
@@ -58,24 +55,6 @@ std::vector<tokenspeed::TransferPair> BuildWriteBackPairs(const std::vector<toke
     return pages_to_transfer;
 }
 
-std::vector<tokenspeed::TreeNode*> MambaNodesForTransferPairs(const std::vector<tokenspeed::TreeNode*>& candidates,
-                                                              const std::vector<tokenspeed::TransferPair>& transfers) {
-    std::unordered_set<std::int32_t> src_slots;
-    for (const auto& transfer : transfers) {
-        if (transfer.kind == tokenspeed::CacheKind::kMamba) {
-            src_slots.insert(transfer.src);
-        }
-    }
-    std::vector<tokenspeed::TreeNode*> nodes;
-    nodes.reserve(src_slots.size());
-    for (tokenspeed::TreeNode* node : candidates) {
-        if (node != nullptr && node->HasMamba() && src_slots.find(node->MambaSlotIndex()) != src_slots.end()) {
-            nodes.push_back(node);
-        }
-    }
-    return nodes;
-}
-
 void DemoteWrittenBackDevice(tokenspeed::KVPrefixCache* kv_prefix_cache,
                              tokenspeed::HybridPrefixCache* hybrid_prefix_cache, tokenspeed::TreeNode* device_node) {
     if (kv_prefix_cache == nullptr || device_node == nullptr) return;
@@ -86,94 +65,57 @@ void DemoteWrittenBackDevice(tokenspeed::KVPrefixCache* kv_prefix_cache,
     });
 }
 
-bool ShouldPublishMambaCheckpoint(tokenspeed::HybridPrefixCache* hybrid_cache, std::int32_t chunk_begin,
-                                  std::int32_t chunk_size, std::int32_t page_size) {
-    if (hybrid_cache == nullptr || chunk_size <= 0 || page_size <= 0) return false;
-    const std::int32_t final_len = chunk_begin + chunk_size;
-    const std::int32_t last_inserted_len = (final_len / page_size) * page_size;
-    if (last_inserted_len <= chunk_begin) return false;
-    if (last_inserted_len == final_len) return true;
-
-    const std::int32_t track_len = last_inserted_len - chunk_begin;
-    return hybrid_cache->AlignMambaCacheSeqlen(track_len) == track_len;
-}
-
 }  // namespace
 
 namespace tokenspeed::fsm {
-
-void InsertHybridCache(HybridPrefixCache* hybrid_cache,
-                       const std::vector<std::span<const std::int32_t>>& full_paged_tokens,
-                       std::unique_ptr<DeviceNodeRef>& device_node_ref, LocalKVAllocator* local_kv_allocator,
-                       LocalMambaAllocator* local_mamba_allocator, std::int32_t chunk_begin, std::int32_t chunk_size,
-                       std::int32_t page_size) {
-    if (hybrid_cache == nullptr) return;
-
-    std::vector<std::int32_t> prefix_pages = DevicePagesFromRoot(device_node_ref->Node());
-    std::int32_t new_page_count =
-        static_cast<std::int32_t>(full_paged_tokens.size()) - static_cast<std::int32_t>(prefix_pages.size());
-    if (new_page_count <= 0) {
-        if (local_mamba_allocator != nullptr && local_mamba_allocator->HasCheckpoint()) {
-            local_mamba_allocator->DetachCheckpoint();
-        }
-        return;
-    }
-
-    OwnedPages pages_to_insert = local_kv_allocator->TakeFirst(new_page_count);
-    auto insert_result = hybrid_cache->GetKVPrefixCache().Insert<ResourceType::Device>(full_paged_tokens, prefix_pages,
-                                                                                       std::move(pages_to_insert));
-
-    if (local_mamba_allocator != nullptr && local_mamba_allocator->HasCheckpoint()) {
-        if (ShouldPublishMambaCheckpoint(hybrid_cache, chunk_begin, chunk_size, page_size)) {
-            hybrid_cache->InsertMamba(insert_result.last_node, local_mamba_allocator->DetachCheckpoint());
-        } else {
-            local_mamba_allocator->DetachCheckpoint();
-        }
-    }
-    device_node_ref = std::make_unique<DeviceNodeRef>(insert_result.last_node);
-}
 
 // Submitted -> PrefillDone / Prefilling
 std::variant<PrefillDone, Prefilling> SchedulePrefillFirstChunkEvent::operator()(Submitted&& state) {
     // Lock node
     std::unique_ptr<HostNodeRef> host_node_ref{nullptr};
     std::unique_ptr<DeviceNodeRef> device_node_ref{nullptr};
+    std::int32_t max_matched_pages =
+        disable_l2_cache_ ? match_result_.device.DepthInPage()
+                          : std::max(match_result_.device.DepthInPage(), match_result_.host.DepthInPage());
+    std::int32_t window_begin = max_matched_pages * state.GetPageSize();
+    const std::int32_t checkpoint_raw_position = window_begin + tokens_this_round_;
     if (!disable_l2_cache_ && (match_result_.host.DepthInPage() > match_result_.device.DepthInPage())) {
         host_node_ref = std::make_unique<HostNodeRef>(match_result_.host.last_node);
-        kv_prefix_cache_->AllocateResourceOfType<ResourceType::Device>(
-            match_result_.NodesWithout<ResourceType::Device>());
+        StepCommitRequest materialization_request{
+            .materialize_prefix =
+                PrefixMaterializationRequest{
+                    .compat_match = &match_result_,
+                    .require_all_pages = false,
+                },
+        };
+        (void)hybrid_prefix_cache_.StepCommit(std::move(materialization_request));
         device_node_ref = std::make_unique<DeviceNodeRef>(match_result_.host.last_node);
     } else {
         device_node_ref = std::make_unique<DeviceNodeRef>(match_result_.device.last_node);
     }
 
-    // Allocate KV pages for tokens not covered by the prefix cache
-    auto local_kv_allocator = std::make_unique<LocalKVAllocator>(device_allocator_, tokens_this_round_);
-    // Reserve token slots for draft multi-step decode
-    local_kv_allocator->Acquire(decode_input_tokens_);
+    auto step_result = hybrid_prefix_cache_.StepCommit({
+        .request_local_kv =
+            RequestLocalKVStateRequest{
+                .create_allocator = true,
+                .initial_tokens = tokens_this_round_,
+                .acquire_tokens = decode_input_tokens_,
+            },
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .create_allocator = true,
+                .checkpoint_raw_position = checkpoint_raw_position,
+            },
+    });
+    auto local_kv_allocator = std::move(step_result.local_kv_allocator);
 
     // Allocate req_pool_idx when first-time scheduled
     auto req_pool_index = std::make_unique<ReqPoolIndex>(req_pool_allocator_->Allocate());
 
-    // Mamba: allocate working + checkpoint slots if mamba is enabled
-    std::unique_ptr<LocalMambaAllocator> local_mamba_allocator;
-    if (mamba_allocator_ != nullptr) {
-        local_mamba_allocator = std::make_unique<LocalMambaAllocator>(mamba_allocator_);
-        if (!local_mamba_allocator->AllocateWorking()) {
-            local_mamba_allocator.reset();
-        } else {
-            if (!local_mamba_allocator->AllocateCheckpoint()) {
-                throw std::logic_error("SchedulePrefillFirstChunkEvent: failed to allocate Mamba checkpoint slot");
-            }
-        }
-    }
+    auto local_mamba_allocator = std::move(step_result.local_mamba_allocator);
 
     TokenContainer* token_container = state.GetTokenContainer();
 
-    std::int32_t max_matched_pages =
-        disable_l2_cache_ ? match_result_.device.DepthInPage()
-                          : std::max(match_result_.device.DepthInPage(), match_result_.host.DepthInPage());
-    std::int32_t window_begin = max_matched_pages * state.GetPageSize();
     TokenContainer::Window window{.begin = window_begin, .size = tokens_this_round_};
 
     bool is_last_chunk = (window.begin + window.size) == token_container->PrefillSize();
@@ -213,17 +155,26 @@ std::variant<PrefillDone, Prefilling> SchedulePrefillEvent::operator()(Prefillin
     if (end_of_window_pages < static_cast<std::int32_t>(paged_tokens.size())) {
         paged_tokens.resize(end_of_window_pages);
     }
-    InsertHybridCache(hybrid_prefix_cache_, paged_tokens, device_node_ref, local_kv_allocator.get(),
-                      local_mamba_allocator.get(), state.window.begin, state.window.size, state.GetPageSize());
-    // Allocate KV pages for the new chunk
-    local_kv_allocator->Acquire(tokens_this_round_);
-
-    // Allocate fresh mamba checkpoint for this chunk.
-    if (hybrid_prefix_cache_ != nullptr && local_mamba_allocator != nullptr) {
-        if (!local_mamba_allocator->AllocateCheckpoint()) {
-            throw std::logic_error("SchedulePrefillEvent: failed to allocate Mamba checkpoint slot");
-        }
-    }
+    StepCommitRequest publication_request{
+        .publish_device_prefix =
+            DevicePrefixPublicationRequest{
+                .full_paged_tokens = &paged_tokens,
+                .device_node_ref = &device_node_ref,
+                .local_kv_allocator = local_kv_allocator.get(),
+                .local_mamba_allocator = local_mamba_allocator.get(),
+            },
+        .request_local_kv =
+            RequestLocalKVStateRequest{
+                .allocator = local_kv_allocator.get(),
+                .acquire_tokens = tokens_this_round_,
+            },
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .refresh_checkpoint_allocator = local_mamba_allocator.get(),
+                .checkpoint_raw_position = state.window.begin + state.window.size + tokens_this_round_,
+            },
+    };
+    (void)hybrid_prefix_cache_.StepCommit(std::move(publication_request));
 
     TokenContainer::Window window{.begin = state.window.begin + state.window.size, .size = tokens_this_round_};
 
@@ -263,17 +214,26 @@ Decoding ScheduleDecodeEvent::operator()(PrefillDone&& state) {
     if (end_of_window_pages < static_cast<std::int32_t>(paged_tokens.size())) {
         paged_tokens.resize(end_of_window_pages);
     }
-    InsertHybridCache(hybrid_prefix_cache_, paged_tokens, device_node_ref, local_kv_allocator.get(),
-                      local_mamba_allocator.get(), state.window.begin, state.window.size, state.GetPageSize());
-    // Allocate fresh checkpoint for decode-phase mamba state tracking
-    if (hybrid_prefix_cache_ != nullptr && local_mamba_allocator != nullptr) {
-        if (!local_mamba_allocator->AllocateCheckpoint()) {
-            throw std::logic_error("ScheduleDecodeEvent: failed to allocate Mamba checkpoint slot");
-        }
-    }
-
-    std::int32_t reserve = state.GetReserveNumTokensInNextScheduleEvent();
-    local_kv_allocator->Acquire(reserve);
+    StepCommitRequest publication_request{
+        .publish_device_prefix =
+            DevicePrefixPublicationRequest{
+                .full_paged_tokens = &paged_tokens,
+                .device_node_ref = &device_node_ref,
+                .local_kv_allocator = local_kv_allocator.get(),
+                .local_mamba_allocator = local_mamba_allocator.get(),
+            },
+        .request_local_kv =
+            RequestLocalKVStateRequest{
+                .allocator = local_kv_allocator.get(),
+                .acquire_tokens = state.GetReserveNumTokensInNextScheduleEvent(),
+            },
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .refresh_checkpoint_allocator = local_mamba_allocator.get(),
+                .checkpoint_raw_position = state.GetTokenContainer()->Size() + decode_input_tokens_,
+            },
+    };
+    (void)hybrid_prefix_cache_.StepCommit(std::move(publication_request));
 
     return Decoding{state.GetTokenContainer(),     state.GetPageSize(),
                     std::move(host_node_ref),      std::move(device_node_ref),
@@ -289,7 +249,13 @@ Decoding ScheduleDecodeEvent::operator()(Decoding&& state) {
     auto host_node_ref = std::move(state).TakeHostNodeRef();
 
     std::int32_t reserve = state.GetReserveNumTokensInNextScheduleEvent();
-    local_kv_allocator->Acquire(reserve);
+    (void)hybrid_prefix_cache_.StepCommit({
+        .request_local_kv =
+            RequestLocalKVStateRequest{
+                .allocator = local_kv_allocator.get(),
+                .acquire_tokens = reserve,
+            },
+    });
 
     return Decoding{state.GetTokenContainer(),     state.GetPageSize(),
                     std::move(host_node_ref),      std::move(device_node_ref),
@@ -304,8 +270,14 @@ Decoding ScheduleDecodeFromRetractedEvent::operator()(Retracted&& state) {
     std::unique_ptr<DeviceNodeRef> device_node_ref{nullptr};
     if (match_result_.host.DepthInPage() > match_result_.device.DepthInPage()) {
         host_node_ref = std::make_unique<HostNodeRef>(match_result_.host.last_node);
-        if (!kv_prefix_cache_->AllocateResourceOfType<ResourceType::Device>(
-                match_result_.NodesWithout<ResourceType::Device>())) {
+        StepCommitRequest materialization_request{
+            .materialize_prefix =
+                PrefixMaterializationRequest{
+                    .compat_match = &match_result_,
+                    .require_all_pages = true,
+                },
+        };
+        if (!hybrid_prefix_cache_.StepCommit(std::move(materialization_request)).ok) {
             // Device allocation failed (race between capacity check and actual alloc).
             throw std::logic_error(
                 "ScheduleDecodeFromRetractedEvent: failed to allocate device pages for host cache recovery");
@@ -320,19 +292,20 @@ Decoding ScheduleDecodeFromRetractedEvent::operator()(Retracted&& state) {
     auto local_kv_allocator = std::move(state).TakeKVAllocator();
     auto old_mamba_allocator = std::move(state).TakeMambaAllocator();
     old_mamba_allocator.reset();
-    std::unique_ptr<LocalMambaAllocator> local_mamba_allocator;
-    if (mamba_allocator_ != nullptr) {
-        local_mamba_allocator = std::make_unique<LocalMambaAllocator>(mamba_allocator_);
-        if (!local_mamba_allocator->AllocateWorking()) {
-            throw std::logic_error("ScheduleDecodeFromRetractedEvent: failed to allocate Mamba recovery working slot");
-        }
-        if (!local_mamba_allocator->AllocateCheckpoint()) {
-            throw std::logic_error(
-                "ScheduleDecodeFromRetractedEvent: failed to allocate Mamba recovery checkpoint slot");
-        }
-    }
     auto req_pool_index = std::make_unique<ReqPoolIndex>(req_pool_allocator_->Allocate());
-    local_kv_allocator->Acquire(decode_input_tokens_);
+    auto step_result = hybrid_prefix_cache_.StepCommit({
+        .request_local_kv =
+            RequestLocalKVStateRequest{
+                .allocator = local_kv_allocator.get(),
+                .acquire_tokens = decode_input_tokens_,
+            },
+        .request_local_mamba =
+            RequestLocalMambaStateRequest{
+                .create_allocator = true,
+                .require_allocator = true,
+            },
+    });
+    auto local_mamba_allocator = std::move(step_result.local_mamba_allocator);
     return Decoding{token_container,
                     page_size,
                     std::move(host_node_ref),
@@ -348,59 +321,46 @@ Decoding ScheduleDecodeFromRetractedEvent::operator()(Retracted&& state) {
 template <typename ForwardStateT>
 std::variant<Draining, Finished> FinishEvent::apply(ForwardStateT&& state) {
     auto full_paged_tokens = state.GetFullPagedTokens(true);
-    std::vector<std::int32_t> prefix_pages = DevicePagesFromRoot(state.GetDeviceNode());
-    std::int32_t alloc_count =
-        static_cast<std::int32_t>(full_paged_tokens.size()) - static_cast<std::int32_t>(prefix_pages.size());
+    const TreeNode* current_device_node = state.GetDeviceNode();
 
     auto local_mamba_allocator = std::move(state).TakeLocalMambaAllocator();
     auto local_allocator = std::move(state).TakeLocalKVAllocator();
-    if (alloc_count > 0) {
-        OwnedPages alloc_pages = local_allocator->TakeFirst(alloc_count);
-
-        kv_prefix_cache_->Insert<ResourceType::Device>(full_paged_tokens, prefix_pages, std::move(alloc_pages),
-                                                       page_hashes_);
-
-        // Mamba: insert the latest checkpoint snapshot at the terminal node.
-        if (hybrid_prefix_cache_ != nullptr && local_mamba_allocator != nullptr &&
-            (local_mamba_allocator->HasCheckpoint() || local_mamba_allocator->HasWorking())) {
-            MatchResult post_match = kv_prefix_cache_->Match(full_paged_tokens);
-            TreeNode* terminal = post_match.device.last_node;
-            if (terminal != nullptr && !terminal->HasMamba()) {
-                if (local_mamba_allocator->HasCheckpoint()) {
-                    hybrid_prefix_cache_->InsertMamba(terminal, local_mamba_allocator->DetachCheckpoint());
-                } else {
-                    hybrid_prefix_cache_->InsertMamba(terminal, local_mamba_allocator->DetachWorking());
-                }
-            }
-        }
-    }
+    StepCommitRequest publication_request{
+        .publish_finished_request =
+            FinishedRequestPublicationRequest{
+                .full_paged_tokens = &full_paged_tokens,
+                .current_device_node = current_device_node,
+                .local_kv_allocator = local_allocator.get(),
+                .local_mamba_allocator = local_mamba_allocator.get(),
+                .page_hashes = &page_hashes_,
+            },
+    };
+    MatchResult match = hybrid_prefix_cache_.StepCommit(std::move(publication_request)).match_result;
     // local_mamba_allocator dropped here — destructor frees remaining slots
 
-    MatchResult match = kv_prefix_cache_->Match(full_paged_tokens);
     if (!disable_l2_cache_ && (match.device.DepthInPage() > match.host.DepthInPage())) {
         std::vector<TreeNode*> write_diff = match.NodesWithout<ResourceType::Host>();
-        std::int32_t host_pages_num = 0;
-        for (TreeNode* node : write_diff) {
-            host_pages_num += node->Device().NumPages();
-        }
         std::unique_ptr<HostNodeRef> temp_lock = std::make_unique<HostNodeRef>(match.host.last_node);
-        if (!kv_prefix_cache_->EnsureCapacityByEvict<ResourceType::Host>(host_pages_num)) {
+        StepCommitRequest materialization_request{
+            .materialize_host_writeback =
+                HostWritebackMaterializationRequest{
+                    .write_diff = &write_diff,
+                    .ensure_capacity_before_allocate = true,
+                },
+        };
+        StepCommitResult materialization_result = hybrid_prefix_cache_.StepCommit(std::move(materialization_request));
+        if (!materialization_result.ok) {
             return Finished{};
         }
-        kv_prefix_cache_->AllocateResourceOfType<ResourceType::Host>(write_diff);
         std::unique_ptr<DeviceNodeRef> device_node_ref = std::make_unique<DeviceNodeRef>(match.device.last_node);
         std::unique_ptr<HostNodeRef> host_node_ref = std::make_unique<HostNodeRef>(match.device.last_node);
 
         auto pages_to_transfer = BuildWriteBackPairs(write_diff);
-        std::vector<TreeNode*> mamba_writeback_nodes;
-        if (hybrid_prefix_cache_ != nullptr) {
-            auto mamba_pairs = hybrid_prefix_cache_->PrepareMambaHostWriteBack(write_diff);
-            mamba_writeback_nodes = MambaNodesForTransferPairs(write_diff, mamba_pairs);
-            pages_to_transfer.insert(pages_to_transfer.end(), std::make_move_iterator(mamba_pairs.begin()),
-                                     std::make_move_iterator(mamba_pairs.end()));
-        }
+        pages_to_transfer.insert(pages_to_transfer.end(),
+                                 std::make_move_iterator(materialization_result.cache_transfer_pairs.begin()),
+                                 std::make_move_iterator(materialization_result.cache_transfer_pairs.end()));
         return Draining{std::move(pages_to_transfer), std::move(device_node_ref), std::move(host_node_ref),
-                        std::move(mamba_writeback_nodes)};
+                        std::move(materialization_result.mamba_writeback_nodes)};
     }
     return Finished{};
 }
@@ -518,16 +478,22 @@ Retracting ScheduleRetractEvent::applyRetract(ForwardStateT&& state) {
     if (match_result_.device.DepthInPage() > match_result_.host.DepthInPage()) {
         std::vector<TreeNode*> write_diff = match_result_.NodesWithout<ResourceType::Host>();
         device_node_ref = std::make_unique<DeviceNodeRef>(match_result_.device.last_node);
-        if (!kv_prefix_cache_->AllocateResourceOfType<ResourceType::Host>(write_diff)) {
+        StepCommitRequest materialization_request{
+            .materialize_host_writeback =
+                HostWritebackMaterializationRequest{
+                    .write_diff = &write_diff,
+                    .ensure_capacity_before_allocate = false,
+                },
+        };
+        StepCommitResult materialization_result = hybrid_prefix_cache_.StepCommit(std::move(materialization_request));
+        if (!materialization_result.ok) {
             throw std::logic_error("ScheduleRetractEvent: failed to allocate host pages for device cache writeback");
         }
         pages_to_transfer = BuildWriteBackPairs(write_diff);
-        if (hybrid_prefix_cache_ != nullptr) {
-            auto mamba_pairs = hybrid_prefix_cache_->PrepareMambaHostWriteBack(write_diff);
-            mamba_writeback_nodes = MambaNodesForTransferPairs(write_diff, mamba_pairs);
-            pages_to_transfer.insert(pages_to_transfer.end(), std::make_move_iterator(mamba_pairs.begin()),
-                                     std::make_move_iterator(mamba_pairs.end()));
-        }
+        pages_to_transfer.insert(pages_to_transfer.end(),
+                                 std::make_move_iterator(materialization_result.cache_transfer_pairs.begin()),
+                                 std::make_move_iterator(materialization_result.cache_transfer_pairs.end()));
+        mamba_writeback_nodes = std::move(materialization_result.mamba_writeback_nodes);
         host_node_ref = std::make_unique<HostNodeRef>(match_result_.device.last_node);
     } else {
         host_node_ref = std::make_unique<HostNodeRef>(match_result_.device.last_node);
@@ -538,23 +504,13 @@ Retracting ScheduleRetractEvent::applyRetract(ForwardStateT&& state) {
     auto local_allocator = std::move(state).TakeLocalKVAllocator();
     auto local_mamba_allocator = std::move(state).TakeLocalMambaAllocator();
 
-    // Mamba: save the latest checkpoint/working state into the prefix cache
-    // before the request is retracted, so it can be recovered on loadback.
-    if (hybrid_prefix_cache_ != nullptr && local_mamba_allocator != nullptr &&
-        (local_mamba_allocator->HasCheckpoint() || local_mamba_allocator->HasWorking())) {
-        TreeNode* terminal = match_result_.device.last_node;
-        if (terminal != nullptr && !terminal->HasMamba()) {
-            if (local_mamba_allocator->HasCheckpoint()) {
-                hybrid_prefix_cache_->InsertMamba(terminal, local_mamba_allocator->DetachCheckpoint());
-            } else {
-                hybrid_prefix_cache_->InsertMamba(terminal, local_mamba_allocator->DetachWorking());
-            }
-        }
-        // Once retracted, the recoverable Mamba state is tree-owned and
-        // therefore evictable by HybridPrefixCache. Do not keep request-local
-        // slots alive in Retracting/Retracted.
-        local_mamba_allocator.reset();
-    }
+    (void)hybrid_prefix_cache_.StepCommit({
+        .publish_tree_owned_request_state =
+            TreeOwnedRequestStatePublicationRequest{
+                .terminal = match_result_.device.last_node,
+                .local_mamba_allocator_owner = &local_mamba_allocator,
+            },
+    });
 
     return Retracting{token_container,
                       page_size,

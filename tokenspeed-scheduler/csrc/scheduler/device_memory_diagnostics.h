@@ -21,41 +21,23 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
+#include <string>
+#include <vector>
 
-#include "resource/radix_tree/mamba_slot.h"
+#include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
 
 namespace tokenspeed {
 
-class MambaChunkAllocator;
-
-class LocalMambaAllocator {
-public:
-    explicit LocalMambaAllocator(MambaChunkAllocator* allocator);
-    ~LocalMambaAllocator() = default;
-
-    LocalMambaAllocator(LocalMambaAllocator&&) noexcept = default;
-    LocalMambaAllocator& operator=(LocalMambaAllocator&&) noexcept = default;
-    LocalMambaAllocator(const LocalMambaAllocator&) = delete;
-    LocalMambaAllocator& operator=(const LocalMambaAllocator&) = delete;
-
-    bool AllocateWorking();
-    void ReleaseWorking();
-    std::int32_t WorkingIndex() const;
-    bool HasWorking() const { return working_ != nullptr; }
-
-    bool AllocateCheckpoint(std::int32_t raw_position = -1);
-    std::int32_t CheckpointIndex() const;
-    std::int32_t CheckpointPosition() const { return checkpoint_position_; }
-    bool HasCheckpoint() const { return checkpoint_ != nullptr; }
-    std::unique_ptr<MambaSlot> DetachCheckpoint();
-    std::unique_ptr<MambaSlot> DetachWorking();
-
-private:
-    MambaChunkAllocator* allocator_;
-    std::unique_ptr<MambaSlot> working_{};
-    std::unique_ptr<MambaSlot> checkpoint_{};
-    std::int32_t checkpoint_position_{-1};
+struct RequestLocalKVPagesSnapshot {
+    std::string request_id;
+    std::string state_name;
+    std::vector<std::int32_t> pages;
 };
+
+// Validates the debug-only device-page accounting snapshot used by
+// Scheduler::check_device_mem(). The function is side-effect free except for
+// the same diagnostic logging as the historical inline checks.
+bool ValidateDeviceMemoryDiagnostics(const std::vector<RequestLocalKVPagesSnapshot>& request_pages,
+                                     const HybridPrefixCache::DeviceMemoryDiagnosticsSnapshot& device_snapshot);
 
 }  // namespace tokenspeed

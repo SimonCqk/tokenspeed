@@ -20,7 +20,6 @@
 
 #include "scheduler/scheduler.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -28,6 +27,7 @@
 #include <map>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -44,22 +44,124 @@
 #include "fsm/forward_states.h"
 #include "resource/kv_prefix_cache/kv_prefix_cache.h"
 #include "resource/radix_tree/radix_tree.h"
-#include "resource/radix_tree/tree_node.h"
+#include "scheduler/device_memory_diagnostics.h"
 #include "scheduler/execution_event.h"
 #include "scheduler/operations/cache.h"
 #include "scheduler/page_hasher.h"
 #include "scheduler/request.h"
+#include "scheduler/request_cache_context.h"
 #include "scheduler/request_spec.h"
 #include "scheduler/types.h"
 
 namespace tokenspeed {
 
+namespace {
+
+std::optional<MambaChunkAllocator> MakeMambaAllocator(const SchedulerConfig& config) {
+    if (config.enable_mamba && config.mamba_pool_total_chunks > 0) {
+        return std::optional<MambaChunkAllocator>{std::in_place, config.mamba_pool_total_chunks};
+    }
+    return std::nullopt;
+}
+
+MambaChunkAllocator* MambaAdjunctAllocator(std::optional<MambaChunkAllocator>& allocator,
+                                           const SchedulerConfig& config) {
+    const bool has_mamba_pool = allocator.has_value();
+    const bool has_mamba_adjunct = has_mamba_pool && config.role != Role::kD;
+    return has_mamba_adjunct ? &*allocator : nullptr;
+}
+
+std::optional<MambaHostAllocator> MakeMambaHostAllocator(const SchedulerConfig& config) {
+    if (config.enable_mamba && config.mamba_pool_total_chunks > 0 && config.enable_mamba_l2 &&
+        config.mamba_l2_host_slots > 0) {
+        return std::optional<MambaHostAllocator>{std::in_place, config.mamba_l2_host_slots};
+    }
+    return std::nullopt;
+}
+
+MambaHostAllocator* MambaHostAdjunctAllocator(std::optional<MambaHostAllocator>& host_allocator,
+                                              std::optional<MambaChunkAllocator>& device_allocator,
+                                              const SchedulerConfig& config) {
+    const bool has_mamba_adjunct = device_allocator.has_value() && config.role != Role::kD;
+    return has_mamba_adjunct && host_allocator.has_value() ? &*host_allocator : nullptr;
+}
+
+}  // namespace
+
+bool ValidateDeviceMemoryDiagnostics(const std::vector<RequestLocalKVPagesSnapshot>& request_pages,
+                                     const HybridPrefixCache::DeviceMemoryDiagnosticsSnapshot& device_snapshot) {
+    bool ok = true;
+    const std::int32_t total_device = device_snapshot.total_device_pages;
+    // page_id → (owner_req_id, state_name) for duplicate tail-page reporting
+    std::unordered_map<std::int32_t, std::pair<std::string, std::string>> page_owner;
+
+    for (const auto& snapshot : request_pages) {
+        for (std::int32_t p : snapshot.pages) {
+            auto [it, inserted] = page_owner.emplace(p, std::make_pair(snapshot.request_id, snapshot.state_name));
+            if (!inserted) {
+                spdlog::error("[check_mem] DEVICE TAIL PAGE OVERLAP: page={}  req1={}({})  req2={}({})", p,
+                              it->second.first, it->second.second, snapshot.request_id, snapshot.state_name);
+                ok = false;
+            }
+        }
+    }
+
+    // ── 2a. Check for duplicate page_ids inside the tree itself ─────────────
+    for (auto& [page, cnt] : device_snapshot.tree_device_pages) {
+        if (cnt > 1) {
+            spdlog::error("[check_mem] DEVICE TREE DUPLICATE: page={} appears {} times in radix tree", page, cnt);
+            ok = false;
+        }
+    }
+
+    const std::int32_t tree_device_total = static_cast<std::int32_t>(device_snapshot.tree_device_pages.size());
+
+    std::int32_t req_device_total = 0;
+    for (const auto& snapshot : request_pages) {
+        req_device_total += static_cast<std::int32_t>(snapshot.pages.size());
+    }
+
+    const std::int32_t free_device = device_snapshot.free_device_pages;
+
+    if (tree_device_total + req_device_total + free_device != total_device) {
+        spdlog::error("[check_mem] DEVICE PAGE ACCOUNTING MISMATCH: tree={} req={} free={} sum={} total={}",
+                      tree_device_total, req_device_total, free_device,
+                      tree_device_total + req_device_total + free_device, total_device);
+        ok = false;
+    }
+
+    // ── 4. Per-request: page ids must be in [1, total] ────────────────────
+    // PageAllocator starts from page id 1 (0 is reserved as invalid/null).
+    for (const auto& snapshot : request_pages) {
+        for (std::int32_t p : snapshot.pages) {
+            if (p <= 0 || p > total_device) {
+                spdlog::error("[check_mem] INVALID DEVICE PAGE id={} for req={} (valid range [1,{}])", p,
+                              snapshot.request_id, total_device);
+                ok = false;
+            }
+        }
+    }
+    for (const auto& entry : device_snapshot.tree_device_pages) {
+        const std::int32_t p = entry.first;
+        if (p <= 0 || p > total_device) {
+            spdlog::error("[check_mem] INVALID DEVICE PAGE id={} in radix tree (valid range [1,{}])", p, total_device);
+            ok = false;
+        }
+    }
+
+    return ok;
+}
+
 Scheduler::Scheduler(SchedulerConfig config)
     : config_{std::move(config)},
       device_allocator_{config_.page_size, config_.device_allocator.total_pages},
       host_allocator_{config_.page_size, config_.host_allocator.total_pages},
-      mamba_allocator_{},
+      mamba_allocator_{MakeMambaAllocator(config_)},
+      mamba_host_allocator_{MakeMambaHostAllocator(config_)},
       kv_prefix_cache_{&device_allocator_, &host_allocator_, config_.enable_l3_storage, config_.disable_prefix_cache},
+      hybrid_prefix_cache_{kv_prefix_cache_, device_allocator_, MambaAdjunctAllocator(mamba_allocator_, config_),
+                           config_.mamba_cache_chunk_size,
+                           MambaHostAdjunctAllocator(mamba_host_allocator_, mamba_allocator_, config_)},
       req_pool_allocator_{config_.max_batch_size} {
     if (auto* env = std::getenv("SPDLOG_LEVEL")) {
         std::string level_str{env};
@@ -68,68 +170,18 @@ Scheduler::Scheduler(SchedulerConfig config)
     }
 
     if (config_.enable_kv_cache_events) {
-        kv_prefix_cache_.SetKvEventSink([this](KvCacheEvent event) { kv_events_.push_back(std::move(event)); });
+        hybrid_prefix_cache_.SetKvEventSink([this](KvCacheEvent event) { kv_events_.push_back(std::move(event)); });
     }
-    const bool has_mamba_pool = config_.enable_mamba && config_.mamba_pool_total_chunks > 0;
-    if (has_mamba_pool) {
-        mamba_allocator_.emplace(config_.mamba_pool_total_chunks);
+    std::optional<std::span<const std::string>> required_paged_cache_groups;
+    if (config_.prefix_cache_adjunct.has_value()) {
+        required_paged_cache_groups = std::span<const std::string>{config_.prefix_cache_adjunct->required_groups};
     }
-    const bool has_mamba_l2_pool = has_mamba_pool && config_.enable_mamba_l2 && config_.mamba_l2_host_slots > 0;
-    if (has_mamba_l2_pool) {
-        mamba_host_allocator_.emplace(config_.mamba_l2_host_slots);
-    }
+    hybrid_prefix_cache_.ConfigurePagedCacheAdjunct(std::span<const PagedCacheGroupConfig>{config_.paged_cache_groups},
+                                                    required_paged_cache_groups);
+}
 
-    // Construct HybridPrefixCache when any adjunct/paged-cache feature is configured.
-    // Role::kD skips Mamba but still participates in paged-cache transport.
-    const bool has_mamba_adjunct = has_mamba_pool && config_.role != Role::kD;
-    const bool has_prefix_cache_adjunct = config_.prefix_cache_adjunct.has_value();
-    const bool has_paged_cache_groups = !config_.paged_cache_groups.empty();
-    if (has_mamba_adjunct || has_prefix_cache_adjunct || has_paged_cache_groups) {
-        MambaChunkAllocator* mamba_ptr = has_mamba_adjunct ? &*mamba_allocator_ : nullptr;
-        MambaHostAllocator* mamba_host_ptr = has_mamba_l2_pool ? &*mamba_host_allocator_ : nullptr;
-        hybrid_prefix_cache_.emplace(kv_prefix_cache_, mamba_ptr, config_.mamba_cache_chunk_size, mamba_host_ptr);
-        kv_prefix_cache_.GetDeviceManager().SetEvictionCallback(
-            [this](TreeNode* node) { hybrid_prefix_cache_->OnKVEvict(node); });
-        kv_prefix_cache_.GetHostManager().SetEvictionCallback(
-            [this](TreeNode* node) { hybrid_prefix_cache_->OnKVHostEvict(node); });
-
-        for (const auto& cfg : config_.paged_cache_groups) {
-            PagedCacheGroupConfig copy = cfg;
-            copy.Validate();
-            hybrid_prefix_cache_->RegisterPagedCacheGroup(std::make_unique<PagedCacheGroupAllocator>(std::move(copy)));
-        }
-
-        if (has_prefix_cache_adjunct) {
-            const auto& spec = *config_.prefix_cache_adjunct;
-            if (spec.required_groups.empty()) {
-                throw std::invalid_argument("Scheduler: prefix_cache_adjunct.required_groups must be non-empty");
-            }
-            // HybridPrefixCache derives history alignment from the registered
-            // group configs; we still build the sliding-window map here.
-            std::unordered_map<std::string, std::int32_t> sliding_window_per_group;
-            for (const auto& gid : spec.required_groups) {
-                const PagedCacheGroupConfig* cfg = nullptr;
-                for (const auto& g : config_.paged_cache_groups) {
-                    if (g.group_id == gid) {
-                        cfg = &g;
-                        break;
-                    }
-                }
-                if (cfg == nullptr) {
-                    throw std::invalid_argument("Scheduler: prefix_cache_adjunct required group_id '" + gid +
-                                                "' not found in paged_cache_groups");
-                }
-                if (cfg->retention == PagedCacheGroupConfig::Retention::SlidingWindow) {
-                    if (!cfg->sliding_window_tokens.has_value() || *cfg->sliding_window_tokens <= 0) {
-                        throw std::invalid_argument("Scheduler: prefix_cache_adjunct sliding group '" + gid +
-                                                    "' must declare positive sliding_window_tokens");
-                    }
-                    sliding_window_per_group.emplace(gid, *cfg->sliding_window_tokens);
-                }
-            }
-            hybrid_prefix_cache_->EnablePagedCacheAdjunct(spec.required_groups, std::move(sliding_window_per_group));
-        }
-    }
+Scheduler::~Scheduler() {
+    hybrid_prefix_cache_.SetKvEventSink({});
 }
 
 std::vector<KvCacheEvent> Scheduler::DrainKvEvents() {
@@ -149,16 +201,15 @@ std::vector<std::string> Scheduler::CalcRollingHash(const std::vector<std::int32
     if (!apply_match) {
         return ComputePagedHashes(token_pages, "");
     }
-    MatchResult result = kv_prefix_cache_.Match(token_pages);
-    const std::int32_t host_matched = result.host.DepthInPage();
+    const auto raw_host_seed = hybrid_prefix_cache_.LookupRawHostStorageHashSeed(token_pages);
+    const std::int32_t host_matched = raw_host_seed.host_matched_pages;
     if (host_matched >= static_cast<std::int32_t>(num_pages)) {
         return {};
     }
-    const auto& hashes = result.host.last_node->PageHashes();
-    std::string prior = hashes.empty() ? std::string{} : hashes.back();
 
     return ComputePagedHashes(
-        std::vector<std::span<const std::int32_t>>(token_pages.begin() + host_matched, token_pages.end()), prior);
+        std::vector<std::span<const std::int32_t>>(token_pages.begin() + host_matched, token_pages.end()),
+        raw_host_seed.prior_hash_seed);
 }
 
 void Scheduler::SubmitRequests(const std::vector<RequestSpec>& request_specs) {
@@ -209,14 +260,15 @@ std::size_t Scheduler::RetractedSize() const {
 }
 
 std::size_t Scheduler::AvailableKvPages() const {
-    return device_allocator_.AvailablePages();
+    return hybrid_prefix_cache_.Stats().available_device_pages;
 }
 
 std::size_t Scheduler::ActiveKvPages() const {
     std::unordered_set<std::int32_t> active_pages;
     for (const auto& [_, req] : requests_) {
         if (req->Is<fsm::Prefilling>() || req->Is<fsm::PrefillDone>() || req->Is<fsm::Decoding>()) {
-            for (std::int32_t page : req->GetOccupiedPages()) {
+            RequestCacheContext cache_context(*req);
+            for (std::int32_t page : cache_context.OccupiedPagesSnapshot()) {
                 active_pages.insert(page);
             }
         }
@@ -225,45 +277,32 @@ std::size_t Scheduler::ActiveKvPages() const {
 }
 
 std::vector<std::string> Scheduler::PagedCacheGroupIds() const {
-    if (!hybrid_prefix_cache_) return {};
-    return hybrid_prefix_cache_->PagedCacheGroupIds();
+    return hybrid_prefix_cache_.Stats().paged_cache_group_ids;
 }
 
 std::int32_t Scheduler::PagedCacheGroupTotalPages(const std::string& group_id) const {
-    if (!hybrid_prefix_cache_) {
-        throw std::out_of_range("Scheduler::PagedCacheGroupTotalPages: group_id not configured");
-    }
-    return hybrid_prefix_cache_->PagedCacheGroupTotalPages(group_id);
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}}).paged_cache_total_pages.at(group_id);
 }
 
 std::int32_t Scheduler::PagedCacheGroupAvailablePages(const std::string& group_id) const {
-    if (!hybrid_prefix_cache_) {
-        throw std::out_of_range("Scheduler::PagedCacheGroupAvailablePages: group_id not configured");
-    }
-    return hybrid_prefix_cache_->PagedCacheGroupAvailablePages(group_id);
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}}).paged_cache_available_pages.at(group_id);
 }
 
 std::int64_t Scheduler::PagedCacheGroupFailedAllocCount(const std::string& group_id) const {
-    if (!hybrid_prefix_cache_) {
-        throw std::out_of_range("Scheduler::PagedCacheGroupFailedAllocCount: group_id not configured");
-    }
-    return hybrid_prefix_cache_->PagedCacheGroupFailedAllocCount(group_id);
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}})
+        .paged_cache_failed_alloc_count.at(group_id);
 }
 
 std::vector<std::int32_t> Scheduler::GetRequestPagedCachePageIds(const std::string& request_id,
                                                                  const std::string& group_id) const {
-    if (!hybrid_prefix_cache_) {
-        throw std::out_of_range("Scheduler::GetRequestPagedCachePageIds: group_id not configured");
-    }
-    return hybrid_prefix_cache_->GetRequestPagedCachePageIds(request_id, group_id);
+    return hybrid_prefix_cache_.Stats({.request_id = request_id, .paged_cache_group_ids = {group_id}})
+        .request_paged_cache_page_ids.at(group_id);
 }
 
 std::int32_t Scheduler::GetRequestPagedCacheBaseLogicalPage(const std::string& request_id,
                                                             const std::string& group_id) const {
-    if (!hybrid_prefix_cache_) {
-        throw std::out_of_range("Scheduler::GetRequestPagedCacheBaseLogicalPage: group_id not configured");
-    }
-    return hybrid_prefix_cache_->GetRequestPagedCacheBaseLogicalPage(request_id, group_id);
+    return hybrid_prefix_cache_.Stats({.request_id = request_id, .paged_cache_group_ids = {group_id}})
+        .request_paged_cache_base_logical_page.at(group_id);
 }
 
 std::int32_t Scheduler::GetRequestTokenSize(const std::string& id) const {
@@ -285,7 +324,7 @@ std::vector<WriteBackOperation> Scheduler::newWriteBackOperation(
         const auto& pages_to_transfer = req->GetPagesToTransfer<fsm::Draining>();
 
         if (!pages_to_transfer.empty()) {
-            cache_op_id op_id = kv_prefix_cache_.AllocateCacheOpId();
+            cache_op_id op_id = hybrid_prefix_cache_.AllocateCacheOpId();
             CacheOpSpec spec;
             spec.request_id = id;
             cache_op_tracker_[op_id] = std::move(spec);
@@ -305,11 +344,9 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
     std::vector<WriteBackOperation> write_back_ops;
     write_back_ops = std::move(newWriteBackOperation(requests_));
 
-    if (hybrid_prefix_cache_) {
-        for (const auto& [id, req] : requests_) {
-            if (req->Is<fsm::Finished>()) {
-                hybrid_prefix_cache_->ReleaseRequest(id);
-            }
+    for (const auto& [id, req] : requests_) {
+        if (req->Is<fsm::Finished>()) {
+            hybrid_prefix_cache_.FinishRequest(id);
         }
     }
     std::erase_if(requests_, [](const auto& req) { return req.second->template Is<fsm::Finished>(); });
@@ -345,73 +382,27 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
 }
 
 void Scheduler::check_device_mem() {
-    bool ok = true;
-    const std::int32_t total_device = device_allocator_.TotalPages() - 1;
-    std::unordered_map<std::string, std::vector<std::int32_t>> req_pages_map;
-    // page_id → (owner_req_id, state_name) for duplicate tail-page reporting
-    std::unordered_map<std::int32_t, std::pair<std::string, std::string>> page_owner;
+    std::vector<RequestLocalKVPagesSnapshot> request_page_snapshots;
 
     for (auto& [id, req] : requests_) {
-        std::string state = req->StateName();
-        std::vector<std::int32_t> pages = req->GetLocalAllocatorPages();
+        RequestCacheContext cache_context(*req);
+        std::vector<std::int32_t> pages = cache_context.LocalKVPagesSnapshot();
         if (pages.empty()) continue;
-        req_pages_map[id] = pages;
-
-        for (std::int32_t p : pages) {
-            auto [it, inserted] = page_owner.emplace(p, std::make_pair(id, state));
-            if (!inserted) {
-                spdlog::error("[check_mem] DEVICE TAIL PAGE OVERLAP: page={}  req1={}({})  req2={}({})", p,
-                              it->second.first, it->second.second, id, state);
-                ok = false;
-            }
-        }
+        request_page_snapshots.push_back(RequestLocalKVPagesSnapshot{
+            .request_id = id,
+            .state_name = req->StateName(),
+            .pages = std::move(pages),
+        });
     }
 
-    // ── 2. Collect pages in radix tree ───────────────────────────────────────
-    auto tree_device_pages = kv_prefix_cache_.CollectAllPages<ResourceType::Device>();
-
-    // 2a. Check for duplicate page_ids inside the tree itself
-    for (auto& [page, cnt] : tree_device_pages) {
-        if (cnt > 1) {
-            spdlog::error("[check_mem] DEVICE TREE DUPLICATE: page={} appears {} times in radix tree", page, cnt);
-            ok = false;
-        }
+    auto stats_snapshot = hybrid_prefix_cache_.Stats({.include_device_memory_diagnostics = true});
+    if (!stats_snapshot.device_memory_diagnostics.has_value()) {
+        throw std::runtime_error("Scheduler::check_device_mem: missing diagnostics snapshot");
     }
-
-    std::int32_t tree_device_total = static_cast<std::int32_t>(tree_device_pages.size());
-
-    std::int32_t req_device_total = 0;
-    for (auto& [id, pages] : req_pages_map) req_device_total += static_cast<std::int32_t>(pages.size());
-
-    std::int32_t free_device = device_allocator_.AvailablePages();
-
-    if (tree_device_total + req_device_total + free_device != total_device) {
-        spdlog::error("[check_mem] DEVICE PAGE ACCOUNTING MISMATCH: tree={} req={} free={} sum={} total={}",
-                      tree_device_total, req_device_total, free_device,
-                      tree_device_total + req_device_total + free_device, total_device);
-        ok = false;
-    }
-
-    // ── 4. Per-request: page ids must be in [1, total] ────────────────────
-    // PageAllocator starts from page id 1 (0 is reserved as invalid/null).
-    for (auto& [id, pages] : req_pages_map) {
-        for (std::int32_t p : pages) {
-            if (p <= 0 || p > total_device) {
-                spdlog::error("[check_mem] INVALID DEVICE PAGE id={} for req={} (valid range [1,{}])", p, id,
-                              total_device);
-                ok = false;
-            }
-        }
-    }
-    for (auto& [p, cnt] : tree_device_pages) {
-        if (p <= 0 || p > total_device) {
-            spdlog::error("[check_mem] INVALID DEVICE PAGE id={} in radix tree (valid range [1,{}])", p, total_device);
-            ok = false;
-        }
-    }
+    auto device_snapshot = std::move(*stats_snapshot.device_memory_diagnostics);
 
     // ── 5. Summary ────────────────────────────────────────────────────────────
-    if (!ok) {
+    if (!ValidateDeviceMemoryDiagnostics(request_page_snapshots, device_snapshot)) {
         throw std::runtime_error("Scheduler::CheckMem: device page accounting check failed");
     }
 }
