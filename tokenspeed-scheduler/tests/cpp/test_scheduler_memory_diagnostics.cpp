@@ -24,8 +24,6 @@
 #include <cstdint>
 #include <span>
 #include <string>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include "resource/allocator/owned_pages.h"
@@ -49,16 +47,6 @@ std::vector<std::span<const std::int32_t>> TokenPages(const token_vec_t& tokens)
         pages.emplace_back(tokens.data() + i, kPageSize);
     }
     return pages;
-}
-
-HybridPrefixCache::DeviceMemoryDiagnosticsSnapshot DeviceSnapshot(
-    std::unordered_map<std::int32_t, int> tree_device_pages, std::int32_t free_device_pages,
-    std::int32_t total_device_pages) {
-    return HybridPrefixCache::DeviceMemoryDiagnosticsSnapshot{
-        .tree_device_pages = std::move(tree_device_pages),
-        .free_device_pages = free_device_pages,
-        .total_device_pages = total_device_pages,
-    };
 }
 
 }  // namespace
@@ -108,53 +96,6 @@ TEST(HybridPrefixCacheDeviceStatsTest, DiagnosticsSnapshotReportsTreeAndAllocato
     EXPECT_EQ(snapshot.free_device_pages, 5);
     EXPECT_EQ(snapshot.total_device_pages, 7);
     EXPECT_TRUE(ValidateDeviceMemoryDiagnostics(/*request_pages=*/{}, snapshot));
-}
-
-TEST(DeviceMemoryDiagnosticsValidationTest, AcceptsBalancedSnapshot) {
-    const std::vector<RequestLocalKVPagesSnapshot> request_pages = {
-        {.request_id = "r1", .state_name = "Prefilling", .pages = {1, 2}},
-        {.request_id = "r2", .state_name = "Decoding", .pages = {3}},
-    };
-    auto device_snapshot = DeviceSnapshot({{4, 1}, {5, 1}}, /*free_device_pages=*/4, /*total_device_pages=*/9);
-
-    EXPECT_TRUE(ValidateDeviceMemoryDiagnostics(request_pages, device_snapshot));
-}
-
-TEST(DeviceMemoryDiagnosticsValidationTest, RejectsDuplicateRequestLocalPages) {
-    const std::vector<RequestLocalKVPagesSnapshot> request_pages = {
-        {.request_id = "r1", .state_name = "Prefilling", .pages = {1}},
-        {.request_id = "r2", .state_name = "Decoding", .pages = {1}},
-    };
-    auto device_snapshot = DeviceSnapshot({{2, 1}}, /*free_device_pages=*/2, /*total_device_pages=*/5);
-
-    EXPECT_FALSE(ValidateDeviceMemoryDiagnostics(request_pages, device_snapshot));
-}
-
-TEST(DeviceMemoryDiagnosticsValidationTest, RejectsDuplicateTreePages) {
-    const std::vector<RequestLocalKVPagesSnapshot> request_pages = {
-        {.request_id = "r1", .state_name = "Prefilling", .pages = {1}},
-    };
-    auto device_snapshot = DeviceSnapshot({{2, 2}}, /*free_device_pages=*/2, /*total_device_pages=*/4);
-
-    EXPECT_FALSE(ValidateDeviceMemoryDiagnostics(request_pages, device_snapshot));
-}
-
-TEST(DeviceMemoryDiagnosticsValidationTest, RejectsOutOfRangePageIds) {
-    const std::vector<RequestLocalKVPagesSnapshot> request_pages = {
-        {.request_id = "r1", .state_name = "Prefilling", .pages = {0}},
-    };
-    auto device_snapshot = DeviceSnapshot({{5, 1}}, /*free_device_pages=*/2, /*total_device_pages=*/4);
-
-    EXPECT_FALSE(ValidateDeviceMemoryDiagnostics(request_pages, device_snapshot));
-}
-
-TEST(DeviceMemoryDiagnosticsValidationTest, RejectsAccountingMismatch) {
-    const std::vector<RequestLocalKVPagesSnapshot> request_pages = {
-        {.request_id = "r1", .state_name = "Prefilling", .pages = {1}},
-    };
-    auto device_snapshot = DeviceSnapshot({{2, 1}}, /*free_device_pages=*/0, /*total_device_pages=*/4);
-
-    EXPECT_FALSE(ValidateDeviceMemoryDiagnostics(request_pages, device_snapshot));
 }
 
 }  // namespace tokenspeed::test

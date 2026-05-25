@@ -96,13 +96,12 @@ TEST_F(PagedCacheEvictionTest, StatePressurePrunesOnlyStateWhenHistoryHasCapacit
     MatchResult match = kv_cache_->Match(token_vec_t{});
     AdmissionRequest request{
         .request_id = "state-pressure",
+        .kind = AdmissionRequestKind::kPrefillFirstChunk,
         .device_pages_needed = 0,
         .tokens_this_round = kLcm,
         .first_raw_position_of_op = 0,
         .target_raw_tokens_exclusive = kLcm,
         .compat_match = &match,
-        .auxiliary_tree_slots_needed = 2,
-        .compute_branching_checkpoint = true,
     };
 
     auto result = hybrid_->Admit(request, simulated_free);

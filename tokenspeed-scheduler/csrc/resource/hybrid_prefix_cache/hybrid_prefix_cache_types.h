@@ -145,8 +145,17 @@ struct ResourceDemand {
     std::string state_cohort_id{};
 };
 
+enum class AdmissionRequestKind {
+    kPrefillFirstChunk,
+    kPrefillChunk,
+    kDecodeChunk,
+    kDecodeFromRetracted,
+    kRetract,
+};
+
 struct AdmissionRequest {
     std::string request_id{};
+    AdmissionRequestKind kind{AdmissionRequestKind::kDecodeChunk};
     std::int32_t device_pages_needed{0};
     std::int32_t host_pages_needed{0};
     std::int32_t tokens_this_round{0};
@@ -155,10 +164,6 @@ struct AdmissionRequest {
     const RecoveryPlan* recovery_plan{nullptr};
     const MatchResult* compat_match{nullptr};
     TreeNode* protected_recovery_node{nullptr};
-    std::int32_t auxiliary_tree_slots_needed{0};
-    bool protect_host_match_node{false};
-    bool fresh_request_table_view{false};
-    bool compute_branching_checkpoint{false};
     bool refresh_mamba_checkpoint{false};
     std::vector<ResourceDemand> demands{};
 };
@@ -227,8 +232,16 @@ struct TreeOwnedRequestStatePublicationRequest {
     std::unique_ptr<LocalMambaAllocator>* local_mamba_allocator_owner{nullptr};
 };
 
+enum class WorkerCompatibilityCommitKind {
+    kPrefillFirstChunk,
+    kPrefillChunk,
+    kDecodeChunk,
+    kDecodeFromRetracted,
+};
+
 struct WorkerCompatibilityCommitRequest {
     ForwardOperationBase* op_base{nullptr};
+    WorkerCompatibilityCommitKind kind{WorkerCompatibilityCommitKind::kDecodeChunk};
     TreeNode* terminal{nullptr};
     const RecoveryPlan* recovery_plan{nullptr};
     const MatchResult* compat_match{nullptr};
@@ -237,10 +250,6 @@ struct WorkerCompatibilityCommitRequest {
     std::int32_t first_raw_position_of_op{0};
     std::int32_t target_raw_tokens_exclusive{0};
     bool commit_tree_prefix_before_acquire{false};
-    bool import_paged_cache_hit{false};
-    bool populate_prefix_reuse_metadata{false};
-    bool populate_recovery_metadata{false};
-    bool release_request_state_before_acquire{false};
 };
 
 struct StepCommitRequest {

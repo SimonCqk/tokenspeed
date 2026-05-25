@@ -18,8 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "resource/hybrid_prefix_cache/paged_cache_family_ops.h"
-
 #include "resource/allocator/paged_cache_group.h"
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
 #include "resource/radix_tree/paged_cache_snapshot.h"
@@ -43,7 +41,7 @@
 #include <vector>
 
 namespace tokenspeed {
-namespace hybrid_prefix_cache::detail {
+namespace {
 
 std::vector<TreeNode*> CollectAncestorPathRootToLeaf(TreeNode* from) {
     std::vector<TreeNode*> path;
@@ -54,7 +52,7 @@ std::vector<TreeNode*> CollectAncestorPathRootToLeaf(TreeNode* from) {
     return path;
 }
 
-}  // namespace hybrid_prefix_cache::detail
+}  // namespace
 
 bool HybridPrefixCache::AttachPagedCacheSnapshotToNode(TreeNode* node, std::unique_ptr<PagedCacheSnapshot> snapshot) {
     if (node == nullptr || snapshot == nullptr) return false;
@@ -239,7 +237,7 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
         }
     };
 
-    std::vector<TreeNode*> path = hybrid_prefix_cache::detail::CollectAncestorPathRootToLeaf(match.device.last_node);
+    std::vector<TreeNode*> path = CollectAncestorPathRootToLeaf(match.device.last_node);
 
     // Phase A: history chain. Walk root->leaf, advance only on contiguous
     // History-family completeness at every k*align boundary.

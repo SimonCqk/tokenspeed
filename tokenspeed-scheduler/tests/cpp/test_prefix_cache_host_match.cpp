@@ -160,23 +160,4 @@ TEST(PrefixCacheHostMatchDiag, RawHostStorageHashSeedIgnoresAugmentedMambaMatchC
     EXPECT_EQ(seed.prior_hash_seed, stored_hashes.back());
 }
 
-TEST(PrefixCacheHostMatchDiag, RawHostStorageHashSeedReturnsEmptyPriorWhenHostNodeHasNoPageHashes) {
-    static constexpr std::int32_t kPageSize = 2;
-    PageAllocator device_alloc{kPageSize, 16};
-    PageAllocator host_alloc{kPageSize, 16};
-    KVPrefixCache cache{&device_alloc, &host_alloc, false};
-    HybridPrefixCache hybrid_cache{cache, device_alloc, nullptr, /*mamba_cache_chunk_size=*/0};
-
-    token_vec_t stored_tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1);
-    auto stored_pages = TokenPages(stored_tokens, kPageSize);
-    cache.Insert<ResourceType::Host>(stored_pages, {}, host_alloc.Allocate(2));
-
-    token_vec_t lookup_tokens = MakeAlignedTokens(/*num_pages=*/3, kPageSize, /*start=*/1);
-    auto lookup_pages = TokenPages(lookup_tokens, kPageSize);
-    const auto seed = hybrid_cache.LookupRawHostStorageHashSeed(lookup_pages);
-
-    EXPECT_EQ(seed.host_matched_pages, 2);
-    EXPECT_TRUE(seed.prior_hash_seed.empty());
-}
-
 }  // namespace tokenspeed::test

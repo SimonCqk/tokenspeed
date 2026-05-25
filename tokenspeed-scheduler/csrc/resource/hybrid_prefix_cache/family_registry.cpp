@@ -18,12 +18,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "resource/hybrid_prefix_cache/family_registry.h"
-
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <span>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -79,7 +80,28 @@ std::int32_t FamilyRegistry::Register(CacheResourceSpec spec, bool active_match,
     return index;
 }
 
-namespace hybrid_prefix_cache::detail {
+namespace {
+
+struct PagedCacheFamilyRegistryInput {
+    std::string group_id;
+    PagedCacheGroupConfig config;
+    bool required{false};
+};
+
+struct FamilyRegistryBuildInput {
+    std::int32_t kv_page_size{0};
+    bool has_mamba_adjunct{false};
+    std::int32_t mamba_cache_chunk_size{0};
+    std::span<const PagedCacheFamilyRegistryInput> paged_cache_groups{};
+};
+
+struct FamilyRegistryBuildResult {
+    FamilyRegistry registry{};
+    std::vector<std::string> paged_cache_history_groups{};
+    std::vector<std::string> paged_cache_state_groups{};
+    std::unordered_set<std::string> paged_cache_history_group_set{};
+    std::unordered_set<std::string> paged_cache_state_group_set{};
+};
 
 FamilyRegistryBuildResult BuildFamilyRegistry(const FamilyRegistryBuildInput& input) {
     FamilyRegistryBuildResult result{};
@@ -166,12 +188,12 @@ FamilyRegistryBuildResult BuildFamilyRegistry(const FamilyRegistryBuildInput& in
     return result;
 }
 
-}  // namespace hybrid_prefix_cache::detail
+}  // namespace
 
 void HybridPrefixCache::RebuildFamilyRegistry() {
     const std::unordered_set<std::string> required_group_set(paged_cache_required_groups_.begin(),
                                                              paged_cache_required_groups_.end());
-    std::vector<hybrid_prefix_cache::detail::PagedCacheFamilyRegistryInput> paged_groups;
+    std::vector<PagedCacheFamilyRegistryInput> paged_groups;
     paged_groups.reserve(paged_cache_allocators_.size());
     for (const auto& [gid, allocator] : paged_cache_allocators_) {
         if (allocator == nullptr) continue;
@@ -182,11 +204,11 @@ void HybridPrefixCache::RebuildFamilyRegistry() {
         });
     }
 
-    auto result = hybrid_prefix_cache::detail::BuildFamilyRegistry({
+    auto result = BuildFamilyRegistry({
         .kv_page_size = kv_prefix_cache_.PageSize(),
         .has_mamba_adjunct = HasMambaAdjunct(),
         .mamba_cache_chunk_size = mamba_cache_chunk_size_,
-        .paged_cache_groups = std::span<const hybrid_prefix_cache::detail::PagedCacheFamilyRegistryInput>{paged_groups},
+        .paged_cache_groups = std::span<const PagedCacheFamilyRegistryInput>{paged_groups},
     });
 
     family_registry_ = std::move(result.registry);

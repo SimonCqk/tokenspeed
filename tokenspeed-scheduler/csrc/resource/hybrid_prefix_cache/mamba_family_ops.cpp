@@ -18,8 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "resource/hybrid_prefix_cache/mamba_family_ops.h"
-
 #include "resource/allocator/local_mamba_allocator.h"
 #include "resource/allocator/mamba_chunk_allocator.h"
 #include "resource/allocator/mamba_host_allocator.h"
@@ -36,28 +34,28 @@
 #include <stdexcept>
 
 namespace tokenspeed {
-namespace hybrid_prefix_cache::detail {
+namespace {
 
-std::int32_t AlignMambaCacheSeqlen(std::int32_t seqlen, std::int32_t chunk_size) {
+std::int32_t AlignMambaCacheSeqlenImpl(std::int32_t seqlen, std::int32_t chunk_size) {
     if (chunk_size <= 0) return seqlen;
     return (seqlen / chunk_size) * chunk_size;
 }
 
-TreeNode* FindLastMambaNode(TreeNode* from) {
+TreeNode* FindLastMambaNodeImpl(TreeNode* from) {
     for (TreeNode* cur = from; cur != nullptr && !cur->IsRoot(); cur = cur->Parent()) {
         if (cur->HasMamba()) return cur;
     }
     return nullptr;
 }
 
-TreeNode* FindLastMambaHostNode(TreeNode* from) {
+TreeNode* FindLastMambaHostNodeImpl(TreeNode* from) {
     for (TreeNode* cur = from; cur != nullptr && !cur->IsRoot(); cur = cur->Parent()) {
         if (cur->HasMambaOnHost()) return cur;
     }
     return nullptr;
 }
 
-}  // namespace hybrid_prefix_cache::detail
+}  // namespace
 
 HybridPrefixCache::DecodeFromRetractedRecovery HybridPrefixCache::PrepareDecodeFromRetractedRecovery(
     MatchResult& match_result) const {
@@ -266,15 +264,15 @@ void HybridPrefixCache::augmentMatch(MatchResult& match) const {
 }
 
 std::int32_t HybridPrefixCache::AlignMambaCacheSeqlen(std::int32_t seqlen) const {
-    return hybrid_prefix_cache::detail::AlignMambaCacheSeqlen(seqlen, mamba_cache_chunk_size_);
+    return AlignMambaCacheSeqlenImpl(seqlen, mamba_cache_chunk_size_);
 }
 
 TreeNode* HybridPrefixCache::FindLastMambaNode(TreeNode* from) const {
-    return hybrid_prefix_cache::detail::FindLastMambaNode(from);
+    return FindLastMambaNodeImpl(from);
 }
 
 TreeNode* HybridPrefixCache::FindLastMambaHostNode(TreeNode* from) const {
-    return hybrid_prefix_cache::detail::FindLastMambaHostNode(from);
+    return FindLastMambaHostNodeImpl(from);
 }
 
 bool HybridPrefixCache::EnsureMambaCapacityByEvict(std::int32_t num_slots, TreeNode* protected_node) {

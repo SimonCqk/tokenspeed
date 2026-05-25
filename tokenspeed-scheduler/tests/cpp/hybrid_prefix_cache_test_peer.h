@@ -38,14 +38,6 @@ public:
         cache.InsertMamba(terminal_node, std::move(slot));
     }
 
-    static TreeNode* FindLastMambaNode(const HybridPrefixCache& cache, TreeNode* from) {
-        return cache.FindLastMambaNode(from);
-    }
-
-    static TreeNode* FindLastMambaHostNode(const HybridPrefixCache& cache, TreeNode* from) {
-        return cache.FindLastMambaHostNode(from);
-    }
-
     static std::vector<TransferPair> PrepareMambaHostWriteBack(HybridPrefixCache& cache,
                                                                const std::vector<TreeNode*>& nodes) {
         return cache.PrepareMambaHostWriteBack(nodes);
