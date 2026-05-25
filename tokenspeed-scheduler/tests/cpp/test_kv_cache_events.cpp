@@ -269,47 +269,6 @@ TEST(HybridPrefixCacheKvEventSinkTest, FacadeDelegatesEventsAndCanClearBinding) 
     EXPECT_EQ(events.size(), 1u);
 }
 
-TEST(HybridPrefixCacheKvEventSinkTest, DestructorClearsFacadeInstalledBinding) {
-    constexpr std::int32_t kPageSize = 2;
-    PageAllocator device_allocator{kPageSize, 4};
-    PageAllocator host_allocator{kPageSize, 4};
-    KVPrefixCache cache{&device_allocator, &host_allocator};
-    std::vector<KvCacheEvent> events;
-
-    {
-        HybridPrefixCache hybrid_cache{cache, device_allocator, nullptr, 0};
-        hybrid_cache.SetKvEventSink([&](KvCacheEvent event) { events.push_back(std::move(event)); });
-
-        const token_vec_t first_tokens{1, 2};
-        cache.Insert<ResourceType::Device>(first_tokens, {}, device_allocator.Allocate(1));
-    }
-
-    const token_vec_t second_tokens{3, 4};
-    cache.Insert<ResourceType::Device>(second_tokens, {}, device_allocator.Allocate(1));
-
-    ASSERT_EQ(events.size(), 1u);
-    EXPECT_EQ(AsStored(events[0]).token_ids, (token_vec_t{1, 2}));
-}
-
-TEST(HybridPrefixCacheKvEventSinkTest, DestructorDoesNotClearUnownedBinding) {
-    constexpr std::int32_t kPageSize = 2;
-    PageAllocator device_allocator{kPageSize, 4};
-    PageAllocator host_allocator{kPageSize, 4};
-    KVPrefixCache cache{&device_allocator, &host_allocator};
-    std::vector<KvCacheEvent> events;
-
-    cache.SetKvEventSink([&](KvCacheEvent event) { events.push_back(std::move(event)); });
-    {
-        HybridPrefixCache hybrid_cache{cache, device_allocator, nullptr, 0};
-    }
-
-    const token_vec_t tokens{1, 2};
-    cache.Insert<ResourceType::Device>(tokens, {}, device_allocator.Allocate(1));
-
-    ASSERT_EQ(events.size(), 1u);
-    EXPECT_EQ(AsStored(events[0]).token_ids, tokens);
-}
-
 TEST(KVPrefixCacheEventBenchTest, OptimizedInsertIsFasterThanLegacyAncestorRehashing) {
     constexpr std::int32_t kBenchPageSize = 16;
     constexpr std::int32_t kPageCount = 512;

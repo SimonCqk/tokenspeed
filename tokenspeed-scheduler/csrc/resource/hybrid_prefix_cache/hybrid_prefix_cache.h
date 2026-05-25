@@ -139,16 +139,8 @@ private:
         TreeNode* protected_source_node{nullptr};
     };
 
-    enum class CacheAdmissionKind {
-        kPrefillFirstChunk,
-        kPrefillChunk,
-        kDecodeChunk,
-        kDecodeFromRetracted,
-        kRetract,
-    };
-
     struct CacheAdmissionRequest {
-        CacheAdmissionKind kind{CacheAdmissionKind::kDecodeChunk};
+        AdmissionRequestKind kind{AdmissionRequestKind::kDecodeChunk};
         std::string request_id{};
         std::int32_t device_pages_needed{0};
         std::int32_t host_pages_needed{0};
@@ -242,15 +234,8 @@ private:
         bool ok{true};
     };
 
-    enum class CacheOpPrepareKind {
-        kPrefillFirstChunk,
-        kPrefillChunk,
-        kDecode,
-        kDecodeFromRetracted,
-    };
-
     struct CacheOpPrepareRequest {
-        CacheOpPrepareKind kind{CacheOpPrepareKind::kDecode};
+        WorkerCompatibilityCommitKind kind{WorkerCompatibilityCommitKind::kDecodeChunk};
         TreeNode* terminal{nullptr};
         std::int32_t first_raw_position_of_op{0};
         std::int32_t target_raw_tokens_exclusive{0};
@@ -272,6 +257,7 @@ private:
 
     bool HasMambaAdjunct() const { return mamba_allocator_ != nullptr; }
     bool HasPagedCacheAdjunct() const { return paged_cache_history_alignment_tokens_ > 0; }
+    RecoveryPlan BuildRecoveryPlan(MatchResult raw_match, MatchIntent intent) const;
     void PopulateMambaMatchCompatibilityFields(ForwardOperationBase& op_base, const MatchResult& match_result) const;
     void PopulateMambaRecoveryCompatibilityFields(ForwardOperationBase& op_base, const MatchResult& match_result) const;
     void PopulateMambaRequestLocalCompatibilityFields(ForwardOperationBase& op_base,

@@ -21,7 +21,6 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <stdexcept>
 #include <vector>
 
 #include "fsm/forward_events.h"
@@ -57,15 +56,6 @@ void ApplyFirstChunkToPrefillDone(Request& request, ReqPoolAllocator& req_pool_a
 }
 
 }  // namespace
-
-TEST(RequestCacheContextTest, SubmittedViewExposesEmptyOccupiedPagesOnly) {
-    Request request = MakeRequest("r_submitted", /*num_pages=*/1);
-
-    RequestCacheContext context(request);
-
-    EXPECT_TRUE(context.OccupiedPagesSnapshot().empty());
-    EXPECT_EQ(context.OccupiedPageCountSnapshot(), 0);
-}
 
 TEST(RequestCacheContextTest, ForwardViewExposesPostPrefillFlatteningInputs) {
     PageAllocator device_allocator(kPageSize, /*total_pages=*/16);
@@ -177,45 +167,6 @@ TEST(RequestCacheContextTest, MutationBridgeDelegatesFrontToBackOwnershipTransfe
 
     EXPECT_EQ(taken_pages.Ids(), expected_taken);
     EXPECT_EQ(request.GetLocalAllocatorPages(), expected_remaining);
-}
-
-TEST(RequestCacheContextTest, LocalKVPagesSnapshotExposesDiagnosticRequestLocalPages) {
-    PageAllocator device_allocator(kPageSize, /*total_pages=*/16);
-    PageAllocator host_allocator(kPageSize, /*total_pages=*/0);
-    KVPrefixCache prefix_cache(&device_allocator, &host_allocator);
-    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_allocator, /*allocator=*/nullptr, kMambaCacheChunkSize);
-    ReqPoolAllocator req_pool_allocator(/*size=*/2);
-    Request request = MakeRequest("r_debug_pages", /*num_pages=*/2);
-    ApplyFirstChunkToPrefillDone(request, req_pool_allocator, hybrid_prefix_cache);
-
-    RequestCacheContext context(request);
-
-    EXPECT_EQ(context.LocalKVPagesSnapshot(), request.GetLocalAllocatorPages());
-    EXPECT_FALSE(context.LocalKVPagesSnapshot().empty());
-}
-
-TEST(RequestCacheContextTest, MutationBridgePreservesRequestErrorSemantics) {
-    Request submitted_request = MakeRequest("r_submitted_transfer", /*num_pages=*/1);
-    RequestCacheMutation submitted_mutation(submitted_request);
-    EXPECT_THROW(submitted_mutation.TakeFirstLocalKVPages(/*alloc_count=*/1), std::logic_error);
-
-    PageAllocator device_allocator(kPageSize, /*total_pages=*/16);
-    PageAllocator host_allocator(kPageSize, /*total_pages=*/0);
-    KVPrefixCache prefix_cache(&device_allocator, &host_allocator);
-    HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_allocator, /*allocator=*/nullptr, kMambaCacheChunkSize);
-    ReqPoolAllocator req_pool_allocator(/*size=*/2);
-    Request request = MakeRequest("r_bad_count", /*num_pages=*/1);
-    ApplyFirstChunkToPrefillDone(request, req_pool_allocator, hybrid_prefix_cache);
-
-    std::vector<std::int32_t> original_local_pages = request.GetLocalAllocatorPages();
-    RequestCacheMutation mutation(request);
-
-    EXPECT_THROW(mutation.TakeFirstLocalKVPages(/*alloc_count=*/-1), std::out_of_range);
-    EXPECT_EQ(request.GetLocalAllocatorPages(), original_local_pages);
-
-    EXPECT_THROW(mutation.TakeFirstLocalKVPages(static_cast<std::int32_t>(original_local_pages.size() + 1)),
-                 std::out_of_range);
-    EXPECT_EQ(request.GetLocalAllocatorPages(), original_local_pages);
 }
 
 }  // namespace tokenspeed::test

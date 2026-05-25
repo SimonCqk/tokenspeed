@@ -65,43 +65,23 @@ HybridPrefixCache::~HybridPrefixCache() {
 
 RecoveryPlan HybridPrefixCache::MatchPrefix(const token_vec_t& token_ids, MatchIntent intent) {
     DemoteIdleMambaDeviceCopiesPresentOnHost();
-    MatchResult raw_match = kv_prefix_cache_.Match(token_ids, intent);
-    RecoveryPlan plan{};
-    const auto depth_tokens = [](const TreeNode* node) -> std::int32_t {
-        return node == nullptr ? 0 : static_cast<std::int32_t>(node->DepthInTokens());
-    };
-    plan.raw_token_match_end_tokens =
-        std::max(depth_tokens(raw_match.device.last_node), depth_tokens(raw_match.host.last_node));
-    plan.compat_match = raw_match;
-    augmentMatch(plan.compat_match);
-    augmentMatchPagedCache(plan.compat_match);
-    if (intent == MatchIntent::StateRecovery) {
-        const DecodeFromRetractedRecovery recovery = PrepareDecodeFromRetractedRecovery(plan.compat_match);
-        plan.recovery_state_available = recovery.ok;
-        plan.protected_recovery_node = recovery.protected_source_node;
-    }
-    plan.recoverable_prefix_end_tokens =
-        std::max(depth_tokens(plan.compat_match.device.last_node), depth_tokens(plan.compat_match.host.last_node));
-    if (plan.compat_match.paged_cache.prefix_len_tokens > 0) {
-        plan.recoverable_prefix_end_tokens =
-            std::min(plan.recoverable_prefix_end_tokens, plan.compat_match.paged_cache.prefix_len_tokens);
-    }
-    plan.execution_resume_tokens = plan.recoverable_prefix_end_tokens;
-    BuildRecoveryPlanSlices(plan);
-    return plan;
+    return BuildRecoveryPlan(kv_prefix_cache_.Match(token_ids, intent), intent);
 }
 
 RecoveryPlan HybridPrefixCache::MatchPrefix(const std::vector<std::span<const std::int32_t>>& token_pages,
                                             MatchIntent intent) {
     DemoteIdleMambaDeviceCopiesPresentOnHost();
-    MatchResult raw_match = kv_prefix_cache_.Match(token_pages, intent);
+    return BuildRecoveryPlan(kv_prefix_cache_.Match(token_pages, intent), intent);
+}
+
+RecoveryPlan HybridPrefixCache::BuildRecoveryPlan(MatchResult raw_match, MatchIntent intent) const {
     RecoveryPlan plan{};
     const auto depth_tokens = [](const TreeNode* node) -> std::int32_t {
         return node == nullptr ? 0 : static_cast<std::int32_t>(node->DepthInTokens());
     };
+    plan.compat_match = std::move(raw_match);
     plan.raw_token_match_end_tokens =
-        std::max(depth_tokens(raw_match.device.last_node), depth_tokens(raw_match.host.last_node));
-    plan.compat_match = raw_match;
+        std::max(depth_tokens(plan.compat_match.device.last_node), depth_tokens(plan.compat_match.host.last_node));
     augmentMatch(plan.compat_match);
     augmentMatchPagedCache(plan.compat_match);
     if (intent == MatchIntent::StateRecovery) {
@@ -575,7 +555,7 @@ void HybridPrefixCache::PrepareForwardOp(ForwardOperationBase& op_base, const Ca
     PopulateMambaRequestLocalCompatibilityFields(op_base, request.local_mamba_allocator);
 
     switch (request.kind) {
-        case CacheOpPrepareKind::kPrefillFirstChunk: {
+        case WorkerCompatibilityCommitKind::kPrefillFirstChunk: {
             const MatchResult& match_result = require_match();
             PopulateMambaMatchCompatibilityFields(op_base, match_result);
             CommitChunk(op_base.request_id, request.terminal);
@@ -583,18 +563,18 @@ void HybridPrefixCache::PrepareForwardOp(ForwardOperationBase& op_base, const Ca
                                  match_result.paged_cache);
             return;
         }
-        case CacheOpPrepareKind::kPrefillChunk:
+        case WorkerCompatibilityCommitKind::kPrefillChunk:
             CommitChunk(op_base.request_id, request.terminal);
             acquireAndPopulateOp(op_base, request.first_raw_position_of_op, request.target_raw_tokens_exclusive,
                                  request.paged_cache_hit);
             return;
-        case CacheOpPrepareKind::kDecode:
+        case WorkerCompatibilityCommitKind::kDecodeChunk:
             if (request.commit_prior_chunk) {
                 CommitChunk(op_base.request_id, request.terminal);
             }
             acquireAndPopulateOp(op_base, request.first_raw_position_of_op, request.target_raw_tokens_exclusive, {});
             return;
-        case CacheOpPrepareKind::kDecodeFromRetracted: {
+        case WorkerCompatibilityCommitKind::kDecodeFromRetracted: {
             const MatchResult& match_result = require_match();
             PopulateMambaRecoveryCompatibilityFields(op_base, match_result);
             ReleaseRequest(op_base.request_id);
@@ -611,19 +591,8 @@ AdmissionVerdict HybridPrefixCache::Admit(const AdmissionRequest& request,
         match = &request.recovery_plan->compat_match;
     }
 
-    CacheAdmissionKind kind = CacheAdmissionKind::kDecodeChunk;
-    if (request.protect_host_match_node || request.host_pages_needed > 0) {
-        kind = CacheAdmissionKind::kRetract;
-    } else if (request.fresh_request_table_view) {
-        kind = CacheAdmissionKind::kDecodeFromRetracted;
-    } else if (request.compute_branching_checkpoint) {
-        kind = CacheAdmissionKind::kPrefillFirstChunk;
-    } else if (request.auxiliary_tree_slots_needed > 0) {
-        kind = CacheAdmissionKind::kPrefillChunk;
-    }
-
     CacheAdmissionRequest compat_request{
-        .kind = kind,
+        .kind = request.kind,
         .request_id = request.request_id,
         .device_pages_needed = request.device_pages_needed,
         .host_pages_needed = request.host_pages_needed,
@@ -806,18 +775,10 @@ StepCommitResult HybridPrefixCache::StepCommit(StepCommitRequest request) {
         if (worker.op_base == nullptr) {
             throw std::invalid_argument("HybridPrefixCache::StepCommit PrepareWorkerOp requires op_base");
         }
-        CacheOpPrepareKind kind = CacheOpPrepareKind::kDecode;
-        if (worker.populate_recovery_metadata || worker.release_request_state_before_acquire) {
-            kind = CacheOpPrepareKind::kDecodeFromRetracted;
-        } else if (worker.populate_prefix_reuse_metadata) {
-            kind = CacheOpPrepareKind::kPrefillFirstChunk;
-        } else if (worker.import_paged_cache_hit) {
-            kind = CacheOpPrepareKind::kPrefillChunk;
-        }
         const MatchResult* match = match_or_plan(worker.recovery_plan, worker.compat_match);
         PrepareForwardOp(*worker.op_base,
                          {
-                             .kind = kind,
+                             .kind = worker.kind,
                              .terminal = worker.terminal,
                              .first_raw_position_of_op = worker.first_raw_position_of_op,
                              .target_raw_tokens_exclusive = worker.target_raw_tokens_exclusive,
@@ -855,7 +816,7 @@ HybridPrefixCache::CacheAdmissionResult HybridPrefixCache::Admit(const CacheAdmi
     };
 
     switch (request.kind) {
-        case CacheAdmissionKind::kPrefillFirstChunk: {
+        case AdmissionRequestKind::kPrefillFirstChunk: {
             const MatchResult& match_result = require_match();
             std::unique_ptr<DeviceNodeRef> temp_lock = std::make_unique<DeviceNodeRef>(match_result.device.last_node);
             if (!kv_prefix_cache_.EnsureCapacityByEvict<ResourceType::Device>(request.device_pages_needed)) {
@@ -886,7 +847,7 @@ HybridPrefixCache::CacheAdmissionResult HybridPrefixCache::Admit(const CacheAdmi
             }
             return result;
         }
-        case CacheAdmissionKind::kPrefillChunk:
+        case AdmissionRequestKind::kPrefillChunk:
             if (!kv_prefix_cache_.EnsureCapacityByEvict<ResourceType::Device>(request.device_pages_needed)) {
                 return result;
             }
@@ -896,7 +857,7 @@ HybridPrefixCache::CacheAdmissionResult HybridPrefixCache::Admit(const CacheAdmi
             result.admitted = AdmitChunk(request.request_id, request.first_raw_position_of_op,
                                          request.target_raw_tokens_exclusive, simulated_free);
             return result;
-        case CacheAdmissionKind::kDecodeChunk:
+        case AdmissionRequestKind::kDecodeChunk:
             if (!kv_prefix_cache_.EnsureCapacityByEvict<ResourceType::Device>(request.device_pages_needed)) {
                 return result;
             }
@@ -906,7 +867,7 @@ HybridPrefixCache::CacheAdmissionResult HybridPrefixCache::Admit(const CacheAdmi
             result.admitted = AdmitChunk(request.request_id, request.first_raw_position_of_op,
                                          request.target_raw_tokens_exclusive, simulated_free);
             return result;
-        case CacheAdmissionKind::kDecodeFromRetracted: {
+        case AdmissionRequestKind::kDecodeFromRetracted: {
             const MatchResult& match_result = require_match();
             std::unique_ptr<DeviceNodeRef> temp_lock = std::make_unique<DeviceNodeRef>(match_result.device.last_node);
             if (!kv_prefix_cache_.EnsureCapacityByEvict<ResourceType::Device>(request.device_pages_needed)) {
@@ -937,7 +898,7 @@ HybridPrefixCache::CacheAdmissionResult HybridPrefixCache::Admit(const CacheAdmi
             }
             return result;
         }
-        case CacheAdmissionKind::kRetract: {
+        case AdmissionRequestKind::kRetract: {
             const MatchResult& match_result = require_match();
             std::unique_ptr<HostNodeRef> temp_lock = std::make_unique<HostNodeRef>(match_result.host.last_node);
             result.admitted = kv_prefix_cache_.EnsureCapacityByEvict<ResourceType::Host>(request.host_pages_needed);

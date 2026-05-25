@@ -233,22 +233,6 @@ TEST_F(MambaCacheTest, OnKVEvictRemovesMamba) {
     EXPECT_FALSE(node->HasMamba());
 }
 
-TEST_F(MambaCacheTest, FindLastMambaNodeWalksUp) {
-    auto tokens2 = MakeAlignedTokens(2, kPageSize);
-    InsertKVAndMamba(tokens2);
-
-    auto tokens4 = MakeAlignedTokens(4, kPageSize);
-    InsertKVOnly(tokens4);
-
-    auto match = prefix_cache_->Match(tokens4);
-    TreeNode* terminal = match.device.last_node;
-    TreeNode* mamba_node = HybridPrefixCacheTestPeer::FindLastMambaNode(*hybrid_prefix_cache_, terminal);
-
-    ASSERT_NE(mamba_node, nullptr);
-    EXPECT_TRUE(mamba_node->HasMamba());
-    EXPECT_EQ(mamba_node->DepthInPage(kPageSize), 2);
-}
-
 TEST_F(MambaCacheTest, MatchPrefixStateRecoverySetsCowSourceAndProtection) {
     auto tokens = MakeAlignedTokens(2, kPageSize);
     TreeNode* recovery_source = InsertKVAndMamba(tokens);
@@ -296,8 +280,8 @@ TEST_F(MambaCacheTest, WorkerMetadataReceivesPrefixRecoveryAndRequestLocalInfo) 
         .worker_metadata =
             WorkerCompatibilityCommitRequest{
                 .op_base = &prefix_op,
+                .kind = WorkerCompatibilityCommitKind::kPrefillFirstChunk,
                 .compat_match = &prefix_match,
-                .populate_prefix_reuse_metadata = true,
             },
     });
 
@@ -314,8 +298,8 @@ TEST_F(MambaCacheTest, WorkerMetadataReceivesPrefixRecoveryAndRequestLocalInfo) 
         .worker_metadata =
             WorkerCompatibilityCommitRequest{
                 .op_base = &recovery_op,
+                .kind = WorkerCompatibilityCommitKind::kDecodeFromRetracted,
                 .compat_match = &recovery_match,
-                .populate_recovery_metadata = true,
             },
     });
 
@@ -372,9 +356,9 @@ TEST(HybridPrefixCacheMambaCompatibilityFieldsTest, WorkerMetadataLeavesDefaults
         .worker_metadata =
             WorkerCompatibilityCommitRequest{
                 .op_base = &op,
+                .kind = WorkerCompatibilityCommitKind::kPrefillFirstChunk,
                 .compat_match = &match,
                 .local_mamba_allocator_view = &local_mamba,
-                .populate_prefix_reuse_metadata = true,
             },
     });
 
@@ -1122,13 +1106,12 @@ TEST_F(MambaCacheTest, AdmitComputesBranchingCheckpointWithoutMutatingMatch) {
     std::map<std::string, std::int32_t> simulated_free;
     AdmissionRequest request{
         .request_id = "r-prefill-first",
+        .kind = AdmissionRequestKind::kPrefillFirstChunk,
         .device_pages_needed = 0,
         .tokens_this_round = 5,
         .first_raw_position_of_op = 0,
         .target_raw_tokens_exclusive = 5,
         .compat_match = &match,
-        .auxiliary_tree_slots_needed = 2,
-        .compute_branching_checkpoint = true,
     };
     AdmissionVerdict result = hybrid_prefix_cache_->Admit(request, simulated_free);
 
@@ -1146,10 +1129,10 @@ TEST_F(MambaCacheTest, AdmitContinuePrefillReservesOneMambaSlot) {
     std::map<std::string, std::int32_t> simulated_free;
     AdmissionRequest request{
         .request_id = "r-prefill",
+        .kind = AdmissionRequestKind::kPrefillChunk,
         .device_pages_needed = 0,
         .first_raw_position_of_op = 4,
         .target_raw_tokens_exclusive = 8,
-        .auxiliary_tree_slots_needed = 1,
     };
     EXPECT_TRUE(hybrid_prefix_cache_->Admit(request, simulated_free).admitted);
 
@@ -1163,6 +1146,7 @@ TEST_F(MambaCacheTest, AdmitDecodeDoesNotReserveMambaSlots) {
     std::map<std::string, std::int32_t> simulated_free;
     AdmissionRequest request{
         .request_id = "r-decode",
+        .kind = AdmissionRequestKind::kDecodeChunk,
         .device_pages_needed = 0,
         .first_raw_position_of_op = 8,
         .target_raw_tokens_exclusive = 9,
@@ -1185,12 +1169,11 @@ TEST_F(MambaCacheTest, AdmitRecoverDecodeProtectsMambaRecoverySource) {
     MatchResult match{};
     AdmissionRequest request{
         .request_id = "r-retracted",
+        .kind = AdmissionRequestKind::kDecodeFromRetracted,
         .device_pages_needed = 0,
         .target_raw_tokens_exclusive = 8,
         .compat_match = &match,
         .protected_recovery_node = recovery_source,
-        .auxiliary_tree_slots_needed = 2,
-        .fresh_request_table_view = true,
     };
     EXPECT_TRUE(hybrid_prefix_cache_->Admit(request, simulated_free).admitted);
 

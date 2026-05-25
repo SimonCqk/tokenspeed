@@ -87,13 +87,12 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
     const std::int32_t target = first_pos + tokens_this_round;
     AdmissionRequest admission_request{
         .request_id = request->Id(),
+        .kind = AdmissionRequestKind::kPrefillFirstChunk,
         .device_pages_needed = device_pages_needed,
         .tokens_this_round = tokens_this_round,
         .first_raw_position_of_op = first_pos,
         .target_raw_tokens_exclusive = target,
         .recovery_plan = &recovery_plan,
-        .auxiliary_tree_slots_needed = 2,
-        .compute_branching_checkpoint = true,
     };
     AdmissionVerdict admission = hybrid_prefix_cache_.Admit(admission_request, simulated_free);
     if (!admission.admitted) {
@@ -125,10 +124,10 @@ std::optional<fsm::SchedulePrefillEvent> Scheduler::schedulePrefill(
     const std::int32_t target = first_pos + tokens_this_round;
     AdmissionRequest admission_request{
         .request_id = request->Id(),
+        .kind = AdmissionRequestKind::kPrefillChunk,
         .device_pages_needed = pages_needed,
         .first_raw_position_of_op = first_pos,
         .target_raw_tokens_exclusive = target,
-        .auxiliary_tree_slots_needed = 1,
     };
     if (!hybrid_prefix_cache_.Admit(admission_request, simulated_free).admitted) {
         return {};
@@ -148,6 +147,7 @@ std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(Request* reque
     const std::int32_t target = first_pos + config_.decode_input_tokens;
     AdmissionRequest admission_request{
         .request_id = request->Id(),
+        .kind = AdmissionRequestKind::kDecodeChunk,
         .device_pages_needed = pages_needed,
         .first_raw_position_of_op = first_pos,
         .target_raw_tokens_exclusive = target,
@@ -190,12 +190,11 @@ std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFr
     const std::int32_t target = request->TokenSize();
     AdmissionRequest admission_request{
         .request_id = request->Id(),
+        .kind = AdmissionRequestKind::kDecodeFromRetracted,
         .device_pages_needed = device_pages_needed,
         .target_raw_tokens_exclusive = target,
         .compat_match = &match_result,
         .protected_recovery_node = mamba_recovery_node,
-        .auxiliary_tree_slots_needed = 2,
-        .fresh_request_table_view = true,
     };
     AdmissionVerdict admission = hybrid_prefix_cache_.Admit(admission_request, simulated_free);
     if (!admission.admitted) {
@@ -253,9 +252,9 @@ std::optional<fsm::ScheduleRetractEvent> Scheduler::scheduleRetract(Request* req
     }
 
     AdmissionRequest admission_request{
+        .kind = AdmissionRequestKind::kRetract,
         .host_pages_needed = host_pages_needed,
         .compat_match = &match_result,
-        .protect_host_match_node = true,
     };
     std::map<std::string, std::int32_t> simulated_free;
     if (!hybrid_prefix_cache_.Admit(admission_request, simulated_free).admitted) {
@@ -350,14 +349,13 @@ PrefillOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Sched
         .worker_metadata =
             WorkerCompatibilityCommitRequest{
                 .op_base = &op,
+                .kind = WorkerCompatibilityCommitKind::kPrefillFirstChunk,
                 .terminal = cache_mutation.MutableTerminalDeviceNode(),
                 .compat_match = &match,
                 .local_mamba_allocator_view = cache_context.LocalMambaAllocatorView(),
                 .first_raw_position_of_op = op.extend_prefix_len,
                 .target_raw_tokens_exclusive = op.extend_prefix_len + op.input_length,
                 .commit_tree_prefix_before_acquire = true,
-                .import_paged_cache_hit = true,
-                .populate_prefix_reuse_metadata = true,
             },
     };
     (void)hybrid_prefix_cache_.StepCommit(std::move(prepare_request));
@@ -372,12 +370,12 @@ PrefillOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Sched
         .worker_metadata =
             WorkerCompatibilityCommitRequest{
                 .op_base = &op,
+                .kind = WorkerCompatibilityCommitKind::kPrefillChunk,
                 .terminal = cache_mutation.MutableTerminalDeviceNode(),
                 .local_mamba_allocator_view = cache_context.LocalMambaAllocatorView(),
                 .first_raw_position_of_op = op.extend_prefix_len,
                 .target_raw_tokens_exclusive = op.extend_prefix_len + op.input_length,
                 .commit_tree_prefix_before_acquire = true,
-                .import_paged_cache_hit = true,
             },
     };
     (void)hybrid_prefix_cache_.StepCommit(std::move(prepare_request));
@@ -424,6 +422,7 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
         .worker_metadata =
             WorkerCompatibilityCommitRequest{
                 .op_base = &op,
+                .kind = WorkerCompatibilityCommitKind::kDecodeChunk,
                 .terminal = cache_mutation.MutableTerminalDeviceNode(),
                 .local_mamba_allocator_view = cache_context.LocalMambaAllocatorView(),
                 .first_raw_position_of_op = first_pos,
@@ -461,11 +460,10 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
         .worker_metadata =
             WorkerCompatibilityCommitRequest{
                 .op_base = &op,
+                .kind = WorkerCompatibilityCommitKind::kDecodeFromRetracted,
                 .compat_match = &match,
                 .local_mamba_allocator_view = cache_context.LocalMambaAllocatorView(),
                 .target_raw_tokens_exclusive = request->TokenSize(),
-                .populate_recovery_metadata = true,
-                .release_request_state_before_acquire = true,
             },
     };
     (void)hybrid_prefix_cache_.StepCommit(std::move(prepare_request));
