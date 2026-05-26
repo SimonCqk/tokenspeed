@@ -37,6 +37,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -58,8 +59,8 @@ bool HybridPrefixCache::AttachPagedCacheSnapshotToNode(TreeNode* node, std::uniq
     if (node == nullptr || snapshot == nullptr) return false;
     // Compute completeness from what is present. The policy-driven "snapshot
     // must be full" invariant is enforced upstream by CommitChunk, which only
-    // attaches full snapshots; direct callers (tests, future restore paths)
-    // may attach history-only or state-only snapshots without policy gating.
+    // attaches full snapshots; direct test hooks may attach history-only or
+    // state-only snapshots without policy gating.
     snapshot->complete_families.clear();
     bool history_complete = !paged_cache_history_groups_.empty();
     for (const auto& gid : paged_cache_history_groups_) {
@@ -101,7 +102,6 @@ void HybridPrefixCache::RegisterPagedCacheGroup(std::unique_ptr<PagedCacheGroupA
         throw std::invalid_argument("HybridPrefixCache::RegisterPagedCacheGroup: duplicate group_id: " + gid);
     }
     paged_cache_allocators_.emplace(std::move(gid), std::move(allocator));
-    RebuildFamilyRegistry();
 }
 
 void HybridPrefixCache::ConfigurePagedCacheAdjunct(std::span<const PagedCacheGroupConfig> group_configs,
@@ -217,7 +217,12 @@ void HybridPrefixCache::EnablePagedCacheAdjunct(std::vector<std::string> require
     paged_cache_required_groups_ = std::move(required_groups);
     paged_cache_sliding_window_per_group_ = std::move(sliding_window_per_group);
     paged_cache_state_policy_ = policy;
-    RebuildFamilyRegistry();
+    paged_cache_history_groups_ = std::move(history_gids);
+    paged_cache_state_groups_ = std::move(state_gids);
+    paged_cache_history_group_set_ =
+        std::unordered_set<std::string>(paged_cache_history_groups_.begin(), paged_cache_history_groups_.end());
+    paged_cache_state_group_set_ =
+        std::unordered_set<std::string>(paged_cache_state_groups_.begin(), paged_cache_state_groups_.end());
 }
 
 void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
@@ -365,22 +370,6 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
 
     match.paged_cache.restore_kind = MatchResult::PagedCache::RestoreKind::kSnapshotComplete;
     match.paged_cache.replay_start_tokens = 0;
-}
-
-std::vector<std::string> HybridPrefixCache::PagedCacheGroupIds() const {
-    return Stats().paged_cache_group_ids;
-}
-
-std::int32_t HybridPrefixCache::PagedCacheGroupTotalPages(const std::string& group_id) const {
-    return Stats({.paged_cache_group_ids = {group_id}}).paged_cache_total_pages.at(group_id);
-}
-
-std::int32_t HybridPrefixCache::PagedCacheGroupAvailablePages(const std::string& group_id) const {
-    return Stats({.paged_cache_group_ids = {group_id}}).paged_cache_available_pages.at(group_id);
-}
-
-std::int64_t HybridPrefixCache::PagedCacheGroupFailedAllocCount(const std::string& group_id) const {
-    return Stats({.paged_cache_group_ids = {group_id}}).paged_cache_failed_alloc_count.at(group_id);
 }
 
 std::map<std::string, std::int32_t> HybridPrefixCache::InitialSimulatedFree() const {

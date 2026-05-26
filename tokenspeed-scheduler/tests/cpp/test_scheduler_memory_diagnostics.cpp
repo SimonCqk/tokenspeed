@@ -57,19 +57,21 @@ TEST(HybridPrefixCacheDeviceStatsTest, AvailableDevicePagesMirrorsAllocatorAcros
     KVPrefixCache prefix_cache{&device_allocator, &host_allocator};
     HybridPrefixCache hybrid_prefix_cache{prefix_cache, device_allocator, /*allocator=*/nullptr, kMambaCacheChunkSize};
 
-    EXPECT_EQ(hybrid_prefix_cache.AvailableDevicePages(), static_cast<std::size_t>(device_allocator.AvailablePages()));
-    EXPECT_EQ(hybrid_prefix_cache.AvailableDevicePages(), 7u);
+    EXPECT_EQ(hybrid_prefix_cache.Stats().available_device_pages,
+              static_cast<std::size_t>(device_allocator.AvailablePages()));
+    EXPECT_EQ(hybrid_prefix_cache.Stats().available_device_pages, 7u);
 
     {
         OwnedPages pages = device_allocator.Allocate(/*num_pages=*/2);
         ASSERT_EQ(pages.Size(), 2);
-        EXPECT_EQ(hybrid_prefix_cache.AvailableDevicePages(),
+        EXPECT_EQ(hybrid_prefix_cache.Stats().available_device_pages,
                   static_cast<std::size_t>(device_allocator.AvailablePages()));
-        EXPECT_EQ(hybrid_prefix_cache.AvailableDevicePages(), 5u);
+        EXPECT_EQ(hybrid_prefix_cache.Stats().available_device_pages, 5u);
     }
 
-    EXPECT_EQ(hybrid_prefix_cache.AvailableDevicePages(), static_cast<std::size_t>(device_allocator.AvailablePages()));
-    EXPECT_EQ(hybrid_prefix_cache.AvailableDevicePages(), 7u);
+    EXPECT_EQ(hybrid_prefix_cache.Stats().available_device_pages,
+              static_cast<std::size_t>(device_allocator.AvailablePages()));
+    EXPECT_EQ(hybrid_prefix_cache.Stats().available_device_pages, 7u);
 }
 
 TEST(HybridPrefixCacheDeviceStatsTest, DiagnosticsSnapshotReportsTreeAndAllocatorPages) {
@@ -78,7 +80,9 @@ TEST(HybridPrefixCacheDeviceStatsTest, DiagnosticsSnapshotReportsTreeAndAllocato
     KVPrefixCache prefix_cache{&device_allocator, &host_allocator};
     HybridPrefixCache hybrid_prefix_cache{prefix_cache, device_allocator, /*allocator=*/nullptr, kMambaCacheChunkSize};
 
-    auto initial_snapshot = hybrid_prefix_cache.CollectDeviceMemoryDiagnostics();
+    auto initial_stats = hybrid_prefix_cache.Stats({.include_device_memory_diagnostics = true});
+    ASSERT_TRUE(initial_stats.device_memory_diagnostics.has_value());
+    const auto& initial_snapshot = *initial_stats.device_memory_diagnostics;
     EXPECT_TRUE(initial_snapshot.tree_device_pages.empty());
     EXPECT_EQ(initial_snapshot.free_device_pages, 7);
     EXPECT_EQ(initial_snapshot.total_device_pages, 7);
@@ -88,7 +92,9 @@ TEST(HybridPrefixCacheDeviceStatsTest, DiagnosticsSnapshotReportsTreeAndAllocato
     const token_vec_t tokens = {1, 2, 3, 4};
     prefix_cache.Insert<ResourceType::Device>(TokenPages(tokens), {}, std::move(pages));
 
-    auto snapshot = hybrid_prefix_cache.CollectDeviceMemoryDiagnostics();
+    auto stats = hybrid_prefix_cache.Stats({.include_device_memory_diagnostics = true});
+    ASSERT_TRUE(stats.device_memory_diagnostics.has_value());
+    const auto& snapshot = *stats.device_memory_diagnostics;
     ASSERT_EQ(snapshot.tree_device_pages.size(), 2u);
     for (std::int32_t page_id : inserted_page_ids) {
         EXPECT_EQ(snapshot.tree_device_pages.at(page_id), 1);

@@ -54,7 +54,6 @@ HybridPrefixCache::HybridPrefixCache(KVPrefixCache& kv_prefix_cache, PageAllocat
       mamba_cache_chunk_size_{mamba_cache_chunk_size} {
     kv_prefix_cache_.GetDeviceManager().SetEvictionCallback([this](TreeNode* node) { OnKVEvict(node); });
     kv_prefix_cache_.GetHostManager().SetEvictionCallback([this](TreeNode* node) { OnKVHostEvict(node); });
-    RebuildFamilyRegistry();
 }
 
 HybridPrefixCache::~HybridPrefixCache() {
@@ -76,12 +75,7 @@ RecoveryPlan HybridPrefixCache::MatchPrefix(const std::vector<std::span<const st
 
 RecoveryPlan HybridPrefixCache::BuildRecoveryPlan(MatchResult raw_match, MatchIntent intent) const {
     RecoveryPlan plan{};
-    const auto depth_tokens = [](const TreeNode* node) -> std::int32_t {
-        return node == nullptr ? 0 : static_cast<std::int32_t>(node->DepthInTokens());
-    };
     plan.compat_match = std::move(raw_match);
-    plan.raw_token_match_end_tokens =
-        std::max(depth_tokens(plan.compat_match.device.last_node), depth_tokens(plan.compat_match.host.last_node));
     augmentMatch(plan.compat_match);
     augmentMatchPagedCache(plan.compat_match);
     if (intent == MatchIntent::StateRecovery) {
@@ -89,58 +83,7 @@ RecoveryPlan HybridPrefixCache::BuildRecoveryPlan(MatchResult raw_match, MatchIn
         plan.recovery_state_available = recovery.ok;
         plan.protected_recovery_node = recovery.protected_source_node;
     }
-    plan.recoverable_prefix_end_tokens =
-        std::max(depth_tokens(plan.compat_match.device.last_node), depth_tokens(plan.compat_match.host.last_node));
-    if (plan.compat_match.paged_cache.prefix_len_tokens > 0) {
-        plan.recoverable_prefix_end_tokens =
-            std::min(plan.recoverable_prefix_end_tokens, plan.compat_match.paged_cache.prefix_len_tokens);
-    }
-    plan.execution_resume_tokens = plan.recoverable_prefix_end_tokens;
-    BuildRecoveryPlanSlices(plan);
     return plan;
-}
-
-void HybridPrefixCache::BuildRecoveryPlanSlices(RecoveryPlan& plan) const {
-    plan.slices.clear();
-    plan.slices.reserve(family_registry_.active_match_family_indices.size());
-    for (std::int32_t family_index : family_registry_.active_match_family_indices) {
-        const CacheResourceSpec& spec = family_registry_.At(family_index);
-        FamilySlice slice{
-            .family_index = family_index,
-            .family_id = spec.id,
-            .family = spec.family,
-            .recoverable_end_tokens = plan.recoverable_prefix_end_tokens,
-            .required_for_recovery = spec.required_for_recovery,
-        };
-        switch (spec.family) {
-            case CacheFamily::TokenPage:
-                slice.hit_node = plan.compat_match.device.last_node;
-                break;
-            case CacheFamily::RecurrentState:
-            case CacheFamily::ConvState:
-                slice.hit_node = plan.compat_match.device.last_node;
-                if (plan.compat_match.mamba_cow_src_index >= 0) {
-                    slice.borrowed_ids.push_back(plan.compat_match.mamba_cow_src_index);
-                }
-                break;
-            case CacheFamily::CompressedPage:
-            case CacheFamily::SlidingWindowState:
-            case CacheFamily::CompressionTailState: {
-                slice.hit_node = plan.compat_match.paged_cache.last_node;
-                slice.recoverable_end_tokens = plan.compat_match.paged_cache.prefix_len_tokens;
-                auto page_it = plan.compat_match.paged_cache.per_group_page_ids.find(spec.id);
-                if (page_it != plan.compat_match.paged_cache.per_group_page_ids.end()) {
-                    slice.borrowed_ids = page_it->second;
-                }
-                auto base_it = plan.compat_match.paged_cache.per_group_base_logical_page.find(spec.id);
-                if (base_it != plan.compat_match.paged_cache.per_group_base_logical_page.end()) {
-                    slice.base_logical_page = base_it->second;
-                }
-                break;
-            }
-        }
-        plan.slices.push_back(std::move(slice));
-    }
 }
 
 HybridPrefixCache::RawHostStorageHashSeed HybridPrefixCache::LookupRawHostStorageHashSeed(
@@ -189,12 +132,6 @@ HybridPrefixCache::RequestLocalKVResult HybridPrefixCache::PrepareRequestLocalKV
             return result;
         case RequestLocalKVKind::kPrefillChunk:
             require_allocator().Acquire(request.tokens_this_round);
-            return result;
-        case RequestLocalKVKind::kDecodeReserve:
-            require_allocator().Acquire(request.reserve_tokens);
-            return result;
-        case RequestLocalKVKind::kDecodeFromRetractedReserve:
-            require_allocator().Acquire(request.decode_input_tokens);
             return result;
     }
     return result;
@@ -471,28 +408,6 @@ void HybridPrefixCache::OnKVDeviceDemote(TreeNode* node) {
     }
 }
 
-std::size_t HybridPrefixCache::AvailableDevicePages() const {
-    return Stats().available_device_pages;
-}
-
-HybridPrefixCache::DeviceMemoryDiagnosticsSnapshot HybridPrefixCache::CollectDeviceMemoryDiagnostics() const {
-    auto snapshot = Stats({.include_device_memory_diagnostics = true}).device_memory_diagnostics;
-    _assert(snapshot.has_value(), "HybridPrefixCache::CollectDeviceMemoryDiagnostics: missing stats snapshot");
-    return std::move(*snapshot);
-}
-
-std::vector<std::int32_t> HybridPrefixCache::GetRequestPagedCachePageIds(const std::string& request_id,
-                                                                         const std::string& group_id) const {
-    auto snapshot = Stats({.request_id = request_id, .paged_cache_group_ids = {group_id}});
-    return snapshot.request_paged_cache_page_ids.at(group_id);
-}
-
-std::int32_t HybridPrefixCache::GetRequestPagedCacheBaseLogicalPage(const std::string& request_id,
-                                                                    const std::string& group_id) const {
-    auto snapshot = Stats({.request_id = request_id, .paged_cache_group_ids = {group_id}});
-    return snapshot.request_paged_cache_base_logical_page.at(group_id);
-}
-
 CacheStatsSnapshot HybridPrefixCache::Stats(const StatsRequest& request) const {
     CacheStatsSnapshot snapshot{
         .available_device_pages = static_cast<std::size_t>(device_allocator_.AvailablePages()),
@@ -609,27 +524,20 @@ AdmissionVerdict HybridPrefixCache::Admit(const AdmissionRequest& request,
         .mamba_branching_seqlen = compat_result.mamba_branching_seqlen,
         .mamba_cow_src_index = compat_result.mamba_cow_src_index,
         .cache_transfer_pairs = std::move(compat_result.cache_transfer_pairs),
-        .demands = request.demands,
     };
 }
 
 StepCommitResult HybridPrefixCache::StepCommit(StepCommitRequest request) {
     StepCommitResult result{};
-    auto match_or_plan = [](const RecoveryPlan* recovery_plan, const MatchResult* compat_match) -> const MatchResult* {
-        if (compat_match != nullptr) return compat_match;
-        if (recovery_plan != nullptr) return &recovery_plan->compat_match;
-        return nullptr;
-    };
 
     if (request.materialize_prefix.has_value()) {
         const auto& materialize = *request.materialize_prefix;
-        const MatchResult* match = match_or_plan(materialize.recovery_plan, materialize.compat_match);
         const CacheMaterializationKind kind = materialize.require_all_pages
                                                   ? CacheMaterializationKind::kDecodeRecoveryHostPrefixOnDevice
                                                   : CacheMaterializationKind::kPrefillHostPrefixOnDevice;
         result.ok = Materialize({
                                     .kind = kind,
-                                    .match_result = match,
+                                    .match_result = materialize.compat_match,
                                 })
                         .ok;
         if (!result.ok) return result;
@@ -775,16 +683,16 @@ StepCommitResult HybridPrefixCache::StepCommit(StepCommitRequest request) {
         if (worker.op_base == nullptr) {
             throw std::invalid_argument("HybridPrefixCache::StepCommit PrepareWorkerOp requires op_base");
         }
-        const MatchResult* match = match_or_plan(worker.recovery_plan, worker.compat_match);
         PrepareForwardOp(*worker.op_base,
                          {
                              .kind = worker.kind,
                              .terminal = worker.terminal,
                              .first_raw_position_of_op = worker.first_raw_position_of_op,
                              .target_raw_tokens_exclusive = worker.target_raw_tokens_exclusive,
-                             .match_result = match,
+                             .match_result = worker.compat_match,
                              .local_mamba_allocator = worker.local_mamba_allocator_view,
-                             .paged_cache_hit = match == nullptr ? worker.paged_cache_hit : match->paged_cache,
+                             .paged_cache_hit = worker.compat_match == nullptr ? worker.paged_cache_hit
+                                                                               : worker.compat_match->paged_cache,
                              .commit_prior_chunk = worker.commit_tree_prefix_before_acquire,
                          });
     }

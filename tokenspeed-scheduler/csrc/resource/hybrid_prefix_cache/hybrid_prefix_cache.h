@@ -64,7 +64,6 @@ public:
                                          std::map<std::string, std::int32_t>& simulated_free);
     StepCommitResult StepCommit(StepCommitRequest request);
     [[nodiscard]] CacheStatsSnapshot Stats(const StatsRequest& request = {}) const;
-    const FamilyRegistry& Registry() const { return family_registry_; }
 
     struct RawHostStorageHashSeed {
         std::int32_t host_matched_pages{0};
@@ -94,24 +93,6 @@ public:
     void EnablePagedCacheAdjunct(std::vector<std::string> required_groups,
                                  std::unordered_map<std::string, std::int32_t> sliding_window_per_group,
                                  StateRestorePolicy policy = StateRestorePolicy::kSnapshotRequired);
-
-    // Group introspection: throws std::out_of_range on unknown group_id.
-    std::vector<std::string> PagedCacheGroupIds() const;
-    std::int32_t PagedCacheGroupTotalPages(const std::string& group_id) const;
-    std::int32_t PagedCacheGroupAvailablePages(const std::string& group_id) const;
-    std::int64_t PagedCacheGroupFailedAllocCount(const std::string& group_id) const;
-
-    // Standard-KV device-page introspection. These are narrow read-only
-    // facades over the wrapped KV tree and concrete device allocator; they do
-    // not aggregate adjunct family capacity or mutate cache state.
-    using DeviceMemoryDiagnosticsSnapshot = CacheDeviceMemoryDiagnosticsSnapshot;
-    std::size_t AvailableDevicePages() const;
-    DeviceMemoryDiagnosticsSnapshot CollectDeviceMemoryDiagnostics() const;
-
-    // Per-request introspection: unknown group_id throws; unknown request_id returns empty.
-    std::vector<std::int32_t> GetRequestPagedCachePageIds(const std::string& request_id,
-                                                          const std::string& group_id) const;
-    std::int32_t GetRequestPagedCacheBaseLogicalPage(const std::string& request_id, const std::string& group_id) const;
 
     // Unified paged-cache lifecycle surface used by the Scheduler. All methods
     // below are no-ops when no paged-cache groups are registered.
@@ -162,8 +143,6 @@ private:
     enum class RequestLocalKVKind {
         kPrefillFirstChunk,
         kPrefillChunk,
-        kDecodeReserve,
-        kDecodeFromRetractedReserve,
     };
 
     struct RequestLocalKVRequest {
@@ -171,7 +150,6 @@ private:
         LocalKVAllocator* local_kv_allocator{nullptr};
         std::int32_t tokens_this_round{0};
         std::int32_t decode_input_tokens{0};
-        std::int32_t reserve_tokens{0};
     };
 
     struct RequestLocalKVResult {
@@ -281,8 +259,6 @@ private:
     void PopulateOp(ForwardOperationBase& op_base) const;
     std::unique_ptr<LocalMambaAllocator> allocateRequestLocalMambaState(
         std::optional<std::int32_t> checkpoint_raw_position = {}) const;
-    void RebuildFamilyRegistry();
-    void BuildRecoveryPlanSlices(RecoveryPlan& plan) const;
 
     // Per-family classification of admission failure; drives state-only vs
     // full prune strategy.
@@ -380,7 +356,6 @@ private:
     std::unordered_map<TreeNode*, std::unique_ptr<MambaSlot>> pending_mamba_host_writebacks_;
     std::unordered_set<TreeNode*> mamba_host_writeback_done_nodes_;
     bool has_facade_kv_event_sink_{false};
-    FamilyRegistry family_registry_;
 
     // `paged_cache_history_alignment_tokens_ == 0` means adjunct disabled; tables still work.
     std::map<std::string, std::unique_ptr<PagedCacheGroupAllocator>> paged_cache_allocators_;

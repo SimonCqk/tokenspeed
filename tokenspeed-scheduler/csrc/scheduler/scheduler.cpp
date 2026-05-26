@@ -89,7 +89,7 @@ MambaHostAllocator* MambaHostAdjunctAllocator(std::optional<MambaHostAllocator>&
 }  // namespace
 
 bool ValidateDeviceMemoryDiagnostics(const std::vector<RequestLocalKVPagesSnapshot>& request_pages,
-                                     const HybridPrefixCache::DeviceMemoryDiagnosticsSnapshot& device_snapshot) {
+                                     const CacheDeviceMemoryDiagnosticsSnapshot& device_snapshot) {
     bool ok = true;
     const std::int32_t total_device = device_snapshot.total_device_pages;
     // page_id → (owner_req_id, state_name) for duplicate tail-page reporting
