@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-#include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
+#include "resource/hybrid_prefix_cache/hybrid_prefix_cache_types.h"
 
 namespace tokenspeed {
 
@@ -38,6 +38,6 @@ struct RequestLocalKVPagesSnapshot {
 // Scheduler::check_device_mem(). The function is side-effect free except for
 // the same diagnostic logging as the historical inline checks.
 bool ValidateDeviceMemoryDiagnostics(const std::vector<RequestLocalKVPagesSnapshot>& request_pages,
-                                     const HybridPrefixCache::DeviceMemoryDiagnosticsSnapshot& device_snapshot);
+                                     const CacheDeviceMemoryDiagnosticsSnapshot& device_snapshot);
 
 }  // namespace tokenspeed

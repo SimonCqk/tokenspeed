@@ -42,6 +42,9 @@ inline std::int32_t CeilDivPositive(std::int32_t numer, std::int32_t denom) {
 // State: only the trailing window at the hit depth required.
 enum class PagedCacheGroupFamily { History, State };
 
+// Current state recovery requires a complete snapshot for each required group.
+enum class StateRestorePolicy { kSnapshotRequired };
+
 // One model-defined paged cache group; scheduler treats group_id as opaque.
 struct PagedCacheGroupConfig {
     enum class Retention {

@@ -39,7 +39,6 @@ add_library(tokenspeed_scheduler_core STATIC
     csrc/resource/radix_tree/radix_tree.cpp
     csrc/resource/radix_tree/tree_node.cpp
     csrc/resource/kv_prefix_cache/kv_prefix_cache.cpp
-    csrc/resource/hybrid_prefix_cache/family_registry.cpp
     csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
     csrc/resource/hybrid_prefix_cache/mamba_family_ops.cpp
     csrc/resource/hybrid_prefix_cache/mamba_eviction_manager.cpp
@@ -113,7 +112,7 @@ if(TOKENSPEED_SCHEDULER_BUILD_TESTS)
         tests/cpp/test_batch_scheduling.cpp
         tests/cpp/test_prefetch.cpp
         tests/cpp/test_owned_pages.cpp
-        tests/cpp/test_hybrid_cache_registry.cpp
+        tests/cpp/test_hybrid_cache_stats.cpp
         tests/cpp/test_paged_cache_prefix_match.cpp
         tests/cpp/test_paged_cache_attach_loop.cpp
         tests/cpp/test_paged_cache_eviction.cpp
