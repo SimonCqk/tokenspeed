@@ -179,6 +179,7 @@ HybridPrefixCache::PagedCacheHostWriteBackPlan HybridPrefixCache::PreparePagedCa
         if (pending_paged_cache_host_writebacks_.find(pending_key) != pending_paged_cache_host_writebacks_.end()) {
             continue;
         }
+        if (!node->OnDevice()) continue;
         PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
         if (snapshot == nullptr) continue;
         auto group_it = snapshot->groups.find(group_id);
@@ -230,8 +231,13 @@ HybridPrefixCache::PagedCacheHostWriteBackPlan HybridPrefixCache::PreparePagedCa
         transfer.dst_pages.insert(transfer.dst_pages.end(), host_ids.begin(), host_ids.end());
         plan.device_pages_covered += pending.group->device_pages.Size();
         plan.nodes.push_back(pending.node);
-        pending_paged_cache_host_writebacks_.emplace(std::make_pair(pending.node, group_id),
-                                                     std::move(pending.host_pages));
+        pending_paged_cache_host_writebacks_.emplace(
+            std::make_pair(pending.node, group_id),
+            PendingPagedCacheHostWriteBack{
+                .host_pages = std::move(pending.host_pages),
+                .snapshot_ref = PagedCacheSnapshotRef{pending.node->GetPagedCacheSnapshotMut()},
+                .device_node_ref = std::make_unique<DeviceNodeRef>(pending.node),
+            });
     }
     plan.transfers.push_back(std::move(transfer));
     plan.ok = plan.device_pages_covered >= required_device_pages;
@@ -279,22 +285,23 @@ bool HybridPrefixCache::OnPagedCacheHostWriteBackDone(TreeNode* node, const std:
     if (node == nullptr) return false;
     auto pending_it = pending_paged_cache_host_writebacks_.find(std::make_pair(node, group_id));
     if (pending_it == pending_paged_cache_host_writebacks_.end()) return false;
+    PendingPagedCacheHostWriteBack pending = std::move(pending_it->second);
+    pending_paged_cache_host_writebacks_.erase(pending_it);
 
     PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
     if (snapshot == nullptr) {
-        pending_paged_cache_host_writebacks_.erase(pending_it);
         return false;
     }
     auto group_it = snapshot->groups.find(group_id);
     if (group_it == snapshot->groups.end()) {
-        pending_paged_cache_host_writebacks_.erase(pending_it);
         RefreshPagedCacheSnapshotCompleteness(*snapshot);
         return false;
     }
 
     PagedCacheGroupSnapshot& group = group_it->second;
-    group.host_pages = std::move(pending_it->second);
-    pending_paged_cache_host_writebacks_.erase(pending_it);
+    group.host_pages = std::move(pending.host_pages);
+    pending.snapshot_ref = PagedCacheSnapshotRef{};
+    pending.device_node_ref.reset();
     if (!IsPagedCacheNodePinned(node)) {
         group.device_pages = {};
     }
@@ -533,12 +540,49 @@ void HybridPrefixCache::CancelPagedCacheDeviceLoadBack(
 void HybridPrefixCache::OnPagedCacheHostWriteBackDone(
     const std::map<std::string, std::vector<TreeNode*>>& nodes_by_group, bool success) {
     for (const auto& [group_id, nodes] : nodes_by_group) {
-        for (TreeNode* node : nodes) {
-            if (success) {
-                OnPagedCacheHostWriteBackDone(node, group_id);
-            } else {
-                CancelPagedCacheHostWriteBack(node, group_id);
+        if (success) {
+            struct Completion {
+                TreeNode* node{nullptr};
+                PagedCacheSnapshot* snapshot{nullptr};
+                PagedCacheGroupSnapshot* group{nullptr};
+                PendingPagedCacheHostWriteBack pending{};
+            };
+            std::vector<Completion> completions;
+            completions.reserve(nodes.size());
+            for (TreeNode* node : nodes) {
+                if (node == nullptr) continue;
+                auto pending_it = pending_paged_cache_host_writebacks_.find(std::make_pair(node, group_id));
+                if (pending_it == pending_paged_cache_host_writebacks_.end()) continue;
+                PendingPagedCacheHostWriteBack pending = std::move(pending_it->second);
+                pending_paged_cache_host_writebacks_.erase(pending_it);
+
+                PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
+                if (snapshot == nullptr) continue;
+                auto group_it = snapshot->groups.find(group_id);
+                if (group_it == snapshot->groups.end()) {
+                    RefreshPagedCacheSnapshotCompleteness(*snapshot);
+                    continue;
+                }
+
+                PagedCacheGroupSnapshot& group = group_it->second;
+                group.host_pages = std::move(pending.host_pages);
+                completions.push_back(
+                    Completion{.node = node, .snapshot = snapshot, .group = &group, .pending = std::move(pending)});
             }
+            for (Completion& completion : completions) {
+                completion.pending.snapshot_ref = PagedCacheSnapshotRef{};
+                completion.pending.device_node_ref.reset();
+            }
+            for (Completion& completion : completions) {
+                if (!IsPagedCacheNodePinned(completion.node)) {
+                    completion.group->device_pages = {};
+                }
+                RefreshPagedCacheSnapshotCompleteness(*completion.snapshot);
+            }
+            continue;
+        }
+        for (TreeNode* node : nodes) {
+            CancelPagedCacheHostWriteBack(node, group_id);
         }
     }
 }

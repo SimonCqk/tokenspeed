@@ -76,6 +76,67 @@ TEST_F(PagedCacheEvictionTest, PassiveEvictionReleasesPagedCachePages) {
     EXPECT_EQ(swa_alloc_->AvailablePages(), swa_before);
 }
 
+TEST_F(PagedCacheEvictionTest, PendingHostWriteBackPinsSnapshotAgainstKvEviction) {
+    PagedCacheGroupConfig host_cfg =
+        MakeGroupConfig("fh", kSmallFixtureParams.fh_rows_per_page, kSmallFixtureParams.fh_stride,
+                        PagedCacheGroupConfig::Retention::FullHistory, /*window=*/0, PagedCacheGroupFamily::History);
+    host_cfg.total_pages = 8;
+    auto host_owner = std::make_unique<PagedCacheGroupAllocator>(std::move(host_cfg));
+    PagedCacheGroupAllocator* host_alloc = host_owner.get();
+    HybridPrefixCacheTestPeer::RegisterPagedCacheHostGroup(*hybrid_, std::move(host_owner));
+
+    TreeNode* leaf_a = InsertDevicePages(/*num_pages=*/2, /*token_start=*/1);
+    ASSERT_NE(leaf_a, nullptr);
+    TreeNode* leaf_b = InsertDevicePages(/*num_pages=*/2, /*token_start=*/100);
+    ASSERT_NE(leaf_b, nullptr);
+
+    TreeNode* attach_a = kv_cache_->GetRadixTree().SplitAt(leaf_a, kLcm);
+    ASSERT_NE(attach_a, nullptr);
+    HybridPrefixCacheTestPeer::AttachPagedCacheSnapshotToNode(*hybrid_, attach_a, MakeCompleteSnapshot(kLcm));
+    ASSERT_TRUE(attach_a->HasPagedCacheSnapshot());
+
+    const PagedCacheSnapshot* snapshot = attach_a->GetPagedCacheSnapshot();
+    ASSERT_NE(snapshot, nullptr);
+    const std::vector<std::int32_t> source_device_ids = snapshot->groups.at("fh").DevicePageIds();
+    ASSERT_FALSE(source_device_ids.empty());
+    const std::int32_t fh_available_after_attach = fh_alloc_->AvailablePages();
+    const std::int32_t host_available_before = host_alloc->AvailablePages();
+
+    auto plan = HybridPrefixCacheTestPeer::PreparePagedCacheHostWriteBack(*hybrid_, "fh",
+                                                                          /*required_device_pages=*/1);
+    ASSERT_TRUE(plan.ok);
+    ASSERT_EQ(plan.nodes, std::vector<TreeNode*>({attach_a}));
+    ASSERT_EQ(plan.transfers.size(), 1u);
+    EXPECT_EQ(fh_alloc_->AvailablePages(), fh_available_after_attach)
+        << "D2H scheduling must not release source paged-cache device pages";
+    EXPECT_FALSE(snapshot->groups.at("fh").HasHost());
+
+    const std::int32_t target_available = device_alloc_->AvailablePages() + 1;
+    ASSERT_TRUE(kv_cache_->EnsureCapacityByEvict<ResourceType::Device>(target_available));
+
+    ASSERT_TRUE(attach_a->HasPagedCacheSnapshot()) << "pending D2H must pin the TreeNode snapshot";
+    snapshot = attach_a->GetPagedCacheSnapshot();
+    ASSERT_NE(snapshot, nullptr);
+    const auto& pending_group = snapshot->groups.at("fh");
+    EXPECT_TRUE(pending_group.HasDevice());
+    EXPECT_FALSE(pending_group.HasHost());
+    EXPECT_EQ(pending_group.DevicePageIds(), source_device_ids);
+    EXPECT_EQ(fh_alloc_->AvailablePages(), fh_available_after_attach)
+        << "KV LRU pressure must not recycle D2H source pages before ack";
+
+    ASSERT_TRUE(HybridPrefixCacheTestPeer::OnPagedCacheHostWriteBackDone(*hybrid_, attach_a, "fh"));
+    snapshot = attach_a->GetPagedCacheSnapshot();
+    ASSERT_NE(snapshot, nullptr);
+    const auto& acked_group = snapshot->groups.at("fh");
+    EXPECT_TRUE(acked_group.HasHost());
+    EXPECT_FALSE(acked_group.HasDevice());
+    EXPECT_EQ(acked_group.HostPageIds(), plan.transfers[0].dst_pages);
+    EXPECT_EQ(fh_alloc_->AvailablePages(),
+              fh_available_after_attach + static_cast<std::int32_t>(source_device_ids.size()));
+    EXPECT_EQ(host_alloc->AvailablePages(),
+              host_available_before - static_cast<std::int32_t>(source_device_ids.size()));
+}
+
 TEST_F(PagedCacheEvictionTest, StatePressurePrunesOnlyStateWhenHistoryHasCapacity) {
     TreeNode* terminal = InsertDevicePages(/*num_pages=*/2, /*token_start=*/1);
     ASSERT_NE(terminal, nullptr);

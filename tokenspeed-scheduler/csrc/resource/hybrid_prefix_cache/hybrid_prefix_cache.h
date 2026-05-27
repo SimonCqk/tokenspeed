@@ -36,6 +36,7 @@
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache_types.h"
 #include "resource/hybrid_prefix_cache/mamba_eviction_manager.h"
 #include "resource/kv_prefix_cache/kv_prefix_cache.h"
+#include "resource/radix_tree/tree_node.h"
 #include "scheduler/operations/cache.h"
 #include "resource/types.h"
 
@@ -326,6 +327,12 @@ private:
                                                    const PagedCacheGroupAdmission& admission);
     void refreshPagedCacheSimulatedFree(std::map<std::string, std::int32_t>& simulated_free) const;
 
+    struct PendingPagedCacheHostWriteBack {
+        OwnedPages host_pages{};
+        PagedCacheSnapshotRef snapshot_ref{};
+        std::unique_ptr<DeviceNodeRef> device_node_ref{};
+    };
+
     KVPrefixCache& kv_prefix_cache_;
     PageAllocator& device_allocator_;
     MambaChunkAllocator* mamba_allocator_;
@@ -340,7 +347,7 @@ private:
     // `paged_cache_history_alignment_tokens_ == 0` means adjunct disabled; tables still work.
     std::map<std::string, std::unique_ptr<PagedCacheGroupAllocator>> paged_cache_allocators_;
     std::map<std::string, std::unique_ptr<PagedCacheGroupAllocator>> paged_cache_host_allocators_;
-    std::map<std::pair<TreeNode*, std::string>, OwnedPages> pending_paged_cache_host_writebacks_;
+    std::map<std::pair<TreeNode*, std::string>, PendingPagedCacheHostWriteBack> pending_paged_cache_host_writebacks_;
     std::map<std::string, std::int64_t> paged_cache_host_writeback_pages_scheduled_total_;
     std::map<std::string, std::int64_t> paged_cache_device_loadback_pages_scheduled_total_;
     std::map<std::string, std::int64_t> paged_cache_host_evicted_pages_total_;
