@@ -157,7 +157,7 @@ std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(Request* reque
                      .device_pages_needed = pages_needed,
                      .first_raw_position_of_op = first_pos,
                      .target_raw_tokens_exclusive = target,
-                     .refresh_mamba_checkpoint = request->Is<fsm::PrefillDone>(),
+                     .refresh_local_cache_state = request->Is<fsm::PrefillDone>(),
                  },
                  simulated_free)
              .admitted) {
@@ -181,7 +181,7 @@ std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFr
         request->Apply(fsm::AbortEvent{});
         return {};
     }
-    TreeNode* mamba_recovery_node = recovery_plan.protected_recovery_node;
+    TreeNode* protected_recovery_node = recovery_plan.protected_recovery_node;
 
     const std::int32_t device_matched2 = match_result.device.DepthInPage();
     const std::int32_t host_matched2 = match_result.host.DepthInPage();
@@ -202,7 +202,7 @@ std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFr
             .match_result = match_result,
             .device_pages_needed = device_pages_needed,
             .target_raw_tokens_exclusive = target,
-            .protected_recovery_node = mamba_recovery_node,
+            .protected_recovery_node = protected_recovery_node,
         },
         simulated_free);
     if (!admission.admitted) {
@@ -292,7 +292,7 @@ std::optional<WriteBackOperation> Scheduler::applyEventAndGenerateOp(Request* re
     const auto& pages_to_transfer = request->GetPagesToTransfer<fsm::Retracting>();
     if (pages_to_transfer.empty()) {
         // No copy needed; advance Retracting to Retracted without an op_id.
-        request->Apply(fsm::WriteBackDoneEvent{&kv_prefix_cache_, &hybrid_prefix_cache_});
+        request->Apply(fsm::WriteBackDoneEvent{&hybrid_prefix_cache_});
         return std::nullopt;
     }
     // Register op_id so WriteBackDone can route back.
@@ -357,7 +357,7 @@ PrefillOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Sched
         .target_raw_tokens_exclusive = op.extend_prefix_len + op.input_length,
         .tree_prefix_to_commit = *cache_mutation.MutableTerminalDeviceNode(),
         .match_result = match,
-        .local_mamba_allocator = cache_context.LocalMambaAllocatorView(),
+        .local_cache = cache_context.LocalCache(),
     });
     return op;
 }
@@ -371,7 +371,7 @@ PrefillOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Sched
         .first_raw_position_of_op = op.extend_prefix_len,
         .target_raw_tokens_exclusive = op.extend_prefix_len + op.input_length,
         .tree_prefix_to_commit = *cache_mutation.MutableTerminalDeviceNode(),
-        .local_mamba_allocator = cache_context.LocalMambaAllocatorView(),
+        .local_cache = cache_context.LocalCache(),
     });
     return op;
 }
@@ -418,14 +418,14 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
             .first_raw_position_of_op = first_pos,
             .target_raw_tokens_exclusive = first_pos + op.input_length,
             .tree_prefix_to_commit = *cache_mutation.MutableTerminalDeviceNode(),
-            .local_mamba_allocator = cache_context.LocalMambaAllocatorView(),
+            .local_cache = cache_context.LocalCache(),
         });
     } else {
         (void)hybrid_prefix_cache_.StepCommit(cache::worker::CommitDecodeMetadata{
             .op_base = op,
             .first_raw_position_of_op = first_pos,
             .target_raw_tokens_exclusive = first_pos + op.input_length,
-            .local_mamba_allocator = cache_context.LocalMambaAllocatorView(),
+            .local_cache = cache_context.LocalCache(),
         });
     }
     return op;
@@ -457,7 +457,7 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
         .op_base = op,
         .target_raw_tokens_exclusive = request->TokenSize(),
         .match_result = match,
-        .local_mamba_allocator = cache_context.LocalMambaAllocatorView(),
+        .local_cache = cache_context.LocalCache(),
     });
     return op;
 }
@@ -478,7 +478,7 @@ Scheduler::newForwardOperation(std::vector<Request*> candidates) {
     // priority class is identical across ranks. requests_ is an unordered_map
     // keyed by string id; libstdc++ randomizes string hashing per process, so
     // without the tiebreaker each rank visits candidates in a different order
-    // and — when token_budget / page / mamba-slot constraints are tight — picks
+    // and — when token_budget / page / cache-slot constraints are tight — picks
     // a different subset to schedule. That made forward_op None on some ranks
     // and non-None on others, deadlocking the next NCCL collective.
     std::sort(candidates.begin(), candidates.end(), [&](const auto& a, const auto& b) {

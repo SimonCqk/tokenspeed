@@ -30,11 +30,9 @@
 
 #include "core/token_container.h"
 #include "resource/radix_tree/tree_node.h"
-#include "resource/allocator/kv_allocator.h"
 #include "resource/allocator/owned_pages.h"
-#include "resource/allocator/local_mamba_allocator.h"
+#include "resource/hybrid_prefix_cache/hybrid_prefix_cache_types.h"
 #include "scheduler/operations/cache.h"
-#include "resource/page_container.h"
 #include "resource/allocator/req_pool_allocator.h"
 #include "resource/types.h"
 #include "scheduler/request_spec.h"
@@ -98,27 +96,21 @@ private:
 struct BaseState {
 public:
     BaseState(TokenContainer* token_container, std::int32_t page_size, std::unique_ptr<DeviceNodeRef>&& device_node_ref,
-              std::unique_ptr<LocalKVAllocator>&& local_kv_allocator,
-              std::unique_ptr<LocalMambaAllocator>&& local_mamba_allocator = nullptr)
+              std::unique_ptr<RequestLocalCacheState>&& local_cache)
         : token_container_{token_container},
           page_size_{page_size},
           device_node_ref_{std::move(device_node_ref)},
-          local_kv_allocator_{std::move(local_kv_allocator)},
-          local_mamba_allocator_{std::move(local_mamba_allocator)} {}
+          local_cache_{std::move(local_cache)} {}
 
     BaseState(const BaseState&) = delete;
     BaseState& operator=(const BaseState&) = delete;
     BaseState(BaseState&&) noexcept = default;
     BaseState& operator=(BaseState&&) noexcept = default;
 
-    PageContainer GetPageContainer() const {
-        return PageContainer{device_node_ref_->Node(), local_kv_allocator_.get()};
-    }
-
     const TreeNode* GetDeviceNode() const { return device_node_ref_->Node(); }
     TreeNode* GetMutableDeviceNode() const { return device_node_ref_->Node(); }
 
-    std::int32_t TailPageAvailableTokens() const { return local_kv_allocator_->TailPageAvailableTokens(); }
+    std::int32_t TailPageAvailableTokens() const { return local_cache_->TailPageAvailableTokens(); }
 
     auto GetFullPagedTokens() const { return token_container_->GetFullPagedTokens(page_size_, false); }
     auto GetFullPagedTokens(bool except_last) const {
@@ -131,12 +123,10 @@ public:
 
     std::unique_ptr<DeviceNodeRef> TakeDeviceNodeRef() && { return std::move(device_node_ref_); }
 
-    std::unique_ptr<LocalKVAllocator> TakeLocalKVAllocator() && { return std::move(local_kv_allocator_); }
+    std::unique_ptr<RequestLocalCacheState> TakeLocalCache() && { return std::move(local_cache_); }
 
-    LocalKVAllocator* GetLocalKVAllocatorPtr() { return local_kv_allocator_.get(); }
-
-    LocalMambaAllocator* GetLocalMambaAllocator() { return local_mamba_allocator_.get(); }
-    std::unique_ptr<LocalMambaAllocator> TakeLocalMambaAllocator() && { return std::move(local_mamba_allocator_); }
+    RequestLocalCacheState* GetLocalCache() { return local_cache_.get(); }
+    const RequestLocalCacheState* GetLocalCache() const { return local_cache_.get(); }
 
 protected:
     TokenContainer* token_container_;
@@ -144,16 +134,13 @@ protected:
 
 protected:
     std::unique_ptr<DeviceNodeRef> device_node_ref_;
-    std::unique_ptr<LocalKVAllocator> local_kv_allocator_;
-    std::unique_ptr<LocalMambaAllocator> local_mamba_allocator_;
+    std::unique_ptr<RequestLocalCacheState> local_cache_;
 };
 
 struct ForwardState : public BaseState {
     ForwardState(TokenContainer* token_container, std::int32_t page_size, std::unique_ptr<DeviceNodeRef>&& node_ref,
-                 std::unique_ptr<LocalKVAllocator>&& local_kv_allocator, std::unique_ptr<ReqPoolIndex>&& req_pool_index,
-                 std::unique_ptr<LocalMambaAllocator>&& local_mamba_allocator = nullptr)
-        : BaseState(token_container, page_size, std::move(node_ref), std::move(local_kv_allocator),
-                    std::move(local_mamba_allocator)),
+                 std::unique_ptr<RequestLocalCacheState>&& local_cache, std::unique_ptr<ReqPoolIndex>&& req_pool_index)
+        : BaseState(token_container, page_size, std::move(node_ref), std::move(local_cache)),
           req_pool_index_(std::move(req_pool_index)) {}
 
     ForwardState(ForwardState&&) noexcept = default;
@@ -162,10 +149,10 @@ struct ForwardState : public BaseState {
     std::unique_ptr<ReqPoolIndex> TakeReqPoolIndex() && { return std::move(req_pool_index_); }
     std::int32_t GetReqPoolIndex() const { return req_pool_index_ ? req_pool_index_->slot_ : -1; }
 
-    std::vector<std::int32_t> GetOccupiedPages() const { return GetPageContainer().Pages(); }
+    std::vector<std::int32_t> GetOccupiedPages() const { return local_cache_->OccupiedPages(device_node_ref_->Node()); }
 
     // Returns only the pages held by the local KV allocator (tail pages, not radix-tree prefix pages).
-    std::vector<std::int32_t> GetLocalAllocatorPages() const { return local_kv_allocator_->Pages(); }
+    std::vector<std::int32_t> GetLocalAllocatorPages() const { return local_cache_->LocalKVPages(); }
 
 private:
     std::unique_ptr<ReqPoolIndex> req_pool_index_;
@@ -173,11 +160,10 @@ private:
 
 struct Prefilling : public ForwardState {
     Prefilling(TokenContainer* token_container, std::int32_t page_size, std::unique_ptr<HostNodeRef>&& host_node_ref,
-               std::unique_ptr<DeviceNodeRef>&& device_node_ref, std::unique_ptr<LocalKVAllocator>&& local_kv_allocator,
-               std::unique_ptr<ReqPoolIndex>&& req_pool_index, TokenContainer::Window _window,
-               std::unique_ptr<LocalMambaAllocator>&& local_mamba_allocator = nullptr)
-        : ForwardState(token_container, page_size, std::move(device_node_ref), std::move(local_kv_allocator),
-                       std::move(req_pool_index), std::move(local_mamba_allocator)),
+               std::unique_ptr<DeviceNodeRef>&& device_node_ref, std::unique_ptr<RequestLocalCacheState>&& local_cache,
+               std::unique_ptr<ReqPoolIndex>&& req_pool_index, TokenContainer::Window _window)
+        : ForwardState(token_container, page_size, std::move(device_node_ref), std::move(local_cache),
+                       std::move(req_pool_index)),
           host_node_ref_(std::move(host_node_ref)),
           window(_window) {}
 
@@ -209,12 +195,11 @@ private:
 // On the next NextExecutionPlan call, ScheduleEvent transitions this to Decoding.
 struct PrefillDone : public ForwardState {
     PrefillDone(TokenContainer* token_container, std::int32_t page_size, std::unique_ptr<HostNodeRef>&& host_node_ref,
-                std::unique_ptr<DeviceNodeRef>&& device_node_ref,
-                std::unique_ptr<LocalKVAllocator>&& local_kv_allocator, std::unique_ptr<ReqPoolIndex>&& req_pool_index,
-                TokenContainer::Window _window, std::int32_t reserve_num_tokens_in_next_schedule_event,
-                std::unique_ptr<LocalMambaAllocator>&& local_mamba_allocator = nullptr)
-        : ForwardState(token_container, page_size, std::move(device_node_ref), std::move(local_kv_allocator),
-                       std::move(req_pool_index), std::move(local_mamba_allocator)),
+                std::unique_ptr<DeviceNodeRef>&& device_node_ref, std::unique_ptr<RequestLocalCacheState>&& local_cache,
+                std::unique_ptr<ReqPoolIndex>&& req_pool_index, TokenContainer::Window _window,
+                std::int32_t reserve_num_tokens_in_next_schedule_event)
+        : ForwardState(token_container, page_size, std::move(device_node_ref), std::move(local_cache),
+                       std::move(req_pool_index)),
           host_node_ref_(std::move(host_node_ref)),
           window(_window),
           reserve_num_tokens_in_next_schedule_event_(reserve_num_tokens_in_next_schedule_event) {}
@@ -251,11 +236,10 @@ private:
 
 struct Decoding : public ForwardState {
     Decoding(TokenContainer* token_container, std::int32_t page_size, std::unique_ptr<HostNodeRef>&& host_node_ref,
-             std::unique_ptr<DeviceNodeRef>&& node_ref, std::unique_ptr<LocalKVAllocator>&& local_kv_allocator,
-             std::unique_ptr<ReqPoolIndex>&& req_pool_index, std::int32_t reserve_num_tokens_in_next_schedule_event,
-             std::unique_ptr<LocalMambaAllocator>&& local_mamba_allocator = nullptr)
-        : ForwardState(token_container, page_size, std::move(node_ref), std::move(local_kv_allocator),
-                       std::move(req_pool_index), std::move(local_mamba_allocator)),
+             std::unique_ptr<DeviceNodeRef>&& node_ref, std::unique_ptr<RequestLocalCacheState>&& local_cache,
+             std::unique_ptr<ReqPoolIndex>&& req_pool_index, std::int32_t reserve_num_tokens_in_next_schedule_event)
+        : ForwardState(token_container, page_size, std::move(node_ref), std::move(local_cache),
+                       std::move(req_pool_index)),
           host_node_ref_(std::move(host_node_ref)),
           reserve_num_tokens_in_next_schedule_event_(reserve_num_tokens_in_next_schedule_event) {}
 
@@ -290,12 +274,12 @@ struct Draining {
     using PagePair = TransferPair;
     Draining(std::vector<PagePair> pages_to_transfer, std::vector<TreeNode*> writeback_nodes,
              std::unique_ptr<DeviceNodeRef>&& device_node_ref, std::unique_ptr<HostNodeRef>&& host_node_ref,
-             std::vector<TreeNode*> mamba_writeback_nodes = {})
+             PendingHostWritebackState pending_writeback = {})
         : pages_to_transfer_(std::move(pages_to_transfer)),
           writeback_nodes_(std::move(writeback_nodes)),
           device_node_ref_(std::move(device_node_ref)),
           host_node_ref_(std::move(host_node_ref)),
-          mamba_writeback_nodes_(std::move(mamba_writeback_nodes)) {}
+          pending_writeback_(std::move(pending_writeback)) {}
 
 public:
     // Transfer pairs that must be copied Device→Host.
@@ -304,14 +288,14 @@ public:
 
     std::unique_ptr<DeviceNodeRef> TakeDeviceNodeRef() && { return std::move(device_node_ref_); }
     std::unique_ptr<HostNodeRef> TakeHostNodeRef() && { return std::move(host_node_ref_); }
-    std::vector<TreeNode*> TakeMambaWriteBackNodes() && { return std::move(mamba_writeback_nodes_); }
+    PendingHostWritebackState TakePendingWriteback() && { return std::move(pending_writeback_); }
 
 private:
     std::vector<PagePair> pages_to_transfer_;         // concrete mixed-kind pairs to copy
     std::vector<TreeNode*> writeback_nodes_;          // KV host nodes covered by pages_to_transfer_
     std::unique_ptr<DeviceNodeRef> device_node_ref_;  // keeps matched Device node alive until WritingBack
     std::unique_ptr<HostNodeRef> host_node_ref_;      // keeps pre-allocated Host node alive until WritingBack
-    std::vector<TreeNode*> mamba_writeback_nodes_;    // exact Mamba nodes covered by this writeback op
+    PendingHostWritebackState pending_writeback_;     // adjunct host state covered by this writeback op
 };
 
 // WritingBack OP has been generated, executing offload.
@@ -319,48 +303,45 @@ private:
 // async Device→Host transfer is in flight.
 struct WritingBack {
     WritingBack(std::unique_ptr<DeviceNodeRef>&& device_node_ref, std::unique_ptr<HostNodeRef>&& host_node_ref,
-                std::vector<TreeNode*> mamba_writeback_nodes = {})
+                PendingHostWritebackState pending_writeback = {})
         : device_node_ref_(std::move(device_node_ref)),
           host_node_ref_(std::move(host_node_ref)),
-          mamba_writeback_nodes_(std::move(mamba_writeback_nodes)) {}
+          pending_writeback_(std::move(pending_writeback)) {}
 
     WritingBack(WritingBack&&) noexcept = default;
     WritingBack& operator=(WritingBack&&) noexcept = default;
 
     std::unique_ptr<HostNodeRef> TakeHostNodeRef() && { return std::move(host_node_ref_); }
     TreeNode* DeviceNode() const { return device_node_ref_ ? device_node_ref_->Node() : nullptr; }
-    const std::vector<TreeNode*>& MambaWriteBackNodes() const { return mamba_writeback_nodes_; }
+    const PendingHostWritebackState& PendingWriteback() const { return pending_writeback_; }
     void DropDeviceNodeRef() { device_node_ref_.reset(); }
 
 private:
     std::unique_ptr<DeviceNodeRef> device_node_ref_;  // released after WriteBackDone
     std::unique_ptr<HostNodeRef> host_node_ref_;      // released after WriteBackDone
-    std::vector<TreeNode*> mamba_writeback_nodes_;    // pending host Mamba slots published by this op ack
+    PendingHostWritebackState pending_writeback_;     // pending adjunct host state published by this op ack
 };
 
-// Need to hold local_kv_allocator(has tail page info), and token container for recovery
+// Need to hold request-local cache state (tail page info) and token container for recovery.
 struct Retracting : public WritingBack {
     using PagePair = TransferPair;
 
     Retracting(TokenContainer* token_container, std::int32_t page_size, std::unique_ptr<HostNodeRef>&& host_node_ref,
-               std::unique_ptr<DeviceNodeRef>&& device_node_ref, std::unique_ptr<LocalKVAllocator>&& local_kv_allocator,
+               std::unique_ptr<DeviceNodeRef>&& device_node_ref, std::unique_ptr<RequestLocalCacheState>&& local_cache,
                std::vector<PagePair> pages_to_transfer, std::vector<TreeNode*> writeback_nodes,
-               std::vector<TreeNode*> mamba_writeback_nodes = {},
-               std::unique_ptr<LocalMambaAllocator>&& local_mamba_allocator = nullptr)
-        : WritingBack(std::move(device_node_ref), std::move(host_node_ref), std::move(mamba_writeback_nodes)),
+               PendingHostWritebackState pending_writeback = {})
+        : WritingBack(std::move(device_node_ref), std::move(host_node_ref), std::move(pending_writeback)),
           token_container_{token_container},
           page_size_{page_size},
-          local_kv_allocator_(std::move(local_kv_allocator)),
+          local_cache_(std::move(local_cache)),
           pages_to_transfer_(std::move(pages_to_transfer)),
-          writeback_nodes_(std::move(writeback_nodes)),
-          local_mamba_allocator_(std::move(local_mamba_allocator)) {}
+          writeback_nodes_(std::move(writeback_nodes)) {}
 
     Retracting(Retracting&&) noexcept = default;
     Retracting& operator=(Retracting&&) noexcept = default;
 
     TokenContainer* GetTokenContainer() const { return token_container_; }
-    std::unique_ptr<LocalKVAllocator> TakeKVAllocator() && { return std::move(local_kv_allocator_); }
-    std::unique_ptr<LocalMambaAllocator> TakeMambaAllocator() && { return std::move(local_mamba_allocator_); }
+    std::unique_ptr<RequestLocalCacheState> TakeLocalCache() && { return std::move(local_cache_); }
     std::int32_t GetPageSize() const { return page_size_; }
 
     // (device_page, host_page) pairs to transfer, captured at ScheduleRetractEvent time.
@@ -370,39 +351,33 @@ struct Retracting : public WritingBack {
 
     // Returns only the pages held by the local KV allocator (tail page after retraction insert).
     std::vector<std::int32_t> GetLocalAllocatorPages() const {
-        return local_kv_allocator_ ? local_kv_allocator_->Pages() : std::vector<std::int32_t>{};
+        return local_cache_ ? local_cache_->LocalKVPages() : std::vector<std::int32_t>{};
     }
 
 private:
     TokenContainer* token_container_{};
     std::int32_t page_size_{};
-    std::unique_ptr<LocalKVAllocator> local_kv_allocator_{};
+    std::unique_ptr<RequestLocalCacheState> local_cache_{};
     std::vector<PagePair> pages_to_transfer_{};
     std::vector<TreeNode*> writeback_nodes_{};
-    std::unique_ptr<LocalMambaAllocator> local_mamba_allocator_{};
 };
 
 struct Retracted {
     Retracted(TokenContainer* token_container, std::int32_t page_size, std::unique_ptr<HostNodeRef>&& host_node_ref,
-              std::unique_ptr<LocalKVAllocator> local_kv_allocator,
-              std::unique_ptr<LocalMambaAllocator> local_mamba_allocator = nullptr)
+              std::unique_ptr<RequestLocalCacheState> local_cache)
         : token_container_{token_container},
           page_size_{page_size},
           host_node_ref_{std::move(host_node_ref)},
-          local_kv_allocator_(std::move(local_kv_allocator)),
-          local_mamba_allocator_(std::move(local_mamba_allocator)) {}
+          local_cache_(std::move(local_cache)) {}
 
     TokenContainer* GetTokenContainer() { return token_container_; }
     std::int32_t GetPageSize() const { return page_size_; }
-    std::int32_t TailPageAvailableTokens() const {
-        return local_kv_allocator_ ? local_kv_allocator_->TailPageAvailableTokens() : 0;
-    }
-    std::unique_ptr<LocalKVAllocator> TakeKVAllocator() && { return std::move(local_kv_allocator_); }
-    std::unique_ptr<LocalMambaAllocator> TakeMambaAllocator() && { return std::move(local_mamba_allocator_); }
+    std::int32_t TailPageAvailableTokens() const { return local_cache_ ? local_cache_->TailPageAvailableTokens() : 0; }
+    std::unique_ptr<RequestLocalCacheState> TakeLocalCache() && { return std::move(local_cache_); }
 
     // Returns only the pages held by the local KV allocator (tail page kept after retraction).
     std::vector<std::int32_t> GetLocalAllocatorPages() const {
-        return local_kv_allocator_ ? local_kv_allocator_->Pages() : std::vector<std::int32_t>{};
+        return local_cache_ ? local_cache_->LocalKVPages() : std::vector<std::int32_t>{};
     }
 
     void ExtendResultTokens(const std::vector<std::int32_t> result_tokens) { token_container_->Extend(result_tokens); }
@@ -411,8 +386,7 @@ private:
     TokenContainer* token_container_{};
     std::int32_t page_size_{};
     std::unique_ptr<HostNodeRef> host_node_ref_{};
-    std::unique_ptr<LocalKVAllocator> local_kv_allocator_{};
-    std::unique_ptr<LocalMambaAllocator> local_mamba_allocator_{};
+    std::unique_ptr<RequestLocalCacheState> local_cache_{};
 };
 
 struct Finished {};

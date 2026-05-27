@@ -246,11 +246,15 @@ TEST_F(MambaCacheTest, WorkerTypedMetadataReceivesPrefixRecoveryAndRequestLocalI
     TreeNode* prefix_terminal = InsertKVOnly(MakeAlignedTokens(1, kPageSize));
     ASSERT_NE(prefix_terminal, nullptr);
 
-    LocalMambaAllocator local_mamba(mamba_alloc_.get());
-    ASSERT_TRUE(local_mamba.AllocateWorking());
-    ASSERT_TRUE(local_mamba.AllocateCheckpoint());
-    const std::int32_t working_index = local_mamba.WorkingIndex();
-    const std::int32_t checkpoint_index = local_mamba.CheckpointIndex();
+    auto local_cache =
+        std::make_unique<RequestLocalCacheState>(std::make_unique<LocalKVAllocator>(device_alloc_.get(), 0),
+                                                 std::make_unique<LocalMambaAllocator>(mamba_alloc_.get()));
+    auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(*local_cache);
+    ASSERT_NE(local_mamba, nullptr);
+    ASSERT_TRUE(local_mamba->AllocateWorking());
+    ASSERT_TRUE(local_mamba->AllocateCheckpoint());
+    const std::int32_t working_index = local_mamba->WorkingIndex();
+    const std::int32_t checkpoint_index = local_mamba->CheckpointIndex();
 
     MatchResult prefix_match{};
     prefix_match.mamba_cow_src_index = 7;
@@ -261,7 +265,7 @@ TEST_F(MambaCacheTest, WorkerTypedMetadataReceivesPrefixRecoveryAndRequestLocalI
         .op_base = prefix_op,
         .tree_prefix_to_commit = *prefix_terminal,
         .match_result = prefix_match,
-        .local_mamba_allocator = &local_mamba,
+        .local_cache = *local_cache,
     });
 
     EXPECT_EQ(prefix_op.mamba_cow_src_idx, 7);
@@ -279,7 +283,7 @@ TEST_F(MambaCacheTest, WorkerTypedMetadataReceivesPrefixRecoveryAndRequestLocalI
         .op_base = recovery_op,
         .target_raw_tokens_exclusive = 0,
         .match_result = recovery_match,
-        .local_mamba_allocator = &local_mamba,
+        .local_cache = *local_cache,
     });
 
     EXPECT_EQ(recovery_op.mamba_cow_src_idx, 5);
@@ -297,20 +301,17 @@ TEST(HybridPrefixCacheKVAllocationTest, PrefillCreatesAndRefreshesRequestLocalSt
     constexpr std::int32_t kInitialCheckpointPosition = 4;
     constexpr std::int32_t kRefreshedCheckpointPosition = 8;
 
-    auto result = hybrid_prefix_cache.StepCommit(
-        cache::state::CreateRequestLocalKV{
-            .initial_tokens = 1,
-            .acquire_tokens = 2,
-        },
-        cache::state::CreateRequestLocalMamba{
-            .checkpoint_raw_position = kInitialCheckpointPosition,
-        });
-    auto local_kv = std::move(result.local_kv_allocator);
-    auto local_mamba = std::move(result.local_mamba_allocator);
+    auto result = hybrid_prefix_cache.StepCommit(cache::state::CreateRequestLocalCache{
+        .initial_tokens = 1,
+        .acquire_tokens = 2,
+        .checkpoint_raw_position = kInitialCheckpointPosition,
+    });
+    auto local_cache = std::move(result.local_cache);
+    auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(*local_cache);
 
-    ASSERT_NE(local_kv, nullptr);
-    EXPECT_EQ(local_kv->Pages().size(), 2u);
-    EXPECT_EQ(local_kv->TailPageAvailableTokens(), 1);
+    ASSERT_NE(local_cache, nullptr);
+    EXPECT_EQ(local_cache->LocalKVPages().size(), 2u);
+    EXPECT_EQ(local_cache->TailPageAvailableTokens(), 1);
     EXPECT_EQ(device_alloc.AvailablePages(), 2);
     ASSERT_NE(local_mamba, nullptr);
     EXPECT_TRUE(local_mamba->HasWorking());
@@ -318,21 +319,17 @@ TEST(HybridPrefixCacheKVAllocationTest, PrefillCreatesAndRefreshesRequestLocalSt
     EXPECT_EQ(local_mamba->CheckpointPosition(), kInitialCheckpointPosition);
     EXPECT_EQ(mamba_alloc.AvailableSlots(), 2);
 
-    const std::vector<std::int32_t> first_chunk_pages = local_kv->Pages();
+    const std::vector<std::int32_t> first_chunk_pages = local_cache->LocalKVPages();
 
-    (void)hybrid_prefix_cache.StepCommit(
-        cache::state::AcquireRequestLocalKV{
-            .allocator = *local_kv,
-            .tokens = 2,
-        },
-        cache::state::RefreshMambaCheckpoint{
-            .allocator = local_mamba.get(),
-            .checkpoint_raw_position = kRefreshedCheckpointPosition,
-        });
+    (void)hybrid_prefix_cache.StepCommit(cache::state::AcquireRequestLocalCache{
+        .local_cache = *local_cache,
+        .tokens = 2,
+        .checkpoint_raw_position = kRefreshedCheckpointPosition,
+    });
 
-    ASSERT_EQ(local_kv->Pages().size(), first_chunk_pages.size() + 1);
-    EXPECT_EQ(local_kv->Pages().front(), first_chunk_pages.front());
-    EXPECT_EQ(local_kv->TailPageAvailableTokens(), 1);
+    ASSERT_EQ(local_cache->LocalKVPages().size(), first_chunk_pages.size() + 1);
+    EXPECT_EQ(local_cache->LocalKVPages().front(), first_chunk_pages.front());
+    EXPECT_EQ(local_cache->TailPageAvailableTokens(), 1);
     EXPECT_EQ(device_alloc.AvailablePages(), 1);
     EXPECT_TRUE(local_mamba->HasWorking());
     EXPECT_TRUE(local_mamba->HasCheckpoint());
@@ -340,8 +337,7 @@ TEST(HybridPrefixCacheKVAllocationTest, PrefillCreatesAndRefreshesRequestLocalSt
     EXPECT_NE(local_mamba->CheckpointIndex(), local_mamba->WorkingIndex());
     EXPECT_EQ(mamba_alloc.AvailableSlots(), 2);
 
-    local_kv.reset();
-    local_mamba.reset();
+    local_cache.reset();
     EXPECT_EQ(device_alloc.AvailablePages(), 4);
     EXPECT_EQ(mamba_alloc.AvailableSlots(), 4);
 }
@@ -353,10 +349,11 @@ TEST(HybridPrefixCacheMambaCheckpointTest, RefreshReusesOldCheckpointWhenNoExtra
     KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
     HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, &mamba_alloc, /*mamba_cache_chunk_size=*/4);
 
-    auto result = hybrid_prefix_cache.StepCommit(cache::state::CreateRequestLocalMamba{
+    auto result = hybrid_prefix_cache.StepCommit(cache::state::CreateRequestLocalCache{
         .checkpoint_raw_position = 4,
     });
-    auto local_mamba = std::move(result.local_mamba_allocator);
+    auto local_cache = std::move(result.local_cache);
+    auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(*local_cache);
 
     ASSERT_NE(local_mamba, nullptr);
     ASSERT_TRUE(local_mamba->HasWorking());
@@ -365,8 +362,8 @@ TEST(HybridPrefixCacheMambaCheckpointTest, RefreshReusesOldCheckpointWhenNoExtra
     const std::int32_t checkpoint_index = local_mamba->CheckpointIndex();
     EXPECT_EQ(mamba_alloc.AvailableSlots(), 0);
 
-    (void)hybrid_prefix_cache.StepCommit(cache::state::RefreshMambaCheckpoint{
-        .allocator = local_mamba.get(),
+    (void)hybrid_prefix_cache.StepCommit(cache::state::AcquireRequestLocalCache{
+        .local_cache = *local_cache,
         .checkpoint_raw_position = 8,
     });
 
@@ -384,18 +381,21 @@ TEST(HybridPrefixCacheMambaCheckpointTest, RefreshFailureIsExplicitWhenNoCheckpo
     MambaChunkAllocator mamba_alloc(/*num_slots=*/1);
     KVPrefixCache prefix_cache(&device_alloc, &host_alloc);
     HybridPrefixCache hybrid_prefix_cache(prefix_cache, device_alloc, &mamba_alloc, /*mamba_cache_chunk_size=*/4);
-    LocalMambaAllocator local_mamba(&mamba_alloc);
-    ASSERT_TRUE(local_mamba.AllocateWorking());
+    RequestLocalCacheState local_cache(std::make_unique<LocalKVAllocator>(&device_alloc, 0),
+                                       std::make_unique<LocalMambaAllocator>(&mamba_alloc));
+    auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(local_cache);
+    ASSERT_NE(local_mamba, nullptr);
+    ASSERT_TRUE(local_mamba->AllocateWorking());
 
-    EXPECT_THROW((void)hybrid_prefix_cache.StepCommit(cache::state::RefreshMambaCheckpoint{
-                     .allocator = &local_mamba,
+    EXPECT_THROW((void)hybrid_prefix_cache.StepCommit(cache::state::AcquireRequestLocalCache{
+                     .local_cache = local_cache,
                      .checkpoint_raw_position = 4,
                  }),
                  std::logic_error);
 
-    EXPECT_TRUE(local_mamba.HasWorking());
-    EXPECT_FALSE(local_mamba.HasCheckpoint());
-    EXPECT_EQ(local_mamba.CheckpointPosition(), -1);
+    EXPECT_TRUE(local_mamba->HasWorking());
+    EXPECT_FALSE(local_mamba->HasCheckpoint());
+    EXPECT_EQ(local_mamba->CheckpointPosition(), -1);
     EXPECT_EQ(mamba_alloc.AvailableSlots(), 0);
 }
 
@@ -438,17 +438,18 @@ TEST(HybridPrefixCacheMambaCheckpointTest, ForwardPublishHandlesPartialPageCheck
         const auto tokens = MakeTokens(kPageSize);
         const auto full_pages = MakePagedTokenSpans(tokens, kPageSize);
         auto device_node_ref = std::make_unique<DeviceNodeRef>(prefix_cache.Match(token_vec_t{}).device.last_node);
-        LocalKVAllocator local_kv(&device_alloc, kPageSize);
-        LocalMambaAllocator local_mamba(&mamba_alloc);
-        ASSERT_TRUE(local_mamba.AllocateWorking());
-        ASSERT_TRUE(local_mamba.AllocateCheckpoint(/*raw_position=*/12));
-        const std::int32_t checkpoint_index = local_mamba.CheckpointIndex();
+        RequestLocalCacheState local_cache(std::make_unique<LocalKVAllocator>(&device_alloc, kPageSize),
+                                           std::make_unique<LocalMambaAllocator>(&mamba_alloc));
+        auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(local_cache);
+        ASSERT_NE(local_mamba, nullptr);
+        ASSERT_TRUE(local_mamba->AllocateWorking());
+        ASSERT_TRUE(local_mamba->AllocateCheckpoint(/*raw_position=*/12));
+        const std::int32_t checkpoint_index = local_mamba->CheckpointIndex();
 
         (void)hybrid_prefix_cache.StepCommit(cache::publish::DevicePrefix{
             .full_paged_tokens = full_pages,
             .device_node_ref = device_node_ref,
-            .local_kv_allocator = local_kv,
-            .local_mamba_allocator = &local_mamba,
+            .local_cache = local_cache,
             .chunk_begin = test_case.chunk_begin,
         });
 
@@ -460,9 +461,9 @@ TEST(HybridPrefixCacheMambaCheckpointTest, ForwardPublishHandlesPartialPageCheck
         if (test_case.expect_tree_owned_mamba) {
             EXPECT_EQ(terminal->MambaSlotIndex(), checkpoint_index);
         } else {
-            EXPECT_EQ(local_mamba.CheckpointPosition(), -1);
+            EXPECT_EQ(local_mamba->CheckpointPosition(), -1);
         }
-        EXPECT_FALSE(local_mamba.HasCheckpoint());
+        EXPECT_FALSE(local_mamba->HasCheckpoint());
         EXPECT_EQ(mamba_alloc.AvailableSlots(), test_case.expected_available_slots);
 
         auto match = MatchPrefix(hybrid_prefix_cache, tokens, kPageSize).compat_match;
@@ -479,20 +480,20 @@ TEST(HybridPrefixCacheKVAllocationTest, DecodeRetractFailureReleasesPartialResou
                                           /*mamba_cache_chunk_size=*/4);
 
     {
-        LocalKVAllocator local_kv(&device_alloc, /*num_tokens=*/1);
-        const std::vector<std::int32_t> original_pages = local_kv.Pages();
+        RequestLocalCacheState local_cache(std::make_unique<LocalKVAllocator>(&device_alloc, /*num_tokens=*/1));
+        const std::vector<std::int32_t> original_pages = local_cache.LocalKVPages();
         ASSERT_EQ(original_pages.size(), 1u);
-        ASSERT_EQ(local_kv.TailPageAvailableTokens(), 1);
+        ASSERT_EQ(local_cache.TailPageAvailableTokens(), 1);
         ASSERT_EQ(device_alloc.AvailablePages(), 0);
 
-        EXPECT_THROW((void)hybrid_prefix_cache.StepCommit(cache::state::AcquireRequestLocalKV{
-                         .allocator = local_kv,
+        EXPECT_THROW((void)hybrid_prefix_cache.StepCommit(cache::state::AcquireRequestLocalCache{
+                         .local_cache = local_cache,
                          .tokens = 3,
                      }),
                      std::runtime_error);
 
-        EXPECT_EQ(local_kv.Pages(), original_pages);
-        EXPECT_EQ(local_kv.TailPageAvailableTokens(), 1);
+        EXPECT_EQ(local_cache.LocalKVPages(), original_pages);
+        EXPECT_EQ(local_cache.TailPageAvailableTokens(), 1);
         EXPECT_EQ(device_alloc.AvailablePages(), 0);
     }
 
@@ -504,8 +505,8 @@ TEST(HybridPrefixCacheKVAllocationTest, DecodeRetractFailureReleasesPartialResou
     MambaChunkAllocator mamba_alloc(/*num_slots=*/1);
     HybridPrefixCache mamba_hybrid(mamba_prefix_cache, mamba_device_alloc, &mamba_alloc,
                                    /*mamba_cache_chunk_size=*/4);
-    EXPECT_THROW((void)mamba_hybrid.StepCommit(cache::state::CreateRequestLocalMamba{
-                     .require_allocator = true,
+    EXPECT_THROW((void)mamba_hybrid.StepCommit(cache::state::CreateRequestLocalCache{
+                     .require_adjunct_state = true,
                  }),
                  std::logic_error);
     EXPECT_EQ(mamba_alloc.AvailableSlots(), 1);
@@ -747,21 +748,23 @@ TEST_F(MambaCacheTest, StepCommitFinishStateInsertsKvPagesHashesAndMamba) {
     auto page_hashes = MakePageHashes(/*num_pages=*/3);
     TreeNode* root = prefix_cache_->Match(token_vec_t{}).device.last_node;
 
-    LocalKVAllocator local_kv(device_alloc_.get(), static_cast<std::int32_t>(tokens.size()));
-    LocalMambaAllocator local_mamba(mamba_alloc_.get());
-    ASSERT_TRUE(local_mamba.AllocateWorking());
-    const std::int32_t working_index = local_mamba.WorkingIndex();
-    ASSERT_TRUE(local_mamba.AllocateCheckpoint());
-    const std::int32_t checkpoint_index = local_mamba.CheckpointIndex();
+    RequestLocalCacheState local_cache(
+        std::make_unique<LocalKVAllocator>(device_alloc_.get(), static_cast<std::int32_t>(tokens.size())),
+        std::make_unique<LocalMambaAllocator>(mamba_alloc_.get()));
+    auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(local_cache);
+    ASSERT_NE(local_mamba, nullptr);
+    ASSERT_TRUE(local_mamba->AllocateWorking());
+    const std::int32_t working_index = local_mamba->WorkingIndex();
+    ASSERT_TRUE(local_mamba->AllocateCheckpoint());
+    const std::int32_t checkpoint_index = local_mamba->CheckpointIndex();
 
     const auto full_pages = PagedTokenSpans(tokens);
     MatchResult match = hybrid_prefix_cache_
                             ->StepCommit(cache::publish::FinishedRequest{
                                 .full_paged_tokens = full_pages,
                                 .current_device_node = *root,
-                                .local_kv_allocator = local_kv,
+                                .local_cache = local_cache,
                                 .page_hashes = page_hashes,
-                                .local_mamba_allocator = &local_mamba,
                             })
                             .match_result;
 
@@ -771,10 +774,10 @@ TEST_F(MambaCacheTest, StepCommitFinishStateInsertsKvPagesHashesAndMamba) {
     ASSERT_TRUE(terminal->HasMamba());
     EXPECT_EQ(terminal->MambaSlotIndex(), checkpoint_index);
     EXPECT_EQ(terminal->PageHashes(), page_hashes);
-    EXPECT_TRUE(local_kv.Pages().empty());
-    EXPECT_FALSE(local_mamba.HasCheckpoint());
-    EXPECT_TRUE(local_mamba.HasWorking());
-    EXPECT_EQ(local_mamba.WorkingIndex(), working_index);
+    EXPECT_TRUE(local_cache.LocalKVPages().empty());
+    EXPECT_FALSE(local_mamba->HasCheckpoint());
+    EXPECT_TRUE(local_mamba->HasWorking());
+    EXPECT_EQ(local_mamba->WorkingIndex(), working_index);
 }
 
 TEST_F(MambaCacheTest, StepCommitFinishStatePublishesWorkingWhenCheckpointWasDropped) {
@@ -782,31 +785,31 @@ TEST_F(MambaCacheTest, StepCommitFinishStatePublishesWorkingWhenCheckpointWasDro
     auto page_hashes = MakePageHashes(/*num_pages=*/3);
     TreeNode* root = prefix_cache_->Match(token_vec_t{}).device.last_node;
 
-    auto result = hybrid_prefix_cache_->StepCommit(cache::state::CreateRequestLocalMamba{
+    auto result = hybrid_prefix_cache_->StepCommit(cache::state::CreateRequestLocalCache{
+        .initial_tokens = static_cast<std::int32_t>(tokens.size()),
         .checkpoint_raw_position = 4,
     });
-    auto local_mamba = std::move(result.local_mamba_allocator);
+    auto local_cache = std::move(result.local_cache);
+    auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(*local_cache);
     ASSERT_NE(local_mamba, nullptr);
     ASSERT_TRUE(local_mamba->HasWorking());
     ASSERT_TRUE(local_mamba->HasCheckpoint());
     const std::int32_t working_index = local_mamba->WorkingIndex();
 
-    (void)hybrid_prefix_cache_->StepCommit(cache::state::RefreshMambaCheckpoint{
-        .allocator = local_mamba.get(),
+    (void)hybrid_prefix_cache_->StepCommit(cache::state::AcquireRequestLocalCache{
+        .local_cache = *local_cache,
         .checkpoint_raw_position = 6,
     });
     ASSERT_TRUE(local_mamba->HasWorking());
     ASSERT_FALSE(local_mamba->HasCheckpoint());
 
-    LocalKVAllocator local_kv(device_alloc_.get(), static_cast<std::int32_t>(tokens.size()));
     const auto full_pages = PagedTokenSpans(tokens);
     MatchResult match = hybrid_prefix_cache_
                             ->StepCommit(cache::publish::FinishedRequest{
                                 .full_paged_tokens = full_pages,
                                 .current_device_node = *root,
-                                .local_kv_allocator = local_kv,
+                                .local_cache = *local_cache,
                                 .page_hashes = page_hashes,
-                                .local_mamba_allocator = local_mamba.get(),
                             })
                             .match_result;
 
@@ -864,17 +867,21 @@ TEST_F(MambaCacheTest, StepCommitRetractPublicationInsertsKvAndReturnsRawStateRe
     ASSERT_NE(terminal, nullptr);
     ASSERT_FALSE(terminal->HasMamba());
 
-    auto local_mamba = std::make_unique<LocalMambaAllocator>(mamba_alloc_.get());
+    auto local_cache =
+        std::make_unique<RequestLocalCacheState>(std::make_unique<LocalKVAllocator>(device_alloc_.get(), 0),
+                                                 std::make_unique<LocalMambaAllocator>(mamba_alloc_.get()));
+    auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(*local_cache);
+    ASSERT_NE(local_mamba, nullptr);
     ASSERT_TRUE(local_mamba->AllocateWorking());
     ASSERT_TRUE(local_mamba->AllocateCheckpoint());
     const std::int32_t checkpoint_index = local_mamba->CheckpointIndex();
 
     hybrid_prefix_cache_->StepCommit(cache::state::PublishTreeOwnedRequestState{
         .terminal = *terminal,
-        .local_mamba_allocator_owner = local_mamba,
+        .local_cache = *local_cache,
     });
 
-    EXPECT_EQ(local_mamba, nullptr);
+    EXPECT_EQ(HybridPrefixCacheTestPeer::AdjunctState(*local_cache), nullptr);
     ASSERT_TRUE(terminal->HasMamba());
     EXPECT_EQ(terminal->MambaSlotIndex(), checkpoint_index);
     EXPECT_EQ(mamba_alloc_->AvailableSlots(), kMambaSlots - 1);

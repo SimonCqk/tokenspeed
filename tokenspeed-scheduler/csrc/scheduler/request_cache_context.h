@@ -28,7 +28,7 @@
 
 namespace tokenspeed {
 
-class LocalMambaAllocator;
+class RequestLocalCacheState;
 class TreeNode;
 
 // Non-owning read view over request-local cache state used for worker-facing
@@ -52,7 +52,7 @@ public:
 
     std::int32_t RequestPoolIndex() const { return request_.GetReqPoolIndex(); }
 
-    const LocalMambaAllocator* LocalMambaAllocatorView() const { return request_.GetLocalMambaAllocator(); }
+    const RequestLocalCacheState& LocalCache() const { return *request_.GetLocalCache(); }
 
 private:
     Request& request_;

@@ -75,10 +75,9 @@ public:
     [[nodiscard]] cache::materialize::PrefixOnDevice::Result Apply(const cache::materialize::PrefixOnDevice& op);
     [[nodiscard]] cache::materialize::HostWritebackPages::Result Apply(
         const cache::materialize::HostWritebackPages& op);
-    [[nodiscard]] cache::state::CreateRequestLocalKV::Result Apply(const cache::state::CreateRequestLocalKV& op);
-    [[nodiscard]] cache::state::AcquireRequestLocalKV::Result Apply(const cache::state::AcquireRequestLocalKV& op);
-    [[nodiscard]] cache::state::CreateRequestLocalMamba::Result Apply(const cache::state::CreateRequestLocalMamba& op);
-    [[nodiscard]] cache::state::RefreshMambaCheckpoint::Result Apply(const cache::state::RefreshMambaCheckpoint& op);
+    [[nodiscard]] cache::state::CreateRequestLocalCache::Result Apply(const cache::state::CreateRequestLocalCache& op);
+    [[nodiscard]] cache::state::AcquireRequestLocalCache::Result Apply(
+        const cache::state::AcquireRequestLocalCache& op);
     [[nodiscard]] cache::state::PublishTreeOwnedRequestState::Result Apply(
         const cache::state::PublishTreeOwnedRequestState& op);
     [[nodiscard]] cache::worker::CommitPrefillFirstChunkMetadata::Result Apply(
@@ -135,6 +134,7 @@ public:
     void FinishRequest(const std::string& request_id);
 
     void OnKVDeviceDemote(TreeNode* node);
+    void CompleteHostWriteBack(const PendingHostWritebackState& pending_state, TreeNode* device_node);
     void OnMambaHostWriteBackDone(TreeNode* last_node);
     void OnMambaHostWriteBackDone(const std::vector<TreeNode*>& nodes);
     void DemoteIdleMambaDeviceCopiesPresentOnHost();
@@ -148,7 +148,7 @@ private:
     };
 
     DecodeFromRetractedRecovery PrepareDecodeFromRetractedRecovery(MatchResult& match_result) const;
-    void PublishRetractMambaState(TreeNode* terminal, std::unique_ptr<LocalMambaAllocator>& local_mamba_allocator);
+    void PublishRetractMambaState(TreeNode* terminal, RequestLocalCacheState& local_cache);
     [[nodiscard]] std::vector<TreeNode*> MambaDeviceLoadbackNodes(const MatchResult& match_result,
                                                                   TreeNode* preferred_source = nullptr) const;
     static void AccumulateStepResult(StepCommitResult& result, cache::EmptyResult);
@@ -159,9 +159,8 @@ private:
     static void AccumulateStepResult(StepCommitResult& result, cache::materialize::PrefixOnDevice::Result op_result);
     static void AccumulateStepResult(StepCommitResult& result,
                                      cache::materialize::HostWritebackPages::Result&& op_result);
-    static void AccumulateStepResult(StepCommitResult& result, cache::state::CreateRequestLocalKV::Result&& op_result);
     static void AccumulateStepResult(StepCommitResult& result,
-                                     cache::state::CreateRequestLocalMamba::Result&& op_result);
+                                     cache::state::CreateRequestLocalCache::Result&& op_result);
 
     bool HasMambaAdjunct() const { return mamba_allocator_ != nullptr; }
     bool HasPagedCacheAdjunct() const { return paged_cache_history_alignment_tokens_ > 0; }
@@ -180,7 +179,7 @@ private:
     void PopulateMambaMatchCompatibilityFields(ForwardOperationBase& op_base, const MatchResult& match_result) const;
     void PopulateMambaRecoveryCompatibilityFields(ForwardOperationBase& op_base, const MatchResult& match_result) const;
     void PopulateMambaRequestLocalCompatibilityFields(ForwardOperationBase& op_base,
-                                                      const LocalMambaAllocator* local_mamba_allocator) const;
+                                                      const RequestLocalCacheState& local_cache) const;
     bool EnsureMambaCapacityByEvict(std::int32_t num_slots, TreeNode* protected_node = nullptr);
     bool EnsureMambaHostCapacityByEvict(std::int32_t num_slots, TreeNode* protected_node = nullptr);
     std::int32_t AlignMambaCacheSeqlen(std::int32_t seqlen) const;
@@ -196,12 +195,14 @@ private:
     // new terminal KV pages. The caller owns the "new KV pages were inserted"
     // gate so finish publication remains coupled to successful KV insertion.
     void PublishFinishMambaState(const std::vector<std::span<const std::int32_t>>& full_paged_tokens,
-                                 LocalMambaAllocator* local_mamba_allocator);
+                                 RequestLocalCacheState& local_cache);
 
     // Fill op.paged_cache_pages / op.paged_cache_page_base_offsets from the tables.
     void PopulateOp(ForwardOperationBase& op_base) const;
     std::unique_ptr<LocalMambaAllocator> allocateRequestLocalMambaState(
         std::optional<std::int32_t> checkpoint_raw_position = {}) const;
+    void RefreshRequestLocalStateCheckpoint(RequestLocalCacheState& local_cache,
+                                            std::optional<std::int32_t> checkpoint_raw_position) const;
 
     // Per-family classification of admission failure; drives state-only vs
     // full prune strategy.

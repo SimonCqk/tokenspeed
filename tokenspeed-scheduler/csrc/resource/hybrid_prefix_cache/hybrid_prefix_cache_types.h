@@ -39,9 +39,46 @@
 namespace tokenspeed {
 
 class ForwardOperationBase;
+class HybridPrefixCache;
+class HybridPrefixCacheTestPeer;
 class LocalKVAllocator;
 class LocalMambaAllocator;
 class TreeNode;
+
+class RequestLocalCacheState {
+public:
+    RequestLocalCacheState(std::unique_ptr<LocalKVAllocator> local_kv_allocator,
+                           std::unique_ptr<LocalMambaAllocator> adjunct_state = nullptr);
+    ~RequestLocalCacheState();
+
+    RequestLocalCacheState(RequestLocalCacheState&&) noexcept;
+    RequestLocalCacheState& operator=(RequestLocalCacheState&&) noexcept;
+    RequestLocalCacheState(const RequestLocalCacheState&) = delete;
+    RequestLocalCacheState& operator=(const RequestLocalCacheState&) = delete;
+
+    std::vector<std::int32_t> OccupiedPages(const TreeNode* device_node) const;
+    void AcquireKV(std::int32_t tokens);
+    OwnedPages TakeFullKVPages();
+    OwnedPages TakeFirstKVPages(std::int32_t n);
+    std::vector<std::int32_t> LocalKVPages() const;
+    std::int32_t TailPageAvailableTokens() const;
+
+private:
+    friend class HybridPrefixCache;
+    friend class HybridPrefixCacheTestPeer;
+
+    LocalMambaAllocator* AdjunctState();
+    const LocalMambaAllocator* AdjunctState() const;
+    void SetAdjunctState(std::unique_ptr<LocalMambaAllocator> adjunct_state);
+    void ResetAdjunctState();
+
+    std::unique_ptr<LocalKVAllocator> local_kv_allocator_;
+    std::unique_ptr<LocalMambaAllocator> adjunct_state_;
+};
+
+struct PendingHostWritebackState {
+    std::vector<TreeNode*> adjunct_nodes{};
+};
 
 struct RecoveryPlan {
     bool recovery_state_available{true};
@@ -85,7 +122,7 @@ struct Decode {
     std::int32_t device_pages_needed{0};
     std::int32_t first_raw_position_of_op{0};
     std::int32_t target_raw_tokens_exclusive{0};
-    bool refresh_mamba_checkpoint{false};
+    bool refresh_local_cache_state{false};
 
     using Result = AdmissionVerdict;
 };
@@ -116,8 +153,7 @@ namespace publish {
 struct DevicePrefix {
     const std::vector<std::span<const std::int32_t>>& full_paged_tokens;
     std::unique_ptr<DeviceNodeRef>& device_node_ref;
-    LocalKVAllocator& local_kv_allocator;
-    LocalMambaAllocator* local_mamba_allocator{nullptr};
+    RequestLocalCacheState& local_cache;
     std::optional<std::int32_t> chunk_begin{};
 
     struct Result {
@@ -128,9 +164,8 @@ struct DevicePrefix {
 struct FinishedRequest {
     const std::vector<std::span<const std::int32_t>>& full_paged_tokens;
     const TreeNode& current_device_node;
-    LocalKVAllocator& local_kv_allocator;
+    RequestLocalCacheState& local_cache;
     const std::vector<std::string>& page_hashes;
-    LocalMambaAllocator* local_mamba_allocator{nullptr};
 
     struct Result {
         MatchResult match_result{};
@@ -178,7 +213,7 @@ struct HostWritebackPages {
     struct Result {
         bool ok{true};
         std::vector<TransferPair> cache_transfer_pairs{};
-        std::vector<TreeNode*> mamba_writeback_nodes{};
+        PendingHostWritebackState pending_state{};
     };
 };
 
@@ -186,41 +221,30 @@ struct HostWritebackPages {
 
 namespace state {
 
-struct CreateRequestLocalKV {
+struct CreateRequestLocalCache {
     std::int32_t initial_tokens{0};
     std::int32_t acquire_tokens{0};
+    std::optional<std::int32_t> checkpoint_raw_position{};
+    bool require_adjunct_state{false};
 
     struct Result {
-        std::unique_ptr<LocalKVAllocator> local_kv_allocator{};
+        std::unique_ptr<RequestLocalCacheState> local_cache{};
     };
 };
 
-struct AcquireRequestLocalKV {
-    LocalKVAllocator& allocator;
+struct AcquireRequestLocalCache {
+    RequestLocalCacheState& local_cache;
     std::int32_t tokens{0};
-
-    using Result = EmptyResult;
-};
-
-struct CreateRequestLocalMamba {
     std::optional<std::int32_t> checkpoint_raw_position{};
-    bool require_allocator{false};
-
-    struct Result {
-        std::unique_ptr<LocalMambaAllocator> local_mamba_allocator{};
-    };
-};
-
-struct RefreshMambaCheckpoint {
-    LocalMambaAllocator* allocator{nullptr};
-    std::optional<std::int32_t> checkpoint_raw_position{};
+    bool replace_adjunct_state{false};
+    bool require_adjunct_state{false};
 
     using Result = EmptyResult;
 };
 
 struct PublishTreeOwnedRequestState {
     TreeNode& terminal;
-    std::unique_ptr<LocalMambaAllocator>& local_mamba_allocator_owner;
+    RequestLocalCacheState& local_cache;
 
     using Result = EmptyResult;
 };
@@ -235,7 +259,7 @@ struct CommitPrefillFirstChunkMetadata {
     std::int32_t target_raw_tokens_exclusive{0};
     TreeNode& tree_prefix_to_commit;
     const MatchResult& match_result;
-    const LocalMambaAllocator* local_mamba_allocator{nullptr};
+    const RequestLocalCacheState& local_cache;
 
     using Result = EmptyResult;
 };
@@ -245,7 +269,7 @@ struct CommitPrefillMetadata {
     std::int32_t first_raw_position_of_op{0};
     std::int32_t target_raw_tokens_exclusive{0};
     TreeNode& tree_prefix_to_commit;
-    const LocalMambaAllocator* local_mamba_allocator{nullptr};
+    const RequestLocalCacheState& local_cache;
 
     using Result = EmptyResult;
 };
@@ -255,7 +279,7 @@ struct CommitDecodeAfterPrefillMetadata {
     std::int32_t first_raw_position_of_op{0};
     std::int32_t target_raw_tokens_exclusive{0};
     TreeNode& tree_prefix_to_commit;
-    const LocalMambaAllocator* local_mamba_allocator{nullptr};
+    const RequestLocalCacheState& local_cache;
 
     using Result = EmptyResult;
 };
@@ -264,7 +288,7 @@ struct CommitDecodeMetadata {
     ForwardOperationBase& op_base;
     std::int32_t first_raw_position_of_op{0};
     std::int32_t target_raw_tokens_exclusive{0};
-    const LocalMambaAllocator* local_mamba_allocator{nullptr};
+    const RequestLocalCacheState& local_cache;
 
     using Result = EmptyResult;
 };
@@ -273,7 +297,7 @@ struct CommitDecodeRecoveryMetadata {
     ForwardOperationBase& op_base;
     std::int32_t target_raw_tokens_exclusive{0};
     const MatchResult& match_result;
-    const LocalMambaAllocator* local_mamba_allocator{nullptr};
+    const RequestLocalCacheState& local_cache;
 
     using Result = EmptyResult;
 };
@@ -296,13 +320,9 @@ struct IsStepOp<materialize::PrefixOnDevice> : std::true_type {};
 template <>
 struct IsStepOp<materialize::HostWritebackPages> : std::true_type {};
 template <>
-struct IsStepOp<state::CreateRequestLocalKV> : std::true_type {};
+struct IsStepOp<state::CreateRequestLocalCache> : std::true_type {};
 template <>
-struct IsStepOp<state::AcquireRequestLocalKV> : std::true_type {};
-template <>
-struct IsStepOp<state::CreateRequestLocalMamba> : std::true_type {};
-template <>
-struct IsStepOp<state::RefreshMambaCheckpoint> : std::true_type {};
+struct IsStepOp<state::AcquireRequestLocalCache> : std::true_type {};
 template <>
 struct IsStepOp<state::PublishTreeOwnedRequestState> : std::true_type {};
 template <>
@@ -325,10 +345,9 @@ struct StepCommitResult {
     bool ok{true};
     MatchResult match_result{};
     std::int32_t device_insert_page_count{0};
-    std::unique_ptr<LocalKVAllocator> local_kv_allocator{};
-    std::unique_ptr<LocalMambaAllocator> local_mamba_allocator{};
+    std::unique_ptr<RequestLocalCacheState> local_cache{};
     std::vector<TransferPair> cache_transfer_pairs{};
-    std::vector<TreeNode*> mamba_writeback_nodes{};
+    PendingHostWritebackState pending_host_writeback{};
 };
 
 struct CacheDeviceMemoryDiagnosticsSnapshot {

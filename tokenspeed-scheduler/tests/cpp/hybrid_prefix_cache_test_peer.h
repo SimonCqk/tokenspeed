@@ -81,6 +81,10 @@ public:
                                                                                 TreeNode* node) {
         return cache.DetachPagedCacheSnapshotFromNode(node);
     }
+
+    static LocalMambaAllocator* AdjunctState(RequestLocalCacheState& state) { return state.AdjunctState(); }
+
+    static const LocalMambaAllocator* AdjunctState(const RequestLocalCacheState& state) { return state.AdjunctState(); }
 };
 
 }  // namespace tokenspeed

@@ -39,7 +39,6 @@
 
 namespace tokenspeed {
 class HybridPrefixCache;
-class KVPrefixCache;
 class ReqPoolAllocator;
 class TreeNode;
 }  // namespace tokenspeed
@@ -221,16 +220,14 @@ struct CommitDrainingEvent : InvalidTransitionHandler<CommitDrainingEvent> {
 // Retracting  → Retracted: same transfer path for preempted requests;
 //                          device_node_ref drops (frees GPU pages), host_node_ref moves into Retracted.
 struct WriteBackDoneEvent : InvalidTransitionHandler<WriteBackDoneEvent> {
-    explicit WriteBackDoneEvent(KVPrefixCache* kv_prefix_cache = nullptr,
-                                HybridPrefixCache* hybrid_prefix_cache = nullptr)
-        : kv_prefix_cache_(kv_prefix_cache), hybrid_prefix_cache_(hybrid_prefix_cache) {}
+    explicit WriteBackDoneEvent(HybridPrefixCache* hybrid_prefix_cache = nullptr)
+        : hybrid_prefix_cache_(hybrid_prefix_cache) {}
 
     using InvalidTransitionHandler<WriteBackDoneEvent>::operator();
     Finished operator()(WritingBack&& state);
     Retracted operator()(Retracting&& state);
 
 private:
-    KVPrefixCache* kv_prefix_cache_{};
     HybridPrefixCache* hybrid_prefix_cache_{};
 };
 

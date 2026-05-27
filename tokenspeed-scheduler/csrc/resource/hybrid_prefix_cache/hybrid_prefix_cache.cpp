@@ -25,6 +25,7 @@
 #include "resource/allocator/mamba_host_allocator.h"
 #include "resource/allocator/owned_pages.h"
 #include "resource/allocator/page_allocator.h"
+#include "resource/page_container.h"
 #include "resource/allocator/paged_cache_group.h"
 #include "resource/radix_tree/node_range.h"
 #include "resource/radix_tree/paged_cache_snapshot.h"
@@ -42,6 +43,58 @@
 #include <utility>
 
 namespace tokenspeed {
+
+RequestLocalCacheState::RequestLocalCacheState(std::unique_ptr<LocalKVAllocator> local_kv_allocator,
+                                               std::unique_ptr<LocalMambaAllocator> adjunct_state)
+    : local_kv_allocator_{std::move(local_kv_allocator)}, adjunct_state_{std::move(adjunct_state)} {
+    if (local_kv_allocator_ == nullptr) {
+        throw std::invalid_argument("RequestLocalCacheState requires local KV state");
+    }
+}
+
+RequestLocalCacheState::~RequestLocalCacheState() = default;
+RequestLocalCacheState::RequestLocalCacheState(RequestLocalCacheState&&) noexcept = default;
+RequestLocalCacheState& RequestLocalCacheState::operator=(RequestLocalCacheState&&) noexcept = default;
+
+std::vector<std::int32_t> RequestLocalCacheState::OccupiedPages(const TreeNode* device_node) const {
+    return PageContainer{device_node, local_kv_allocator_.get()}.Pages();
+}
+
+void RequestLocalCacheState::AcquireKV(std::int32_t tokens) {
+    local_kv_allocator_->Acquire(tokens);
+}
+
+OwnedPages RequestLocalCacheState::TakeFullKVPages() {
+    return local_kv_allocator_->TakeFullPages();
+}
+
+OwnedPages RequestLocalCacheState::TakeFirstKVPages(std::int32_t n) {
+    return local_kv_allocator_->TakeFirst(n);
+}
+
+std::vector<std::int32_t> RequestLocalCacheState::LocalKVPages() const {
+    return local_kv_allocator_->Pages();
+}
+
+std::int32_t RequestLocalCacheState::TailPageAvailableTokens() const {
+    return local_kv_allocator_->TailPageAvailableTokens();
+}
+
+LocalMambaAllocator* RequestLocalCacheState::AdjunctState() {
+    return adjunct_state_.get();
+}
+
+const LocalMambaAllocator* RequestLocalCacheState::AdjunctState() const {
+    return adjunct_state_.get();
+}
+
+void RequestLocalCacheState::SetAdjunctState(std::unique_ptr<LocalMambaAllocator> adjunct_state) {
+    adjunct_state_ = std::move(adjunct_state);
+}
+
+void RequestLocalCacheState::ResetAdjunctState() {
+    adjunct_state_.reset();
+}
 
 HybridPrefixCache::HybridPrefixCache(KVPrefixCache& kv_prefix_cache, PageAllocator& device_allocator,
                                      MambaChunkAllocator* mamba_allocator, std::int32_t mamba_cache_chunk_size,
@@ -109,18 +162,6 @@ void HybridPrefixCache::SetKvEventSink(KvEventSink sink) {
     has_facade_kv_event_sink_ = true;
 }
 
-cache::state::CreateRequestLocalKV::Result HybridPrefixCache::Apply(const cache::state::CreateRequestLocalKV& op) {
-    cache::state::CreateRequestLocalKV::Result result{};
-    result.local_kv_allocator = std::make_unique<LocalKVAllocator>(&device_allocator_, op.initial_tokens);
-    result.local_kv_allocator->Acquire(op.acquire_tokens);
-    return result;
-}
-
-cache::state::AcquireRequestLocalKV::Result HybridPrefixCache::Apply(const cache::state::AcquireRequestLocalKV& op) {
-    op.allocator.Acquire(op.tokens);
-    return {};
-}
-
 cache::publish::DevicePrefix::Result HybridPrefixCache::Apply(const cache::publish::DevicePrefix& op) {
     cache::publish::DevicePrefix::Result result{};
     if (op.device_node_ref == nullptr) {
@@ -131,11 +172,12 @@ cache::publish::DevicePrefix::Result HybridPrefixCache::Apply(const cache::publi
         static_cast<std::int32_t>(op.full_paged_tokens.size()) - static_cast<std::int32_t>(prefix_pages.size());
     const std::int32_t page_size = kv_prefix_cache_.PageSize();
     const std::int32_t last_inserted_len = static_cast<std::int32_t>(op.full_paged_tokens.size()) * page_size;
+    LocalMambaAllocator* adjunct_state = op.local_cache.AdjunctState();
     auto should_publish_mamba_checkpoint = [&]() {
-        if (op.local_mamba_allocator == nullptr || !op.local_mamba_allocator->HasCheckpoint()) {
+        if (adjunct_state == nullptr || !adjunct_state->HasCheckpoint()) {
             return false;
         }
-        const std::int32_t checkpoint_position = op.local_mamba_allocator->CheckpointPosition();
+        const std::int32_t checkpoint_position = adjunct_state->CheckpointPosition();
         if (checkpoint_position < 0 || checkpoint_position == last_inserted_len) {
             return true;
         }
@@ -151,18 +193,18 @@ cache::publish::DevicePrefix::Result HybridPrefixCache::Apply(const cache::publi
     };
     const bool publish_mamba_checkpoint = should_publish_mamba_checkpoint();
     if (new_page_count <= 0) {
-        if (op.local_mamba_allocator != nullptr && op.local_mamba_allocator->HasCheckpoint()) {
-            (void)op.local_mamba_allocator->DetachCheckpoint();
+        if (adjunct_state != nullptr && adjunct_state->HasCheckpoint()) {
+            (void)adjunct_state->DetachCheckpoint();
         }
         return result;
     }
 
-    OwnedPages pages_to_insert = op.local_kv_allocator.TakeFirst(new_page_count);
+    OwnedPages pages_to_insert = op.local_cache.TakeFirstKVPages(new_page_count);
     auto insert_result =
         kv_prefix_cache_.Insert<ResourceType::Device>(op.full_paged_tokens, prefix_pages, std::move(pages_to_insert));
 
-    if (op.local_mamba_allocator != nullptr && op.local_mamba_allocator->HasCheckpoint()) {
-        std::unique_ptr<MambaSlot> checkpoint = op.local_mamba_allocator->DetachCheckpoint();
+    if (adjunct_state != nullptr && adjunct_state->HasCheckpoint()) {
+        std::unique_ptr<MambaSlot> checkpoint = adjunct_state->DetachCheckpoint();
         if (publish_mamba_checkpoint) {
             InsertMamba(insert_result.last_node, std::move(checkpoint));
         }
@@ -179,10 +221,10 @@ cache::publish::FinishedRequest::Result HybridPrefixCache::Apply(const cache::pu
         static_cast<std::int32_t>(op.full_paged_tokens.size()) - static_cast<std::int32_t>(prefix_pages.size());
 
     if (alloc_count > 0) {
-        OwnedPages alloc_pages = op.local_kv_allocator.TakeFirst(alloc_count);
+        OwnedPages alloc_pages = op.local_cache.TakeFirstKVPages(alloc_count);
         kv_prefix_cache_.Insert<ResourceType::Device>(op.full_paged_tokens, prefix_pages, std::move(alloc_pages),
                                                       op.page_hashes);
-        PublishFinishMambaState(op.full_paged_tokens, op.local_mamba_allocator);
+        PublishFinishMambaState(op.full_paged_tokens, op.local_cache);
     }
 
     result.device_insert_page_count = std::max(0, alloc_count);
@@ -253,7 +295,7 @@ cache::materialize::HostWritebackPages::Result HybridPrefixCache::Apply(
         if (transfer.kind != CacheKind::kMamba) continue;
         for (TreeNode* node : op.write_diff) {
             if (node != nullptr && node->HasMamba() && node->MambaSlotIndex() == transfer.src) {
-                result.mamba_writeback_nodes.push_back(node);
+                result.pending_state.adjunct_nodes.push_back(node);
                 break;
             }
         }
@@ -361,6 +403,15 @@ void HybridPrefixCache::OnKVDeviceDemote(TreeNode* node) {
     }
 }
 
+void HybridPrefixCache::CompleteHostWriteBack(const PendingHostWritebackState& pending_state, TreeNode* device_node) {
+    OnMambaHostWriteBackDone(pending_state.adjunct_nodes);
+    if (device_node != nullptr) {
+        kv_prefix_cache_.ReleaseDeviceResourcesPresentOnHost(device_node,
+                                                             [this](TreeNode* node) { OnKVDeviceDemote(node); });
+    }
+    DemoteIdleMambaDeviceCopiesPresentOnHost();
+}
+
 CacheStatsSnapshot HybridPrefixCache::Stats(const StatsRequest& request) const {
     CacheStatsSnapshot snapshot{
         .available_device_pages = static_cast<std::size_t>(device_allocator_.AvailablePages()),
@@ -413,7 +464,7 @@ CacheStatsSnapshot HybridPrefixCache::Stats(const StatsRequest& request) const {
 
 cache::worker::CommitPrefillFirstChunkMetadata::Result HybridPrefixCache::Apply(
     const cache::worker::CommitPrefillFirstChunkMetadata& op) {
-    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_mamba_allocator);
+    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_cache);
     PopulateMambaMatchCompatibilityFields(op.op_base, op.match_result);
     CommitChunk(op.op_base.request_id, &op.tree_prefix_to_commit);
     acquireAndPopulateOp(op.op_base, op.first_raw_position_of_op, op.target_raw_tokens_exclusive,
@@ -422,7 +473,7 @@ cache::worker::CommitPrefillFirstChunkMetadata::Result HybridPrefixCache::Apply(
 }
 
 cache::worker::CommitPrefillMetadata::Result HybridPrefixCache::Apply(const cache::worker::CommitPrefillMetadata& op) {
-    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_mamba_allocator);
+    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_cache);
     CommitChunk(op.op_base.request_id, &op.tree_prefix_to_commit);
     acquireAndPopulateOp(op.op_base, op.first_raw_position_of_op, op.target_raw_tokens_exclusive,
                          MatchResult::PagedCache{});
@@ -431,7 +482,7 @@ cache::worker::CommitPrefillMetadata::Result HybridPrefixCache::Apply(const cach
 
 cache::worker::CommitDecodeAfterPrefillMetadata::Result HybridPrefixCache::Apply(
     const cache::worker::CommitDecodeAfterPrefillMetadata& op) {
-    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_mamba_allocator);
+    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_cache);
     CommitChunk(op.op_base.request_id, &op.tree_prefix_to_commit);
     acquireAndPopulateOp(op.op_base, op.first_raw_position_of_op, op.target_raw_tokens_exclusive,
                          MatchResult::PagedCache{});
@@ -439,7 +490,7 @@ cache::worker::CommitDecodeAfterPrefillMetadata::Result HybridPrefixCache::Apply
 }
 
 cache::worker::CommitDecodeMetadata::Result HybridPrefixCache::Apply(const cache::worker::CommitDecodeMetadata& op) {
-    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_mamba_allocator);
+    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_cache);
     acquireAndPopulateOp(op.op_base, op.first_raw_position_of_op, op.target_raw_tokens_exclusive,
                          MatchResult::PagedCache{});
     return {};
@@ -447,7 +498,7 @@ cache::worker::CommitDecodeMetadata::Result HybridPrefixCache::Apply(const cache
 
 cache::worker::CommitDecodeRecoveryMetadata::Result HybridPrefixCache::Apply(
     const cache::worker::CommitDecodeRecoveryMetadata& op) {
-    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_mamba_allocator);
+    PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_cache);
     PopulateMambaRecoveryCompatibilityFields(op.op_base, op.match_result);
     ReleaseRequest(op.op_base.request_id);
     acquireAndPopulateOp(op.op_base, 0, op.target_raw_tokens_exclusive, op.match_result.paged_cache);
@@ -522,7 +573,7 @@ cache::admit::Decode::Result HybridPrefixCache::Apply(const cache::admit::Decode
     if (!kv_prefix_cache_.EnsureCapacityByEvict<ResourceType::Device>(op.device_pages_needed)) {
         return result;
     }
-    if (op.refresh_mamba_checkpoint && HasMambaAdjunct() && !EnsureMambaCapacityByEvict(1)) {
+    if (op.refresh_local_cache_state && HasMambaAdjunct() && !EnsureMambaCapacityByEvict(1)) {
         return result;
     }
     result.admitted =
@@ -603,17 +654,12 @@ void HybridPrefixCache::AccumulateStepResult(StepCommitResult& result,
     result.ok = op_result.ok;
     if (!result.ok) return;
     result.cache_transfer_pairs = std::move(op_result.cache_transfer_pairs);
-    result.mamba_writeback_nodes = std::move(op_result.mamba_writeback_nodes);
+    result.pending_host_writeback = std::move(op_result.pending_state);
 }
 
 void HybridPrefixCache::AccumulateStepResult(StepCommitResult& result,
-                                             cache::state::CreateRequestLocalKV::Result&& op_result) {
-    result.local_kv_allocator = std::move(op_result.local_kv_allocator);
-}
-
-void HybridPrefixCache::AccumulateStepResult(StepCommitResult& result,
-                                             cache::state::CreateRequestLocalMamba::Result&& op_result) {
-    result.local_mamba_allocator = std::move(op_result.local_mamba_allocator);
+                                             cache::state::CreateRequestLocalCache::Result&& op_result) {
+    result.local_cache = std::move(op_result.local_cache);
 }
 
 }  // namespace tokenspeed

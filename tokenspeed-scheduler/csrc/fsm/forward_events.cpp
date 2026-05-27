@@ -56,16 +56,6 @@ std::vector<tokenspeed::TransferPair> BuildWriteBackPairs(const std::vector<toke
     return pages_to_transfer;
 }
 
-void DemoteWrittenBackDevice(tokenspeed::KVPrefixCache* kv_prefix_cache,
-                             tokenspeed::HybridPrefixCache* hybrid_prefix_cache, tokenspeed::TreeNode* device_node) {
-    if (kv_prefix_cache == nullptr || device_node == nullptr) return;
-    kv_prefix_cache->ReleaseDeviceResourcesPresentOnHost(device_node, [hybrid_prefix_cache](tokenspeed::TreeNode* n) {
-        if (hybrid_prefix_cache != nullptr) {
-            hybrid_prefix_cache->OnKVDeviceDemote(n);
-        }
-    });
-}
-
 }  // namespace
 
 namespace tokenspeed::fsm {
@@ -91,20 +81,15 @@ std::variant<PrefillDone, Prefilling> SchedulePrefillFirstChunkEvent::operator()
         device_node_ref = std::make_unique<DeviceNodeRef>(match_result_.device.last_node);
     }
 
-    auto step_result = hybrid_prefix_cache_.StepCommit(
-        cache::state::CreateRequestLocalKV{
-            .initial_tokens = tokens_this_round_,
-            .acquire_tokens = decode_input_tokens_,
-        },
-        cache::state::CreateRequestLocalMamba{
-            .checkpoint_raw_position = checkpoint_raw_position,
-        });
-    auto local_kv_allocator = std::move(step_result.local_kv_allocator);
+    auto step_result = hybrid_prefix_cache_.StepCommit(cache::state::CreateRequestLocalCache{
+        .initial_tokens = tokens_this_round_,
+        .acquire_tokens = decode_input_tokens_,
+        .checkpoint_raw_position = checkpoint_raw_position,
+    });
+    auto local_cache = std::move(step_result.local_cache);
 
     // Allocate req_pool_idx when first-time scheduled
     auto req_pool_index = std::make_unique<ReqPoolIndex>(req_pool_allocator_->Allocate());
-
-    auto local_mamba_allocator = std::move(step_result.local_mamba_allocator);
 
     TokenContainer* token_container = state.GetTokenContainer();
 
@@ -117,27 +102,24 @@ std::variant<PrefillDone, Prefilling> SchedulePrefillFirstChunkEvent::operator()
                            state.GetPageSize(),
                            std::move(host_node_ref),
                            std::move(device_node_ref),
-                           std::move(local_kv_allocator),
+                           std::move(local_cache),
                            std::move(req_pool_index),
                            window,
-                           reserve_num_tokens_in_next_schedule_event,
-                           std::move(local_mamba_allocator)};
+                           reserve_num_tokens_in_next_schedule_event};
     } else {
         return Prefilling{token_container,
                           state.GetPageSize(),
                           std::move(host_node_ref),
                           std::move(device_node_ref),
-                          std::move(local_kv_allocator),
+                          std::move(local_cache),
                           std::move(req_pool_index),
-                          window,
-                          std::move(local_mamba_allocator)};
+                          window};
     }
 }
 
 // Prefilling -> Prefilling / PrefillDone
 std::variant<PrefillDone, Prefilling> SchedulePrefillEvent::operator()(Prefilling&& state) {
-    auto local_kv_allocator = std::move(state).TakeLocalKVAllocator();
-    auto local_mamba_allocator = std::move(state).TakeLocalMambaAllocator();
+    auto local_cache = std::move(state).TakeLocalCache();
     auto device_node_ref = std::move(state).TakeDeviceNodeRef();
     auto host_node_ref = std::move(state).TakeHostNodeRef();
 
@@ -151,16 +133,12 @@ std::variant<PrefillDone, Prefilling> SchedulePrefillEvent::operator()(Prefillin
         cache::publish::DevicePrefix{
             .full_paged_tokens = paged_tokens,
             .device_node_ref = device_node_ref,
-            .local_kv_allocator = *local_kv_allocator,
-            .local_mamba_allocator = local_mamba_allocator.get(),
+            .local_cache = *local_cache,
             .chunk_begin = state.window.begin,
         },
-        cache::state::AcquireRequestLocalKV{
-            .allocator = *local_kv_allocator,
+        cache::state::AcquireRequestLocalCache{
+            .local_cache = *local_cache,
             .tokens = tokens_this_round_,
-        },
-        cache::state::RefreshMambaCheckpoint{
-            .allocator = local_mamba_allocator.get(),
             .checkpoint_raw_position = state.window.begin + state.window.size + tokens_this_round_,
         });
 
@@ -172,27 +150,24 @@ std::variant<PrefillDone, Prefilling> SchedulePrefillEvent::operator()(Prefillin
                            state.GetPageSize(),
                            std::move(host_node_ref),
                            std::move(device_node_ref),
-                           std::move(local_kv_allocator),
+                           std::move(local_cache),
                            std::move(state).TakeReqPoolIndex(),
                            window,
-                           reserve_num_tokens_in_next_schedule_event_,
-                           std::move(local_mamba_allocator)};
+                           reserve_num_tokens_in_next_schedule_event_};
     } else {
         return Prefilling{state.GetTokenContainer(),
                           state.GetPageSize(),
                           std::move(host_node_ref),
                           std::move(device_node_ref),
-                          std::move(local_kv_allocator),
+                          std::move(local_cache),
                           std::move(state).TakeReqPoolIndex(),
-                          window,
-                          std::move(local_mamba_allocator)};
+                          window};
     }
 }
 
 // PrefillDone -> Decoding: insert prefill pages into tree, then transition to decode.
 Decoding ScheduleDecodeEvent::operator()(PrefillDone&& state) {
-    auto local_kv_allocator = std::move(state).TakeLocalKVAllocator();
-    auto local_mamba_allocator = std::move(state).TakeLocalMambaAllocator();
+    auto local_cache = std::move(state).TakeLocalCache();
     auto device_node_ref = std::move(state).TakeDeviceNodeRef();
     auto host_node_ref = std::move(state).TakeHostNodeRef();
 
@@ -206,42 +181,35 @@ Decoding ScheduleDecodeEvent::operator()(PrefillDone&& state) {
         cache::publish::DevicePrefix{
             .full_paged_tokens = paged_tokens,
             .device_node_ref = device_node_ref,
-            .local_kv_allocator = *local_kv_allocator,
-            .local_mamba_allocator = local_mamba_allocator.get(),
+            .local_cache = *local_cache,
             .chunk_begin = state.window.begin,
         },
-        cache::state::AcquireRequestLocalKV{
-            .allocator = *local_kv_allocator,
+        cache::state::AcquireRequestLocalCache{
+            .local_cache = *local_cache,
             .tokens = state.GetReserveNumTokensInNextScheduleEvent(),
-        },
-        cache::state::RefreshMambaCheckpoint{
-            .allocator = local_mamba_allocator.get(),
             .checkpoint_raw_position = state.GetTokenContainer()->Size() + decode_input_tokens_,
         });
 
-    return Decoding{state.GetTokenContainer(),     state.GetPageSize(),
-                    std::move(host_node_ref),      std::move(device_node_ref),
-                    std::move(local_kv_allocator), std::move(state).TakeReqPoolIndex(),
-                    decode_input_tokens_,          std::move(local_mamba_allocator)};
+    return Decoding{state.GetTokenContainer(),  state.GetPageSize(),    std::move(host_node_ref),
+                    std::move(device_node_ref), std::move(local_cache), std::move(state).TakeReqPoolIndex(),
+                    decode_input_tokens_};
 }
 
 // Decoding -> Decoding: allocate pages for next decode step.
 Decoding ScheduleDecodeEvent::operator()(Decoding&& state) {
-    auto local_kv_allocator = std::move(state).TakeLocalKVAllocator();
-    auto local_mamba_allocator = std::move(state).TakeLocalMambaAllocator();
+    auto local_cache = std::move(state).TakeLocalCache();
     auto device_node_ref = std::move(state).TakeDeviceNodeRef();
     auto host_node_ref = std::move(state).TakeHostNodeRef();
 
     std::int32_t reserve = state.GetReserveNumTokensInNextScheduleEvent();
-    (void)hybrid_prefix_cache_.StepCommit(cache::state::AcquireRequestLocalKV{
-        .allocator = *local_kv_allocator,
+    (void)hybrid_prefix_cache_.StepCommit(cache::state::AcquireRequestLocalCache{
+        .local_cache = *local_cache,
         .tokens = reserve,
     });
 
-    return Decoding{state.GetTokenContainer(),     state.GetPageSize(),
-                    std::move(host_node_ref),      std::move(device_node_ref),
-                    std::move(local_kv_allocator), std::move(state).TakeReqPoolIndex(),
-                    decode_input_tokens_,          std::move(local_mamba_allocator)};
+    return Decoding{state.GetTokenContainer(),  state.GetPageSize(),    std::move(host_node_ref),
+                    std::move(device_node_ref), std::move(local_cache), std::move(state).TakeReqPoolIndex(),
+                    decode_input_tokens_};
 }
 
 // Retracted -> Decoding: recover via LoadBack (host → device).
@@ -268,27 +236,18 @@ Decoding ScheduleDecodeFromRetractedEvent::operator()(Retracted&& state) {
     }
     TokenContainer* token_container = state.GetTokenContainer();
     std::int32_t page_size = state.GetPageSize();
-    auto local_kv_allocator = std::move(state).TakeKVAllocator();
-    auto old_mamba_allocator = std::move(state).TakeMambaAllocator();
-    old_mamba_allocator.reset();
+    auto local_cache = std::move(state).TakeLocalCache();
     auto req_pool_index = std::make_unique<ReqPoolIndex>(req_pool_allocator_->Allocate());
-    auto step_result = hybrid_prefix_cache_.StepCommit(
-        cache::state::CreateRequestLocalMamba{
-            .require_allocator = true,
-        },
-        cache::state::AcquireRequestLocalKV{
-            .allocator = *local_kv_allocator,
-            .tokens = decode_input_tokens_,
-        });
-    auto local_mamba_allocator = std::move(step_result.local_mamba_allocator);
-    return Decoding{token_container,
-                    page_size,
-                    std::move(host_node_ref),
-                    std::move(device_node_ref),
-                    std::move(local_kv_allocator),
-                    std::move(req_pool_index),
-                    decode_input_tokens_,
-                    std::move(local_mamba_allocator)};
+    (void)hybrid_prefix_cache_.StepCommit(cache::state::AcquireRequestLocalCache{
+        .local_cache = *local_cache,
+        .tokens = decode_input_tokens_,
+        .replace_adjunct_state = true,
+        .require_adjunct_state = true,
+    });
+    return Decoding{token_container,          page_size,
+                    std::move(host_node_ref), std::move(device_node_ref),
+                    std::move(local_cache),   std::move(req_pool_index),
+                    decode_input_tokens_};
 }
 
 // Decode -> Finish / PrefillDone -> Finish
@@ -298,18 +257,16 @@ std::variant<Draining, Finished> FinishEvent::apply(ForwardStateT&& state) {
     auto full_paged_tokens = state.GetFullPagedTokens(true);
     const TreeNode* current_device_node = state.GetDeviceNode();
 
-    auto local_mamba_allocator = std::move(state).TakeLocalMambaAllocator();
-    auto local_allocator = std::move(state).TakeLocalKVAllocator();
+    auto local_cache = std::move(state).TakeLocalCache();
     MatchResult match = hybrid_prefix_cache_
                             .StepCommit(cache::publish::FinishedRequest{
                                 .full_paged_tokens = full_paged_tokens,
                                 .current_device_node = *current_device_node,
-                                .local_kv_allocator = *local_allocator,
+                                .local_cache = *local_cache,
                                 .page_hashes = page_hashes_,
-                                .local_mamba_allocator = local_mamba_allocator.get(),
                             })
                             .match_result;
-    // local_mamba_allocator dropped here — destructor frees remaining slots
+    // local_cache dropped here — destructors free request-local cache state.
 
     if (!disable_l2_cache_ && (match.device.DepthInPage() > match.host.DepthInPage())) {
         std::vector<TreeNode*> write_diff = match.NodesWithout<ResourceType::Host>();
@@ -330,7 +287,7 @@ std::variant<Draining, Finished> FinishEvent::apply(ForwardStateT&& state) {
                                  std::make_move_iterator(materialization_result.cache_transfer_pairs.begin()),
                                  std::make_move_iterator(materialization_result.cache_transfer_pairs.end()));
         return Draining{std::move(pages_to_transfer), std::move(write_diff), std::move(device_node_ref),
-                        std::move(host_node_ref), std::move(materialization_result.mamba_writeback_nodes)};
+                        std::move(host_node_ref), std::move(materialization_result.pending_host_writeback)};
     }
     return Finished{};
 }
@@ -345,7 +302,7 @@ std::variant<Draining, Finished> FinishEvent::operator()(PrefillDone&& state) {
 
 // The request finished (EOS) while its device→host writeback is still in-flight.
 // Downcast to WritingBack so that WriteBackDoneEvent takes the existing
-// WritingBack → Finished path.  TokenContainer and LocalKVAllocator are
+// WritingBack → Finished path.  TokenContainer and request-local cache state are
 // released here (no longer needed for recovery).
 WritingBack FinishEvent::operator()(Retracting&& state) {
     return static_cast<WritingBack&&>(state);
@@ -358,8 +315,8 @@ WritingBack FinishEvent::operator()(Retracting&& state) {
 WritingBack CommitDrainingEvent::operator()(Draining&& state) {
     auto device_node_ref = std::move(state).TakeDeviceNodeRef();
     auto host_node_ref = std::move(state).TakeHostNodeRef();
-    auto mamba_writeback_nodes = std::move(state).TakeMambaWriteBackNodes();
-    return WritingBack{std::move(device_node_ref), std::move(host_node_ref), std::move(mamba_writeback_nodes)};
+    auto pending_writeback = std::move(state).TakePendingWriteback();
+    return WritingBack{std::move(device_node_ref), std::move(host_node_ref), std::move(pending_writeback)};
 }
 
 // WritingBack → Finished
@@ -367,13 +324,9 @@ WritingBack CommitDrainingEvent::operator()(Draining&& state) {
 // then written-back cache becomes host-only so the next hit must load back.
 Finished WriteBackDoneEvent::operator()(WritingBack&& state) {
     TreeNode* device_node = state.DeviceNode();
-    if (hybrid_prefix_cache_ != nullptr) {
-        hybrid_prefix_cache_->OnMambaHostWriteBackDone(state.MambaWriteBackNodes());
-    }
     state.DropDeviceNodeRef();
-    DemoteWrittenBackDevice(kv_prefix_cache_, hybrid_prefix_cache_, device_node);
     if (hybrid_prefix_cache_ != nullptr) {
-        hybrid_prefix_cache_->DemoteIdleMambaDeviceCopiesPresentOnHost();
+        hybrid_prefix_cache_->CompleteHostWriteBack(state.PendingWriteback(), device_node);
     }
     return Finished{};
 }
@@ -382,20 +335,14 @@ Retracted WriteBackDoneEvent::operator()(Retracting&& state) {
     TokenContainer* token_container = state.GetTokenContainer();
     std::int32_t page_size = state.GetPageSize();
     TreeNode* device_node = state.DeviceNode();
-    if (hybrid_prefix_cache_ != nullptr) {
-        hybrid_prefix_cache_->OnMambaHostWriteBackDone(state.MambaWriteBackNodes());
-    }
     state.DropDeviceNodeRef();
-    DemoteWrittenBackDevice(kv_prefix_cache_, hybrid_prefix_cache_, device_node);
     if (hybrid_prefix_cache_ != nullptr) {
-        hybrid_prefix_cache_->DemoteIdleMambaDeviceCopiesPresentOnHost();
+        hybrid_prefix_cache_->CompleteHostWriteBack(state.PendingWriteback(), device_node);
     }
     auto host_ref = std::move(static_cast<WritingBack&&>(state)).TakeHostNodeRef();
-    std::unique_ptr<LocalKVAllocator> local_device_allocator = std::move(state).TakeKVAllocator();
-    auto local_mamba_allocator = std::move(state).TakeMambaAllocator();
+    auto local_cache = std::move(state).TakeLocalCache();
     // DeviceNodeRef inside WritingBack base is released here (unique_ptr dtor).
-    return Retracted{token_container, page_size, std::move(host_ref), std::move(local_device_allocator),
-                     std::move(local_mamba_allocator)};
+    return Retracted{token_container, page_size, std::move(host_ref), std::move(local_cache)};
 }
 
 Finished AbortEvent::operator()(Submitted&&) {
@@ -444,7 +391,7 @@ Retracting ScheduleRetractEvent::applyRetract(ForwardStateT&& state) {
     std::unique_ptr<HostNodeRef> host_node_ref = nullptr;
     std::vector<Retracting::PagePair> pages_to_transfer;
     std::vector<TreeNode*> writeback_nodes;
-    std::vector<TreeNode*> mamba_writeback_nodes;
+    PendingHostWritebackState pending_writeback;
 
     if (match_result_.device.DepthInPage() > match_result_.host.DepthInPage()) {
         std::vector<TreeNode*> write_diff = match_result_.NodesWithout<ResourceType::Host>();
@@ -462,7 +409,7 @@ Retracting ScheduleRetractEvent::applyRetract(ForwardStateT&& state) {
                                  std::make_move_iterator(materialization_result.cache_transfer_pairs.begin()),
                                  std::make_move_iterator(materialization_result.cache_transfer_pairs.end()));
         writeback_nodes = std::move(write_diff);
-        mamba_writeback_nodes = std::move(materialization_result.mamba_writeback_nodes);
+        pending_writeback = std::move(materialization_result.pending_host_writeback);
         host_node_ref = std::make_unique<HostNodeRef>(match_result_.device.last_node);
     } else {
         host_node_ref = std::make_unique<HostNodeRef>(match_result_.device.last_node);
@@ -470,23 +417,21 @@ Retracting ScheduleRetractEvent::applyRetract(ForwardStateT&& state) {
 
     TokenContainer* token_container = state.GetTokenContainer();
     std::int32_t page_size = state.GetPageSize();
-    auto local_allocator = std::move(state).TakeLocalKVAllocator();
-    auto local_mamba_allocator = std::move(state).TakeLocalMambaAllocator();
+    auto local_cache = std::move(state).TakeLocalCache();
 
     (void)hybrid_prefix_cache_.StepCommit(cache::state::PublishTreeOwnedRequestState{
         .terminal = *match_result_.device.last_node,
-        .local_mamba_allocator_owner = local_mamba_allocator,
+        .local_cache = *local_cache,
     });
 
     return Retracting{token_container,
                       page_size,
                       std::move(host_node_ref),
                       std::move(device_node_ref),
-                      std::move(local_allocator),
+                      std::move(local_cache),
                       std::move(pages_to_transfer),
                       std::move(writeback_nodes),
-                      std::move(mamba_writeback_nodes),
-                      std::move(local_mamba_allocator)};
+                      std::move(pending_writeback)};
 }
 
 Retracting ScheduleRetractEvent::operator()(Decoding&& state) {

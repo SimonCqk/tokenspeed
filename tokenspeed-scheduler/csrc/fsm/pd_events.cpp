@@ -44,11 +44,10 @@ PrefillDone RemotePrefillDoneEvent::operator()(Prefilling&& state) {
         state.GetPageSize(),
         std::move(state).TakeHostNodeRef(),
         std::move(state).TakeDeviceNodeRef(),
-        std::move(state).TakeLocalKVAllocator(),
+        std::move(state).TakeLocalCache(),
         std::move(state).TakeReqPoolIndex(),
         w,
         0,  // reserve_num_tokens_in_next_schedule_event
-        std::move(state).TakeLocalMambaAllocator(),
     };
 
     prefill_done.ExtendResultTokens({bootstrap_token});

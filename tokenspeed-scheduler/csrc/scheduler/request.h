@@ -184,7 +184,7 @@ public:
         return std::visit(Overloaded{
             []<typename T>(T& s) -> OwnedPages
                 requires(std::same_as<T, fsm::Decoding> || std::same_as<T, fsm::PrefillDone>)
-            { return s.GetLocalKVAllocatorPtr()->TakeFullPages(); },
+            { return s.GetLocalCache()->TakeFullKVPages(); },
             [this](auto&) -> OwnedPages {
                 throw std::logic_error("Request::TakeFullPages: expected state=Decoding or PrefillDone; got state=" +
                                        StateName());
@@ -197,7 +197,7 @@ public:
         return std::visit(Overloaded{
             [n]<typename T>(T& s) -> OwnedPages
                 requires(std::same_as<T, fsm::Decoding> || std::same_as<T, fsm::PrefillDone>)
-            { return s.GetLocalKVAllocatorPtr()->TakeFirst(n); },
+            { return s.GetLocalCache()->TakeFirstKVPages(n); },
             [this](auto&) -> OwnedPages {
                 throw std::logic_error("Request::TakeFirstPages: expected state=Decoding or PrefillDone; got state=" +
                                        StateName());
@@ -241,12 +241,12 @@ public:
             state_);
     }
 
-    LocalMambaAllocator* GetLocalMambaAllocator() {
+    RequestLocalCacheState* GetLocalCache() {
         return std::visit(Overloaded{
-            []<typename T>(T& s) -> LocalMambaAllocator*
+            []<typename T>(T& s) -> RequestLocalCacheState*
                 requires(std::derived_from<T, fsm::BaseState>)
-            { return s.GetLocalMambaAllocator(); },
-            [](auto&) -> LocalMambaAllocator* { return nullptr; },
+            { return s.GetLocalCache(); },
+            [](auto&) -> RequestLocalCacheState* { return nullptr; },
             },
             state_);
     }

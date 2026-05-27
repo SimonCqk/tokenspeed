@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "resource/allocator/local_mamba_allocator.h"
+#include "resource/allocator/kv_allocator.h"
 #include "resource/allocator/mamba_chunk_allocator.h"
 #include "resource/allocator/mamba_host_allocator.h"
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
@@ -92,8 +93,9 @@ void HybridPrefixCache::PopulateMambaRecoveryCompatibilityFields(ForwardOperatio
     op_base.mamba_cow_src_idx = match_result.mamba_cow_src_index;
 }
 
-void HybridPrefixCache::PopulateMambaRequestLocalCompatibilityFields(
-    ForwardOperationBase& op_base, const LocalMambaAllocator* local_mamba_allocator) const {
+void HybridPrefixCache::PopulateMambaRequestLocalCompatibilityFields(ForwardOperationBase& op_base,
+                                                                     const RequestLocalCacheState& local_cache) const {
+    const LocalMambaAllocator* local_mamba_allocator = local_cache.AdjunctState();
     if (!HasMambaAdjunct() || local_mamba_allocator == nullptr) return;
     if (local_mamba_allocator->HasWorking()) {
         op_base.mamba_working_idx = local_mamba_allocator->WorkingIndex();
@@ -103,35 +105,56 @@ void HybridPrefixCache::PopulateMambaRequestLocalCompatibilityFields(
     }
 }
 
-cache::state::CreateRequestLocalMamba::Result HybridPrefixCache::Apply(
-    const cache::state::CreateRequestLocalMamba& op) {
-    cache::state::CreateRequestLocalMamba::Result result{};
-    result.local_mamba_allocator =
-        allocateRequestLocalMambaState(op.require_allocator ? std::nullopt : op.checkpoint_raw_position);
-    if (op.require_allocator && HasMambaAdjunct() && result.local_mamba_allocator == nullptr) {
-        throw std::logic_error("ScheduleDecodeFromRetractedEvent: failed to allocate Mamba recovery slots");
+cache::state::CreateRequestLocalCache::Result HybridPrefixCache::Apply(
+    const cache::state::CreateRequestLocalCache& op) {
+    cache::state::CreateRequestLocalCache::Result result{};
+    auto local_kv_allocator = std::make_unique<LocalKVAllocator>(&device_allocator_, op.initial_tokens);
+    local_kv_allocator->Acquire(op.acquire_tokens);
+    auto adjunct_state =
+        allocateRequestLocalMambaState(op.require_adjunct_state ? std::nullopt : op.checkpoint_raw_position);
+    if (op.require_adjunct_state && HasMambaAdjunct() && adjunct_state == nullptr) {
+        throw std::logic_error("HybridPrefixCache::Apply(CreateRequestLocalCache): failed to allocate adjunct state");
     }
+    result.local_cache =
+        std::make_unique<RequestLocalCacheState>(std::move(local_kv_allocator), std::move(adjunct_state));
     return result;
 }
 
-cache::state::RefreshMambaCheckpoint::Result HybridPrefixCache::Apply(const cache::state::RefreshMambaCheckpoint& op) {
-    if (!HasMambaAdjunct() || op.allocator == nullptr) return {};
+cache::state::AcquireRequestLocalCache::Result HybridPrefixCache::Apply(
+    const cache::state::AcquireRequestLocalCache& op) {
+    op.local_cache.AcquireKV(op.tokens);
+    if (op.replace_adjunct_state) {
+        auto adjunct_state =
+            allocateRequestLocalMambaState(op.require_adjunct_state ? std::nullopt : op.checkpoint_raw_position);
+        if (op.require_adjunct_state && HasMambaAdjunct() && adjunct_state == nullptr) {
+            throw std::logic_error(
+                "HybridPrefixCache::Apply(AcquireRequestLocalCache): failed to allocate adjunct state");
+        }
+        op.local_cache.SetAdjunctState(std::move(adjunct_state));
+        return {};
+    }
+    RefreshRequestLocalStateCheckpoint(op.local_cache, op.checkpoint_raw_position);
+    return {};
+}
+
+void HybridPrefixCache::RefreshRequestLocalStateCheckpoint(RequestLocalCacheState& local_cache,
+                                                           std::optional<std::int32_t> checkpoint_raw_position) const {
+    LocalMambaAllocator* allocator = local_cache.AdjunctState();
+    if (!HasMambaAdjunct() || allocator == nullptr || !checkpoint_raw_position.has_value()) return;
 
     const auto should_materialize_checkpoint = [&]() {
-        if (!op.checkpoint_raw_position.has_value()) return true;
-        const std::int32_t position = *op.checkpoint_raw_position;
+        const std::int32_t position = *checkpoint_raw_position;
         return position > 0 && AlignMambaCacheSeqlen(position) == position;
     };
 
     if (!should_materialize_checkpoint()) {
-        (void)op.allocator->DetachCheckpoint();
-        return {};
+        (void)allocator->DetachCheckpoint();
+        return;
     }
-    (void)op.allocator->DetachCheckpoint();
-    if (!op.allocator->AllocateCheckpoint(op.checkpoint_raw_position.value_or(-1))) {
-        throw std::logic_error("SchedulePrefillEvent: failed to allocate Mamba checkpoint slot");
+    (void)allocator->DetachCheckpoint();
+    if (!allocator->AllocateCheckpoint(*checkpoint_raw_position)) {
+        throw std::logic_error("HybridPrefixCache::RefreshRequestLocalStateCheckpoint: failed to allocate checkpoint");
     }
-    return {};
 }
 
 std::unique_ptr<LocalMambaAllocator> HybridPrefixCache::allocateRequestLocalMambaState(
@@ -147,7 +170,8 @@ std::unique_ptr<LocalMambaAllocator> HybridPrefixCache::allocateRequestLocalMamb
 }
 
 void HybridPrefixCache::PublishFinishMambaState(const std::vector<std::span<const std::int32_t>>& full_paged_tokens,
-                                                LocalMambaAllocator* local_mamba_allocator) {
+                                                RequestLocalCacheState& local_cache) {
+    LocalMambaAllocator* local_mamba_allocator = local_cache.AdjunctState();
     if (!HasMambaAdjunct() || local_mamba_allocator == nullptr ||
         (!local_mamba_allocator->HasCheckpoint() && !local_mamba_allocator->HasWorking())) {
         return;
@@ -170,26 +194,26 @@ void HybridPrefixCache::PublishFinishMambaState(const std::vector<std::span<cons
     InsertMamba(terminal, std::move(slot_to_publish));
 }
 
-void HybridPrefixCache::PublishRetractMambaState(TreeNode* terminal,
-                                                 std::unique_ptr<LocalMambaAllocator>& local_mamba_allocator) {
+void HybridPrefixCache::PublishRetractMambaState(TreeNode* terminal, RequestLocalCacheState& local_cache) {
+    LocalMambaAllocator* local_mamba_allocator = local_cache.AdjunctState();
     if (local_mamba_allocator == nullptr) return;
 
     const bool had_request_local_mamba = local_mamba_allocator->HasCheckpoint() || local_mamba_allocator->HasWorking();
     if (!had_request_local_mamba) return;
 
     if (HasMambaAdjunct()) {
-        publishRequestMambaState(terminal, local_mamba_allocator.get());
+        publishRequestMambaState(terminal, local_mamba_allocator);
     }
 
     // Once retracted, any recoverable Mamba state is tree-owned and therefore
     // evictable by HybridPrefixCache. Do not keep request-local slots alive in
     // Retracting/Retracted.
-    local_mamba_allocator.reset();
+    local_cache.ResetAdjunctState();
 }
 
 cache::state::PublishTreeOwnedRequestState::Result HybridPrefixCache::Apply(
     const cache::state::PublishTreeOwnedRequestState& op) {
-    PublishRetractMambaState(&op.terminal, op.local_mamba_allocator_owner);
+    PublishRetractMambaState(&op.terminal, op.local_cache);
     return {};
 }
 
