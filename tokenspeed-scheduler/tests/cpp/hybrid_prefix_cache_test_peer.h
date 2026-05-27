@@ -20,9 +20,11 @@
 // inspect internals while production callers use the scheduler-facing facades.
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -50,6 +52,11 @@ public:
 
     static void RegisterPagedCacheGroup(HybridPrefixCache& cache, std::unique_ptr<PagedCacheGroupAllocator> allocator) {
         cache.RegisterPagedCacheGroup(std::move(allocator));
+    }
+
+    static void RegisterPagedCacheHostGroup(HybridPrefixCache& cache,
+                                            std::unique_ptr<PagedCacheGroupAllocator> allocator) {
+        cache.RegisterPagedCacheHostGroup(std::move(allocator));
     }
 
     static void EnablePagedCacheAdjunct(HybridPrefixCache& cache, std::vector<std::string> required_groups,
@@ -80,6 +87,39 @@ public:
     static std::unique_ptr<PagedCacheSnapshot> DetachPagedCacheSnapshotFromNode(HybridPrefixCache& cache,
                                                                                 TreeNode* node) {
         return cache.DetachPagedCacheSnapshotFromNode(node);
+    }
+
+    static HybridPrefixCache::PagedCacheHostWriteBackPlan PreparePagedCacheHostWriteBack(
+        HybridPrefixCache& cache, const std::string& group_id, std::int32_t required_device_pages,
+        const std::unordered_set<TreeNode*>& protected_nodes = {}) {
+        return cache.PreparePagedCacheHostWriteBack(group_id, required_device_pages, protected_nodes);
+    }
+
+    static std::int32_t EvictPagedCacheHostPagesForGroup(HybridPrefixCache& cache, const std::string& group_id,
+                                                         std::int32_t required_host_pages,
+                                                         const std::unordered_set<TreeNode*>& protected_nodes = {}) {
+        return cache.EvictPagedCacheHostPagesForGroup(group_id, required_host_pages, protected_nodes);
+    }
+
+    static std::int32_t DemotePagedCacheDeviceCopiesPresentOnHost(
+        HybridPrefixCache& cache, const std::string& group_id, std::int32_t required_device_pages,
+        const std::unordered_set<TreeNode*>& protected_nodes = {}) {
+        return cache.DemotePagedCacheDeviceCopiesPresentOnHost(group_id, required_device_pages, protected_nodes);
+    }
+
+    static bool OnPagedCacheHostWriteBackDone(HybridPrefixCache& cache, TreeNode* node, const std::string& group_id) {
+        return cache.OnPagedCacheHostWriteBackDone(node, group_id);
+    }
+
+    static PagedCacheDeviceLoadBackResult PreparePagedCacheDeviceLoadBack(
+        HybridPrefixCache& cache, MatchResult& match_result, std::map<std::string, std::int32_t>& simulated_free) {
+        return cache.PreparePagedCacheDeviceLoadBack(match_result, simulated_free);
+    }
+
+    static void CancelPagedCacheDeviceLoadBack(HybridPrefixCache& cache,
+                                               const std::map<std::string, std::vector<TreeNode*>>& nodes_by_group,
+                                               std::map<std::string, std::int32_t>& simulated_free) {
+        cache.CancelPagedCacheDeviceLoadBack(nodes_by_group, simulated_free);
     }
 };
 

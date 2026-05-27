@@ -17,6 +17,20 @@ def _full_history_config(rows_per_page=64, entry_stride_tokens=4, total_pages=10
     )
 
 
+def test_group_config_host_total_pages_defaults_and_validates():
+    cfg = _full_history_config()
+    assert cfg.host_total_pages == 0
+    assert not cfg.has_host_pages()
+
+    cfg.host_total_pages = 8
+    assert cfg.has_host_pages()
+    cfg.validate()
+
+    cfg.host_total_pages = -1
+    with pytest.raises(ValueError):
+        cfg.validate()
+
+
 def _sliding_config(rows_per_page=2, entry_stride_tokens=1, total_pages=8, window=4):
     return PagedCacheGroupConfig(
         group_id="swa",
@@ -73,9 +87,7 @@ def test_acquire_throws_on_exhaustion_without_leaking_cursor():
 
 
 def test_stride_group_allocates_partial_entry_and_boundary_page():
-    alloc = PagedCacheGroupAllocator(
-        _full_history_config(rows_per_page=64, entry_stride_tokens=4, total_pages=4)
-    )
+    alloc = PagedCacheGroupAllocator(_full_history_config(rows_per_page=64, entry_stride_tokens=4, total_pages=4))
     table = PagedCacheGroupTable(alloc)
 
     table.acquire(1)

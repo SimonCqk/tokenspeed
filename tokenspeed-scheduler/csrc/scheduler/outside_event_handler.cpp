@@ -36,8 +36,22 @@
 namespace tokenspeed {
 
 void Scheduler::handleEvent(const cache::PrefetchDone& event) {
-    // Remove from op tracker (regardless of success).
-    cache_op_tracker_.erase(event.op_id);
+    CacheOpSpec spec;
+    bool has_spec = false;
+    if (auto op_it = cache_op_tracker_.find(event.op_id); op_it != cache_op_tracker_.end()) {
+        spec = std::move(op_it->second);
+        cache_op_tracker_.erase(op_it);
+        has_spec = true;
+    }
+
+    if (has_spec && !spec.paged_cache_loadback_nodes_by_group.empty()) {
+        hybrid_prefix_cache_.OnPagedCacheDeviceLoadBackDone(spec.paged_cache_loadback_nodes_by_group, event.success);
+        if (!event.success && !spec.request_id.empty()) {
+            if (Request* req = find_request(spec.request_id)) {
+                req->Apply(fsm::AbortEvent{});
+            }
+        }
+    }
 
     auto req_iter = requests_.find(event.request_id);
     if (req_iter == requests_.end()) {
@@ -157,6 +171,13 @@ void Scheduler::handleEvent(const cache::WriteBackDone& event) {
             node->Touch(access_time);
         }
     }
+    for (const auto& [group_id, nodes] : spec.paged_cache_writeback_nodes_by_group) {
+        for (TreeNode* node : nodes) {
+            if (node == nullptr) continue;
+            node->Touch(access_time);
+        }
+    }
+    hybrid_prefix_cache_.OnPagedCacheHostWriteBackDone(spec.paged_cache_writeback_nodes_by_group, event.success);
 
     if (!spec.request_id.empty()) {
         if (auto* req = find_request(spec.request_id)) {

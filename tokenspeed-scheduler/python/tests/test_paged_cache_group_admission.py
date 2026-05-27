@@ -72,14 +72,33 @@ def test_full_history_admission_denies_instead_of_throwing():
     scheduler.submit_requests([_make_spec("r0", list(range(256)))])
     plan = scheduler.next_execution_plan()
     assert "r0" in _request_ids_in_plan(plan)
-    assert (
-        len(scheduler.get_request_paged_cache_page_ids("r0", COMPRESSED_GROUP_ID)) == 1
-    )
+    assert len(scheduler.get_request_paged_cache_page_ids("r0", COMPRESSED_GROUP_ID)) == 1
 
     scheduler.submit_requests([_make_spec("r1", list(range(256)))])
     plan2 = scheduler.next_execution_plan()
     assert "r1" not in _request_ids_in_plan(plan2)
     assert scheduler.paged_cache_group_failed_alloc_count(COMPRESSED_GROUP_ID) == 0
+
+
+def test_scheduler_reports_paged_cache_host_group_stats():
+    cfg = _base_config()
+    group = _compressed_group(total_pages=8)
+    group.host_total_pages = 5
+    cfg.paged_cache_groups = [group]
+
+    scheduler = Scheduler(cfg)
+
+    assert scheduler.paged_cache_group_ids() == [COMPRESSED_GROUP_ID]
+    assert scheduler.paged_cache_group_total_pages(COMPRESSED_GROUP_ID) == 8
+    assert scheduler.paged_cache_group_available_pages(COMPRESSED_GROUP_ID) == 7
+    assert scheduler.paged_cache_group_failed_alloc_count(COMPRESSED_GROUP_ID) == 0
+    assert scheduler.paged_cache_group_host_total_pages(COMPRESSED_GROUP_ID) == 5
+    assert scheduler.paged_cache_group_host_available_pages(COMPRESSED_GROUP_ID) == 4
+    assert scheduler.paged_cache_group_host_failed_alloc_count(COMPRESSED_GROUP_ID) == 0
+    assert scheduler.paged_cache_group_host_writeback_pages_scheduled_total(COMPRESSED_GROUP_ID) == 0
+    assert scheduler.paged_cache_group_device_loadback_pages_scheduled_total(COMPRESSED_GROUP_ID) == 0
+    assert scheduler.paged_cache_group_host_evicted_pages_total(COMPRESSED_GROUP_ID) == 0
+    assert scheduler.paged_cache_group_device_loadback_failed_count(COMPRESSED_GROUP_ID) == 0
 
 
 def test_full_history_stride_admission_accounts_partial_entries():
@@ -92,18 +111,12 @@ def test_full_history_stride_admission_accounts_partial_entries():
     scheduler.submit_requests([_make_spec("short", [1])])
     plan = scheduler.next_execution_plan()
     assert "short" in _request_ids_in_plan(plan)
-    assert (
-        len(scheduler.get_request_paged_cache_page_ids("short", COMPRESSED_GROUP_ID))
-        == 1
-    )
+    assert len(scheduler.get_request_paged_cache_page_ids("short", COMPRESSED_GROUP_ID)) == 1
 
     scheduler.submit_requests([_make_spec("boundary", list(range(257)))])
     plan2 = scheduler.next_execution_plan()
     assert "boundary" in _request_ids_in_plan(plan2)
-    assert (
-        len(scheduler.get_request_paged_cache_page_ids("boundary", COMPRESSED_GROUP_ID))
-        == 2
-    )
+    assert len(scheduler.get_request_paged_cache_page_ids("boundary", COMPRESSED_GROUP_ID)) == 2
 
 
 def test_sliding_release_before_admit_prevents_oom():
@@ -153,9 +166,7 @@ def test_batch_admission_debits_simulated_free_pages():
     ]
 
     scheduler = Scheduler(cfg)
-    scheduler.submit_requests(
-        [_make_spec("r0", list(range(8))), _make_spec("r1", list(range(8)))]
-    )
+    scheduler.submit_requests([_make_spec("r0", list(range(8))), _make_spec("r1", list(range(8)))])
 
     plan = scheduler.next_execution_plan()
     admitted = _request_ids_in_plan(plan)

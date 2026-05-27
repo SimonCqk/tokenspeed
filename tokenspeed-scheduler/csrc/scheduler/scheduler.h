@@ -74,19 +74,32 @@ public:
     std::int32_t PagedCacheGroupTotalPages(const std::string& group_id) const;
     std::int32_t PagedCacheGroupAvailablePages(const std::string& group_id) const;
     std::int64_t PagedCacheGroupFailedAllocCount(const std::string& group_id) const;
+    std::int32_t PagedCacheGroupHostTotalPages(const std::string& group_id) const;
+    std::int32_t PagedCacheGroupHostAvailablePages(const std::string& group_id) const;
+    std::int64_t PagedCacheGroupHostFailedAllocCount(const std::string& group_id) const;
+    std::int64_t PagedCacheGroupHostWriteBackPagesScheduledTotal(const std::string& group_id) const;
+    std::int64_t PagedCacheGroupDeviceLoadBackPagesScheduledTotal(const std::string& group_id) const;
+    std::int64_t PagedCacheGroupHostEvictedPagesTotal(const std::string& group_id) const;
+    std::int64_t PagedCacheGroupDeviceLoadBackFailedCount(const std::string& group_id) const;
     std::vector<std::int32_t> GetRequestPagedCachePageIds(const std::string& request_id,
                                                           const std::string& group_id) const;
     // Compact-view base logical-page offset; 0 for full-history / unseen.
     std::int32_t GetRequestPagedCacheBaseLogicalPage(const std::string& request_id, const std::string& group_id) const;
 
 private:
-    // Second element is LoadBackOperation list (normal path) or WriteBackOperation list (retract triggered).
-    std::tuple<std::vector<ForwardOperation>,
-               std::variant<std::vector<LoadBackOperation>, std::vector<WriteBackOperation>>>
-    newForwardOperation(std::vector<Request*> candidates);
+    struct ForwardScheduleResult {
+        std::vector<ForwardOperation> forward_ops{};
+        std::vector<LoadBackOperation> loadback_ops{};
+        std::vector<WriteBackOperation> writeback_ops{};
+    };
+
+    ForwardScheduleResult newForwardOperation(std::vector<Request*> candidates);
     std::vector<WriteBackOperation> newWriteBackOperation(
         std::unordered_map<std::string, std::unique_ptr<Request>>& requests);
     std::optional<WriteBackOperation> newRetractOperation(Request* retract_request);
+    std::optional<WriteBackOperation> newPagedCacheWriteBackOperation(AdmissionVerdict&& admission);
+    std::optional<WriteBackOperation> newPagedCacheWriteBackOperation(
+        std::vector<PagedCacheTransferGroup> transfers, std::map<std::string, std::vector<TreeNode*>> nodes_by_group);
 
     PrefillOperation applyEventAndGenerateOp(Request* request, fsm::SchedulePrefillFirstChunkEvent event);
     PrefillOperation applyEventAndGenerateOp(Request* request, fsm::SchedulePrefillEvent event);
@@ -96,14 +109,18 @@ private:
 
     std::optional<fsm::SchedulePrefillFirstChunkEvent> schedulePrefillFirstChunk(
         Request* request, std::int32_t remaining, std::int32_t reserve_num_tokens_in_next_schedule_event,
-        bool disable_l2_cache, std::map<std::string, std::int32_t>& simulated_free);
+        bool disable_l2_cache, std::map<std::string, std::int32_t>& simulated_free,
+        std::vector<WriteBackOperation>& writeback_ops);
     std::optional<fsm::SchedulePrefillEvent> schedulePrefill(Request* request, std::int32_t remaining,
                                                              std::int32_t reserve_num_tokens_in_next_schedule_event,
-                                                             std::map<std::string, std::int32_t>& simulated_free);
+                                                             std::map<std::string, std::int32_t>& simulated_free,
+                                                             std::vector<WriteBackOperation>& writeback_ops);
     std::optional<fsm::ScheduleDecodeEvent> scheduleDecode(Request* request,
-                                                           std::map<std::string, std::int32_t>& simulated_free);
+                                                           std::map<std::string, std::int32_t>& simulated_free,
+                                                           std::vector<WriteBackOperation>& writeback_ops);
     std::optional<fsm::ScheduleDecodeFromRetractedEvent> scheduleDecodeFromRetracted(
-        Request* request, std::map<std::string, std::int32_t>& simulated_free);
+        Request* request, std::map<std::string, std::int32_t>& simulated_free,
+        std::vector<WriteBackOperation>& writeback_ops);
     std::optional<fsm::ScheduleRetractEvent> scheduleRetract(Request* request);
 
     void check_device_mem();

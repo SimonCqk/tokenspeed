@@ -668,6 +668,7 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
         self.max_batch_size = max_batch_size
         self.max_context_len = max_context_len
         self.num_pages = (size + page_size - 1) // page_size + 1
+        self.layer_transfer_counters = []
         self.paged_cache_group_specs = tuple(
             build_v4_cache_specs(hf_config, layer_ratio=layout.layer_ratio)
         )
@@ -832,6 +833,14 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
         """All V4 paged-cache groups must be present for a snapshot to be complete."""
         return tuple(str(spec.group_id) for spec in self.paged_cache_group_specs)
 
+    def register_layer_transfer_counter(self, layer_transfer_counter) -> None:
+        self.layer_transfer_counters.append(layer_transfer_counter)
+        self.layer_transfer_counter = layer_transfer_counter
+
+    def _wait_layer_transfer(self, layer_id: int) -> None:
+        for counter in self.layer_transfer_counters:
+            counter.wait_until(layer_id)
+
     def _require(
         self, buffers: list[torch.Tensor | None], layer_id: int, name: str
     ) -> torch.Tensor:
@@ -841,9 +850,11 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
         return buf
 
     def get_swa_kv_buffer(self, layer_id: int) -> torch.Tensor:
+        self._wait_layer_transfer(layer_id)
         return self.swa_kv_buffer[layer_id]
 
     def get_compressed_kv_buffer_2d(self, layer_id: int) -> torch.Tensor:
+        self._wait_layer_transfer(layer_id)
         return self._require(self.compressed_kv_buffer, layer_id, "compressed KV")
 
     def get_compressed_block_size(self, layer_id: int) -> int:
@@ -864,6 +875,7 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
         return block_size
 
     def get_compressor_state_buffer(self, layer_id: int) -> torch.Tensor:
+        self._wait_layer_transfer(layer_id)
         return self._require(self.compressor_state_buffer, layer_id, "compressor state")
 
     def get_compressor_state_view(self, layer_id: int) -> torch.Tensor:
@@ -872,6 +884,7 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
         return buf.view(-1, block_size, buf.shape[-1])
 
     def get_indexer_kv_buffer_2d(self, layer_id: int) -> torch.Tensor:
+        self._wait_layer_transfer(layer_id)
         return self._require(self.indexer_kv_buffer, layer_id, "indexer KV")
 
     def get_indexer_state_block_size(self, layer_id: int) -> int:
@@ -881,6 +894,7 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
         return block_size
 
     def get_indexer_state_buffer(self, layer_id: int) -> torch.Tensor:
+        self._wait_layer_transfer(layer_id)
         return self._require(self.indexer_state_buffer, layer_id, "indexer state")
 
     def get_indexer_state_view(self, layer_id: int) -> torch.Tensor:

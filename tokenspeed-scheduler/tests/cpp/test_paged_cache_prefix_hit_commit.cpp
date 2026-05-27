@@ -85,7 +85,7 @@ TEST_F(PagedCachePrefixHitCommitTest, PrefixHitFollowedByCheckpointDoesNotOverfl
     ASSERT_FALSE(swa_ids.empty());
 
     const PagedCacheGroupSnapshot& swa_at_256 = n256->GetPagedCacheSnapshot()->groups.at("swa");
-    const std::int32_t raw_per_page = swa_at_256.pages.Size() > 0 ? (kLcm / swa_at_256.pages.Size()) : 0;
+    const std::int32_t raw_per_page = swa_at_256.device_pages.Size() > 0 ? (kLcm / swa_at_256.device_pages.Size()) : 0;
     ASSERT_GT(raw_per_page, 0);
     const std::int32_t committed_depth = post_match.paged_cache.prefix_len_tokens;
     const std::int32_t expected_state_pages = std::min(kSlidingWindow / raw_per_page, committed_depth / raw_per_page);

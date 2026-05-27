@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <unordered_set>
@@ -89,9 +90,96 @@ struct TransferPairHash {
     }
 };
 
+struct PagedCacheTransferGroup {
+    std::string group_id;
+    std::vector<std::int32_t> src_pages;
+    std::vector<std::int32_t> dst_pages;
+
+    bool Empty() const { return src_pages.empty() && dst_pages.empty(); }
+};
+
+struct PagedCacheTransferKey {
+    std::string group_id;
+    std::int32_t src{-1};
+    std::int32_t dst{-1};
+
+    bool operator==(const PagedCacheTransferKey& other) const {
+        return group_id == other.group_id && src == other.src && dst == other.dst;
+    }
+};
+
+struct PagedCacheTransferKeyHash {
+    std::size_t operator()(const PagedCacheTransferKey& key) const {
+        std::size_t h0 = std::hash<std::string>{}(key.group_id);
+        std::size_t h1 = std::hash<std::int32_t>{}(key.src);
+        std::size_t h2 = std::hash<std::int32_t>{}(key.dst);
+        return h0 ^ (h1 << 1) ^ (h2 << 32) ^ (h2 >> 32);
+    }
+};
+
+inline void AddPagedCacheTransfers(const std::vector<PagedCacheTransferGroup>& transfers,
+                                   std::unordered_set<PagedCacheTransferKey, PagedCacheTransferKeyHash>& seen,
+                                   std::map<std::string, std::vector<std::int32_t>>& src_this_op,
+                                   std::map<std::string, std::vector<std::int32_t>>& dst_this_op) {
+    for (const auto& transfer : transfers) {
+        if (transfer.src_pages.size() != transfer.dst_pages.size()) {
+            throw std::invalid_argument("PagedCacheTransferGroup: src_pages and dst_pages size mismatch");
+        }
+        if (transfer.group_id.empty()) {
+            throw std::invalid_argument("PagedCacheTransferGroup: group_id must be non-empty");
+        }
+        for (std::size_t i = 0; i < transfer.src_pages.size(); ++i) {
+            PagedCacheTransferKey key{
+                .group_id = transfer.group_id,
+                .src = transfer.src_pages[i],
+                .dst = transfer.dst_pages[i],
+            };
+            if (seen.insert(std::move(key)).second) {
+                src_this_op[transfer.group_id].push_back(transfer.src_pages[i]);
+                dst_this_op[transfer.group_id].push_back(transfer.dst_pages[i]);
+            }
+        }
+    }
+}
+
+inline void AppendPagedCacheTransferOp(std::size_t op_index,
+                                       std::map<std::string, std::vector<std::int32_t>>&& src_this_op,
+                                       std::map<std::string, std::vector<std::int32_t>>&& dst_this_op,
+                                       std::map<std::string, std::vector<std::vector<std::int32_t>>>& src_by_group,
+                                       std::map<std::string, std::vector<std::vector<std::int32_t>>>& dst_by_group) {
+    for (auto& [_, per_op] : src_by_group) {
+        if (per_op.size() == op_index) {
+            per_op.emplace_back();
+        }
+    }
+    for (auto& [_, per_op] : dst_by_group) {
+        if (per_op.size() == op_index) {
+            per_op.emplace_back();
+        }
+    }
+
+    for (auto& [group_id, src_pages] : src_this_op) {
+        auto dst_it = dst_this_op.find(group_id);
+        if (dst_it == dst_this_op.end()) {
+            throw std::invalid_argument("PagedCacheTransferGroup: missing dst pages for group");
+        }
+        auto& src_per_op = src_by_group[group_id];
+        auto& dst_per_op = dst_by_group[group_id];
+        if (src_per_op.size() < op_index + 1) {
+            src_per_op.resize(op_index + 1);
+        }
+        if (dst_per_op.size() < op_index + 1) {
+            dst_per_op.resize(op_index + 1);
+        }
+        src_per_op[op_index] = std::move(src_pages);
+        dst_per_op[op_index] = std::move(dst_it->second);
+    }
+}
+
 struct WriteBackOperation {
     cache_op_id op_id{0};
     std::vector<TransferPair> transfers;  // DEVICE→HOST by cache kind.
+    std::vector<PagedCacheTransferGroup> paged_cache_transfers;
     bool is_retract{false};
 
     WriteBackOperation() = default;
@@ -100,6 +188,12 @@ struct WriteBackOperation {
         : op_id{op_id}, transfers{ToTransferPairs(CacheKind::kKV, pages_to_transfer)}, is_retract{is_retract} {}
     WriteBackOperation(cache_op_id op_id, std::vector<TransferPair> transfers, bool is_retract = false)
         : op_id{op_id}, transfers{std::move(transfers)}, is_retract{is_retract} {}
+    WriteBackOperation(cache_op_id op_id, std::vector<TransferPair> transfers,
+                       std::vector<PagedCacheTransferGroup> paged_cache_transfers, bool is_retract = false)
+        : op_id{op_id},
+          transfers{std::move(transfers)},
+          paged_cache_transfers{std::move(paged_cache_transfers)},
+          is_retract{is_retract} {}
 };
 
 struct FlatWriteBackOperation {
@@ -110,13 +204,19 @@ struct FlatWriteBackOperation {
     // Generic view keyed by CacheKindName(kind), currently "kv" and "mamba".
     std::map<std::string, std::vector<std::vector<std::int32_t>>> src_pages_by_kind;
     std::map<std::string, std::vector<std::vector<std::int32_t>>> dst_pages_by_kind;
+    std::map<std::string, std::vector<std::vector<std::int32_t>>> src_pages_by_paged_group;
+    std::map<std::string, std::vector<std::vector<std::int32_t>>> dst_pages_by_paged_group;
     std::vector<bool> is_retract;
 
     explicit FlatWriteBackOperation(const std::vector<WriteBackOperation>& ops) {
         std::unordered_set<TransferPair, TransferPairHash> seen;
+        std::unordered_set<PagedCacheTransferKey, PagedCacheTransferKeyHash> seen_paged;
         for (const auto& op : ops) {
+            const std::size_t op_index = op_ids.size();
             std::map<std::string, std::vector<std::int32_t>> src_this_op;
             std::map<std::string, std::vector<std::int32_t>> dst_this_op;
+            std::map<std::string, std::vector<std::int32_t>> src_paged_this_op;
+            std::map<std::string, std::vector<std::int32_t>> dst_paged_this_op;
             src_this_op[CacheKindName(CacheKind::kKV)];
             dst_this_op[CacheKindName(CacheKind::kKV)];
             src_this_op[CacheKindName(CacheKind::kMamba)];
@@ -129,6 +229,9 @@ struct FlatWriteBackOperation {
                     dst_this_op[kind_name].push_back(transfer.dst);
                 }
             }
+            AddPagedCacheTransfers(op.paged_cache_transfers, seen_paged, src_paged_this_op, dst_paged_this_op);
+            AppendPagedCacheTransferOp(op_index, std::move(src_paged_this_op), std::move(dst_paged_this_op),
+                                       src_pages_by_paged_group, dst_pages_by_paged_group);
 
             op_ids.push_back(op.op_id);
             src_pages.push_back(src_this_op[CacheKindName(CacheKind::kKV)]);
@@ -147,12 +250,16 @@ struct FlatWriteBackOperation {
 struct LoadBackOperation {
     cache_op_id op_id{0};
     std::vector<TransferPair> transfers;  // HOST→DEVICE by cache kind.
+    std::vector<PagedCacheTransferGroup> paged_cache_transfers;
 
     LoadBackOperation() = default;
     LoadBackOperation(cache_op_id op_id, std::vector<std::tuple<std::int32_t, std::int32_t>> pages_to_transfer)
         : op_id{op_id}, transfers{ToTransferPairs(CacheKind::kKV, pages_to_transfer)} {}
     LoadBackOperation(cache_op_id op_id, std::vector<TransferPair> transfers)
         : op_id{op_id}, transfers{std::move(transfers)} {}
+    LoadBackOperation(cache_op_id op_id, std::vector<TransferPair> transfers,
+                      std::vector<PagedCacheTransferGroup> paged_cache_transfers)
+        : op_id{op_id}, transfers{std::move(transfers)}, paged_cache_transfers{std::move(paged_cache_transfers)} {}
 };
 
 struct FlatLoadBackOperation {
@@ -163,12 +270,18 @@ struct FlatLoadBackOperation {
     // Generic view keyed by CacheKindName(kind), currently "kv" and "mamba".
     std::map<std::string, std::vector<std::vector<std::int32_t>>> src_pages_by_kind;
     std::map<std::string, std::vector<std::vector<std::int32_t>>> dst_pages_by_kind;
+    std::map<std::string, std::vector<std::vector<std::int32_t>>> src_pages_by_paged_group;
+    std::map<std::string, std::vector<std::vector<std::int32_t>>> dst_pages_by_paged_group;
 
     explicit FlatLoadBackOperation(const std::vector<LoadBackOperation>& ops) {
         std::unordered_set<TransferPair, TransferPairHash> seen;
+        std::unordered_set<PagedCacheTransferKey, PagedCacheTransferKeyHash> seen_paged;
         for (const auto& op : ops) {
+            const std::size_t op_index = op_ids.size();
             std::map<std::string, std::vector<std::int32_t>> src_this_op;
             std::map<std::string, std::vector<std::int32_t>> dst_this_op;
+            std::map<std::string, std::vector<std::int32_t>> src_paged_this_op;
+            std::map<std::string, std::vector<std::int32_t>> dst_paged_this_op;
             src_this_op[CacheKindName(CacheKind::kKV)];
             dst_this_op[CacheKindName(CacheKind::kKV)];
             src_this_op[CacheKindName(CacheKind::kMamba)];
@@ -181,6 +294,9 @@ struct FlatLoadBackOperation {
                     dst_this_op[kind_name].push_back(transfer.dst);
                 }
             }
+            AddPagedCacheTransfers(op.paged_cache_transfers, seen_paged, src_paged_this_op, dst_paged_this_op);
+            AppendPagedCacheTransferOp(op_index, std::move(src_paged_this_op), std::move(dst_paged_this_op),
+                                       src_pages_by_paged_group, dst_pages_by_paged_group);
 
             op_ids.push_back(op.op_id);
             src_pages.push_back(src_this_op[CacheKindName(CacheKind::kKV)]);

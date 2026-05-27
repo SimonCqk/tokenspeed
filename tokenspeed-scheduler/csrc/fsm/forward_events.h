@@ -25,6 +25,7 @@
 
 #include <concepts>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -55,6 +56,9 @@ struct SchedulePrefillFirstChunkEvent : InvalidTransitionHandler<SchedulePrefill
                                    ReqPoolAllocator* req_pool_allocator, MatchResult match_result, Role role,
                                    bool disable_l2_cache, std::vector<TreeNode*> loadback_diff,
                                    std::vector<TransferPair> cache_transfer_pairs,
+                                   std::vector<PagedCacheTransferGroup> paged_cache_transfer_groups,
+                                   std::map<std::string, std::vector<TreeNode*>> paged_cache_loadback_nodes_by_group,
+                                   std::vector<PagedCacheSnapshotRef> paged_cache_snapshot_refs,
                                    HybridPrefixCache& hybrid_prefix_cache)
         : tokens_this_round_(tokens_this_round),
           decode_input_tokens_(decode_input_tokens),
@@ -64,6 +68,9 @@ struct SchedulePrefillFirstChunkEvent : InvalidTransitionHandler<SchedulePrefill
           disable_l2_cache_{disable_l2_cache},
           loadback_diff_(std::move(loadback_diff)),
           cache_transfer_pairs_(std::move(cache_transfer_pairs)),
+          paged_cache_transfer_groups_(std::move(paged_cache_transfer_groups)),
+          paged_cache_loadback_nodes_by_group_(std::move(paged_cache_loadback_nodes_by_group)),
+          paged_cache_snapshot_refs_(std::move(paged_cache_snapshot_refs)),
           hybrid_prefix_cache_(hybrid_prefix_cache) {}
 
     // Returns PrefillDone (single-chunk or last chunk) or Prefilling (more chunks remain).
@@ -73,6 +80,13 @@ struct SchedulePrefillFirstChunkEvent : InvalidTransitionHandler<SchedulePrefill
 
     const std::vector<TreeNode*>& GetLoadbackDiff() const { return loadback_diff_; }
     const std::vector<TransferPair>& GetCacheTransferPairs() const { return cache_transfer_pairs_; }
+    const std::vector<PagedCacheTransferGroup>& GetPagedCacheTransferGroups() const {
+        return paged_cache_transfer_groups_;
+    }
+    std::map<std::string, std::vector<TreeNode*>> TakePagedCacheLoadBackNodesByGroup() {
+        return std::move(paged_cache_loadback_nodes_by_group_);
+    }
+    std::vector<PagedCacheSnapshotRef> TakePagedCacheSnapshotRefs() { return std::move(paged_cache_snapshot_refs_); }
 
 private:
     std::int32_t tokens_this_round_{};
@@ -83,6 +97,9 @@ private:
     bool disable_l2_cache_{};
     std::vector<TreeNode*> loadback_diff_;
     std::vector<TransferPair> cache_transfer_pairs_;
+    std::vector<PagedCacheTransferGroup> paged_cache_transfer_groups_;
+    std::map<std::string, std::vector<TreeNode*>> paged_cache_loadback_nodes_by_group_;
+    std::vector<PagedCacheSnapshotRef> paged_cache_snapshot_refs_;
     HybridPrefixCache& hybrid_prefix_cache_;
 };
 
@@ -124,12 +141,18 @@ struct ScheduleDecodeFromRetractedEvent : InvalidTransitionHandler<ScheduleDecod
     ScheduleDecodeFromRetractedEvent(std::int32_t decode_input_tokens, ReqPoolAllocator* req_pool_allocator,
                                      MatchResult match_result, std::vector<TreeNode*> loadback_diff,
                                      std::vector<TransferPair> cache_transfer_pairs,
+                                     std::vector<PagedCacheTransferGroup> paged_cache_transfer_groups,
+                                     std::map<std::string, std::vector<TreeNode*>> paged_cache_loadback_nodes_by_group,
+                                     std::vector<PagedCacheSnapshotRef> paged_cache_snapshot_refs,
                                      HybridPrefixCache& hybrid_prefix_cache)
         : decode_input_tokens_(decode_input_tokens),
           req_pool_allocator_(req_pool_allocator),
           match_result_(std::move(match_result)),
           loadback_diff_(std::move(loadback_diff)),
           cache_transfer_pairs_(std::move(cache_transfer_pairs)),
+          paged_cache_transfer_groups_(std::move(paged_cache_transfer_groups)),
+          paged_cache_loadback_nodes_by_group_(std::move(paged_cache_loadback_nodes_by_group)),
+          paged_cache_snapshot_refs_(std::move(paged_cache_snapshot_refs)),
           hybrid_prefix_cache_(hybrid_prefix_cache) {}
 
     Decoding operator()(Retracted&& state);
@@ -138,6 +161,13 @@ struct ScheduleDecodeFromRetractedEvent : InvalidTransitionHandler<ScheduleDecod
 
     const std::vector<TreeNode*>& GetLoadbackDiff() const { return loadback_diff_; }
     const std::vector<TransferPair>& GetCacheTransferPairs() const { return cache_transfer_pairs_; }
+    const std::vector<PagedCacheTransferGroup>& GetPagedCacheTransferGroups() const {
+        return paged_cache_transfer_groups_;
+    }
+    std::map<std::string, std::vector<TreeNode*>> TakePagedCacheLoadBackNodesByGroup() {
+        return std::move(paged_cache_loadback_nodes_by_group_);
+    }
+    std::vector<PagedCacheSnapshotRef> TakePagedCacheSnapshotRefs() { return std::move(paged_cache_snapshot_refs_); }
 
 private:
     std::int32_t decode_input_tokens_{};
@@ -145,6 +175,9 @@ private:
     MatchResult match_result_{};
     std::vector<TreeNode*> loadback_diff_;
     std::vector<TransferPair> cache_transfer_pairs_;
+    std::vector<PagedCacheTransferGroup> paged_cache_transfer_groups_;
+    std::map<std::string, std::vector<TreeNode*>> paged_cache_loadback_nodes_by_group_;
+    std::vector<PagedCacheSnapshotRef> paged_cache_snapshot_refs_;
     HybridPrefixCache& hybrid_prefix_cache_;
 };
 

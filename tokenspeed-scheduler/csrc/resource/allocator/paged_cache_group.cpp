@@ -41,6 +41,9 @@ void PagedCacheGroupConfig::Validate() const {
     if (total_pages < 1) {
         throw std::invalid_argument("PagedCacheGroupConfig: total_pages must include the dummy page");
     }
+    if (host_total_pages < 0) {
+        throw std::invalid_argument("PagedCacheGroupConfig: host_total_pages must be >= 0");
+    }
     if (retention == Retention::SlidingWindow && (!sliding_window_tokens.has_value() || *sliding_window_tokens <= 0)) {
         throw std::invalid_argument("PagedCacheGroupConfig: sliding_window_tokens must be > 0 for sliding groups");
     }

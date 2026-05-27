@@ -115,6 +115,7 @@ def pool_to_paged_cache_groups(pool: Any) -> list:
     if not specs:
         return []
     counts = pool.paged_cache_group_page_counts
+    host_counts = getattr(pool, "paged_cache_group_host_page_counts", None)
     out = []
     for spec in specs:
         if spec.retention == "full_history":
@@ -141,6 +142,11 @@ def pool_to_paged_cache_groups(pool: Any) -> list:
             rows_per_page=int(spec.rows_per_page),
             entry_stride_tokens=int(spec.entry_stride_tokens),
             total_pages=int(counts[spec.group_id]),
+            host_total_pages=(
+                int(host_counts.get(spec.group_id, 0))
+                if host_counts is not None
+                else int(getattr(spec, "host_total_pages", 0))
+            ),
             retention=retention,
             family=family,
         )
@@ -199,6 +205,7 @@ def cache_event_to_payload(event) -> dict:
         "op_id": int(event.op_id),
         "success": bool(event.success),
         "request_id": getattr(event, "request_id", ""),
+        "completed_pages": int(getattr(event, "completed_pages", 0)),
     }
 
 
@@ -212,6 +219,8 @@ def cache_event_from_payload(payload: dict):
     request_id = payload.get("request_id", "")
     if request_id:
         event.request_id = request_id
+    if hasattr(event, "completed_pages"):
+        event.completed_pages = int(payload.get("completed_pages", 0))
     return event
 
 
@@ -239,6 +248,10 @@ def pop_common_cache_event_payloads(
     for key in sorted(common_keys, key=lambda item: (item[1], item[0])):
         payload = dict(rank_maps[0][key])
         payload["success"] = all(rank_map[key]["success"] for rank_map in rank_maps)
+        if "completed_pages" in payload:
+            payload["completed_pages"] = min(
+                int(rank_map[key].get("completed_pages", 0)) for rank_map in rank_maps
+            )
         ready_payloads.append(payload)
     return ready_payloads
 

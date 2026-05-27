@@ -57,6 +57,15 @@ export default defineConfig({
       {
         text: "Serving",
         items: [{ text: "Parallelism", link: "/serving/parallelism" }]
+      },
+      {
+        text: "Design",
+        items: [
+          {
+            text: "V4 L2 KV Offloading",
+            link: "/design/v4-l2-kv-offload"
+          }
+        ]
       }
     ],
     search: {

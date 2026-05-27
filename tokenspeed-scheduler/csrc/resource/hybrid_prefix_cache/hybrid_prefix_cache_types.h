@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "resource/allocator/owned_pages.h"
+#include "resource/radix_tree/paged_cache_snapshot.h"
 #include "resource/types.h"
 #include "scheduler/operations/cache.h"
 
@@ -54,6 +55,17 @@ struct AdmissionVerdict {
     std::optional<std::int32_t> mamba_branching_seqlen{};
     std::optional<std::int32_t> mamba_cow_src_index{};
     std::vector<TransferPair> cache_transfer_pairs{};
+    std::vector<PagedCacheTransferGroup> paged_cache_writeback_transfers{};
+    std::map<std::string, std::vector<TreeNode*>> paged_cache_writeback_nodes_by_group{};
+};
+
+struct PagedCacheDeviceLoadBackResult {
+    bool ok{true};
+    std::vector<PagedCacheTransferGroup> loadback_transfers{};
+    std::map<std::string, std::vector<TreeNode*>> loadback_nodes_by_group{};
+    std::vector<PagedCacheSnapshotRef> loadback_snapshot_refs{};
+    std::vector<PagedCacheTransferGroup> writeback_transfers{};
+    std::map<std::string, std::vector<TreeNode*>> writeback_nodes_by_group{};
 };
 
 namespace cache {
@@ -350,6 +362,13 @@ struct CacheStatsSnapshot {
     std::map<std::string, std::int32_t> paged_cache_total_pages{};
     std::map<std::string, std::int32_t> paged_cache_available_pages{};
     std::map<std::string, std::int64_t> paged_cache_failed_alloc_count{};
+    std::map<std::string, std::int32_t> paged_cache_host_total_pages{};
+    std::map<std::string, std::int32_t> paged_cache_host_available_pages{};
+    std::map<std::string, std::int64_t> paged_cache_host_failed_alloc_count{};
+    std::map<std::string, std::int64_t> paged_cache_host_writeback_pages_scheduled_total{};
+    std::map<std::string, std::int64_t> paged_cache_device_loadback_pages_scheduled_total{};
+    std::map<std::string, std::int64_t> paged_cache_host_evicted_pages_total{};
+    std::map<std::string, std::int64_t> paged_cache_device_loadback_failed_count{};
     std::map<std::string, std::vector<std::int32_t>> request_paged_cache_page_ids{};
     std::map<std::string, std::int32_t> request_paged_cache_base_logical_page{};
     std::optional<CacheDeviceMemoryDiagnosticsSnapshot> device_memory_diagnostics{};

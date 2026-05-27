@@ -37,6 +37,14 @@ from tokenspeed.runtime.utils import get_colorful_logger, get_device_module
 logger = get_colorful_logger(__name__)
 device_module = get_device_module()
 CONCURRENT_WRITEBACK_BLOCK_QUOTA = 2
+CachePoolKey = CacheKind | str
+
+
+def _cache_pool_key(kind: CacheKind | str) -> CachePoolKey:
+    try:
+        return CacheKind(kind)
+    except ValueError:
+        return str(kind)
 
 
 def _cache_stream_priorities() -> tuple[int | None, int | None]:
@@ -141,7 +149,7 @@ class HostExecutor:
         if not pools:
             raise ValueError("HostExecutor requires at least one cache pool")
 
-        self.pools = {CacheKind(pool.kind): pool for pool in pools}
+        self.pools = {_cache_pool_key(pool.kind): pool for pool in pools}
         self.device = next(iter(self.pools.values())).device
 
         write_priority, load_priority = _cache_stream_priorities()
@@ -149,21 +157,23 @@ class HostExecutor:
         self.load_stream = _new_cache_stream(load_priority)
         self._writeback_block_quota: int | None = None
 
-        self.write_queues: dict[CacheKind, list[TransferUnit]] = {
+        self.write_queues: dict[CachePoolKey, list[TransferUnit]] = {
             kind: [] for kind in self.pools
         }
-        self.load_queues: dict[CacheKind, list[TransferUnit]] = {
+        self.load_queues: dict[CachePoolKey, list[TransferUnit]] = {
             kind: [] for kind in self.pools
         }
 
         self.ack_write_queue: list[_Ack] = []
         self.ack_load_queue: list[_Ack] = []
         self.completed_writebacks: list[int] = []
+        self.completed_loadbacks: list[int] = []
+        self._load_ack_pending_counts: dict[int, int] = {}
 
         self._counters = {
             kind: pool.get_layer_done_counter() for kind, pool in self.pools.items()
         }
-        self._producer_map: dict[CacheKind, OrderedDict[int, int]] = {
+        self._producer_map: dict[CachePoolKey, OrderedDict[int, int]] = {
             kind: OrderedDict() for kind in self.pools
         }
         self._producer_map_limit = 1024
@@ -176,7 +186,7 @@ class HostExecutor:
         is_retract: bool = False,
         kind: CacheKind | str = CacheKind.KV,
     ) -> None:
-        kind = CacheKind(kind)
+        kind = _cache_pool_key(kind)
         pool = self.pools[kind]
         src_pages, dst_pages = _dedupe_page_pairs(src_pages, dst_pages)
         if not src_pages:
@@ -199,7 +209,7 @@ class HostExecutor:
     def enqueue_loadback(
         self, op_id, src_pages, dst_pages, kind: CacheKind | str = CacheKind.KV
     ) -> None:
-        kind = CacheKind(kind)
+        kind = _cache_pool_key(kind)
         pool = self.pools[kind]
         src_pages, dst_pages = _dedupe_page_pairs(src_pages, dst_pages)
         if not src_pages:
@@ -267,9 +277,9 @@ class HostExecutor:
     def _start_loading(self) -> None:
         if not self._has_work(self.load_queues):
             return
-        assert (
-            not get_is_capture_mode()
-        ), "cache loadback must run in eager admission iter"
+        assert not get_is_capture_mode(), (
+            "cache loadback must run in eager admission iter"
+        )
 
         with device_module.stream(self.load_stream):
             for kind, units in self.load_queues.items():
@@ -295,6 +305,10 @@ class HostExecutor:
                 self._record_if_cuda(dst_indices, self.load_stream)
 
                 op_ids = _ordered_unique(unit.op_id for unit in units)
+                for op_id in op_ids:
+                    self._load_ack_pending_counts[op_id] = (
+                        self._load_ack_pending_counts.get(op_id, 0) + 1
+                    )
                 self.ack_load_queue.append(_Ack(producer_event.finish_event, op_ids))
                 producer_map = self._producer_map[kind]
                 for op_id in op_ids:
@@ -305,11 +319,11 @@ class HostExecutor:
         self._clear_queues(self.load_queues)
 
     @staticmethod
-    def _has_work(queues: dict[CacheKind, list[TransferUnit]]) -> bool:
+    def _has_work(queues: dict[CachePoolKey, list[TransferUnit]]) -> bool:
         return any(bool(units) for units in queues.values())
 
     @staticmethod
-    def _clear_queues(queues: dict[CacheKind, list[TransferUnit]]) -> None:
+    def _clear_queues(queues: dict[CachePoolKey, list[TransferUnit]]) -> None:
         for units in queues.values():
             units.clear()
 
@@ -413,12 +427,35 @@ class HostExecutor:
 
     def _poll_load_acks(self) -> list:
         results = []
+        completed_loadbacks = getattr(self, "completed_loadbacks", [])
+        for op_id in completed_loadbacks:
+            logger.debug("[cache_op] loadback done op_id=%s immediate=True", op_id)
+            results.append(self._make_loadback_done_event(op_id))
+        completed_loadbacks.clear()
+
         remaining = []
         for ack in self.ack_load_queue:
-            if not ack.finish_event.query():
+            if ack.finish_event.query():
+                logger.debug("[cache_op] loadback done op_ids=%s", ack.op_ids)
+                for op_id in ack.op_ids:
+                    pending = self._load_ack_pending_counts.get(op_id, 1) - 1
+                    if pending <= 0:
+                        self._load_ack_pending_counts.pop(op_id, None)
+                        results.append(self._make_loadback_done_event(op_id))
+                    else:
+                        self._load_ack_pending_counts[op_id] = pending
+            else:
                 remaining.append(ack)
         self.ack_load_queue[:] = remaining
         return results
+
+    @staticmethod
+    def _make_loadback_done_event(op_id: int):
+        evt = Cache.PrefetchDoneEvent()
+        evt.op_id = int(op_id)
+        evt.success = True
+        evt.completed_pages = 0
+        return evt
 
     def get_producer_index(
         self, kind_or_op_id: CacheKind | str | int, op_id: int | None = None
@@ -427,7 +464,7 @@ class HostExecutor:
             kind = CacheKind.KV
             op_id = int(kind_or_op_id)
         else:
-            kind = CacheKind(kind_or_op_id)
+            kind = _cache_pool_key(kind_or_op_id)
         return self._producer_map[kind].pop(int(op_id), None)
 
     def set_consumer(
@@ -439,7 +476,7 @@ class HostExecutor:
             kind = CacheKind.KV
             producer_index = kind_or_producer_index
         else:
-            kind = CacheKind(kind_or_producer_index)
+            kind = _cache_pool_key(kind_or_producer_index)
         self._counters[kind].set_consumer(producer_index)
 
     def shutdown(self) -> None:
@@ -457,6 +494,9 @@ class HostExecutor:
         self._clear_queues(self.load_queues)
         self.ack_write_queue.clear()
         self.ack_load_queue.clear()
+        self.completed_writebacks.clear()
+        self.completed_loadbacks.clear()
+        self._load_ack_pending_counts.clear()
         for producer_map in self._producer_map.values():
             producer_map.clear()
         for counter in self._counters.values():

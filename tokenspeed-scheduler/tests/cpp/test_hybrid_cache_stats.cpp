@@ -41,12 +41,14 @@ constexpr std::int32_t kMambaChunkSize = 8;
 
 PagedCacheGroupConfig MakePagedGroup(std::string group_id, PagedCacheGroupFamily family,
                                      PagedCacheGroupConfig::Retention retention,
-                                     std::optional<std::int32_t> sliding_window_tokens = std::nullopt) {
+                                     std::optional<std::int32_t> sliding_window_tokens = std::nullopt,
+                                     std::int32_t host_total_pages = 0) {
     return PagedCacheGroupConfig{
         .group_id = std::move(group_id),
         .rows_per_page = 4,
         .entry_stride_tokens = 2,
         .total_pages = 16,
+        .host_total_pages = host_total_pages,
         .retention = retention,
         .sliding_window_tokens = sliding_window_tokens,
         .family = family,
@@ -61,7 +63,8 @@ TEST(HybridPrefixCacheStatsTest, PagedGroupsReportPublicStatsAndMissingRequestSt
     KVPrefixCache prefix_cache{&device_allocator, &host_allocator};
     HybridPrefixCache hybrid_prefix_cache{prefix_cache, device_allocator, /*allocator=*/nullptr, kMambaChunkSize};
     const std::vector<PagedCacheGroupConfig> groups = {
-        MakePagedGroup("v4.history", PagedCacheGroupFamily::History, PagedCacheGroupConfig::Retention::FullHistory),
+        MakePagedGroup("v4.history", PagedCacheGroupFamily::History, PagedCacheGroupConfig::Retention::FullHistory,
+                       std::nullopt, /*host_total_pages=*/7),
         MakePagedGroup("v4.swa", PagedCacheGroupFamily::State, PagedCacheGroupConfig::Retention::SlidingWindow,
                        /*sliding_window_tokens=*/16),
     };
@@ -77,8 +80,25 @@ TEST(HybridPrefixCacheStatsTest, PagedGroupsReportPublicStatsAndMissingRequestSt
     EXPECT_EQ(history_stats.paged_cache_total_pages.at("v4.history"), 16);
     EXPECT_EQ(history_stats.paged_cache_available_pages.at("v4.history"), 15);
     EXPECT_EQ(history_stats.paged_cache_failed_alloc_count.at("v4.history"), 0);
+    EXPECT_EQ(history_stats.paged_cache_host_total_pages.at("v4.history"), 7);
+    EXPECT_EQ(history_stats.paged_cache_host_available_pages.at("v4.history"), 6);
+    EXPECT_EQ(history_stats.paged_cache_host_failed_alloc_count.at("v4.history"), 0);
+    EXPECT_EQ(history_stats.paged_cache_host_writeback_pages_scheduled_total.at("v4.history"), 0);
+    EXPECT_EQ(history_stats.paged_cache_device_loadback_pages_scheduled_total.at("v4.history"), 0);
+    EXPECT_EQ(history_stats.paged_cache_host_evicted_pages_total.at("v4.history"), 0);
+    EXPECT_EQ(history_stats.paged_cache_device_loadback_failed_count.at("v4.history"), 0);
     EXPECT_TRUE(history_stats.request_paged_cache_page_ids.at("v4.history").empty());
     EXPECT_EQ(history_stats.request_paged_cache_base_logical_page.at("v4.history"), 0);
+
+    const CacheStatsSnapshot state_stats =
+        hybrid_prefix_cache.Stats({.request_id = "missing", .paged_cache_group_ids = {"v4.swa"}});
+    EXPECT_EQ(state_stats.paged_cache_host_total_pages.at("v4.swa"), 0);
+    EXPECT_EQ(state_stats.paged_cache_host_available_pages.at("v4.swa"), 0);
+    EXPECT_EQ(state_stats.paged_cache_host_failed_alloc_count.at("v4.swa"), 0);
+    EXPECT_EQ(state_stats.paged_cache_host_writeback_pages_scheduled_total.at("v4.swa"), 0);
+    EXPECT_EQ(state_stats.paged_cache_device_loadback_pages_scheduled_total.at("v4.swa"), 0);
+    EXPECT_EQ(state_stats.paged_cache_host_evicted_pages_total.at("v4.swa"), 0);
+    EXPECT_EQ(state_stats.paged_cache_device_loadback_failed_count.at("v4.swa"), 0);
 
     EXPECT_THROW((void)hybrid_prefix_cache.Stats({.paged_cache_group_ids = {"missing"}}), std::out_of_range);
 }

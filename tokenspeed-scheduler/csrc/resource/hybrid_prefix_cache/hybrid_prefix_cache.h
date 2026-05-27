@@ -137,6 +137,14 @@ public:
     void OnKVDeviceDemote(TreeNode* node);
     void OnMambaHostWriteBackDone(TreeNode* last_node);
     void OnMambaHostWriteBackDone(const std::vector<TreeNode*>& nodes);
+    void OnPagedCacheHostWriteBackDone(const std::map<std::string, std::vector<TreeNode*>>& nodes_by_group,
+                                       bool success);
+    void OnPagedCacheDeviceLoadBackDone(const std::map<std::string, std::vector<TreeNode*>>& nodes_by_group,
+                                        bool success);
+    [[nodiscard]] PagedCacheDeviceLoadBackResult PreparePagedCacheDeviceLoadBack(
+        MatchResult& match_result, std::map<std::string, std::int32_t>& simulated_free);
+    void CancelPagedCacheDeviceLoadBack(const std::map<std::string, std::vector<TreeNode*>>& nodes_by_group,
+                                        std::map<std::string, std::int32_t>& simulated_free);
     void DemoteIdleMambaDeviceCopiesPresentOnHost();
 
 private:
@@ -169,6 +177,7 @@ private:
 
     // Takes ownership. Duplicate group_id throws std::invalid_argument.
     void RegisterPagedCacheGroup(std::unique_ptr<PagedCacheGroupAllocator> allocator);
+    void RegisterPagedCacheHostGroup(std::unique_ptr<PagedCacheGroupAllocator> allocator);
 
     // History alignment is the LCM of RawTokensPerPage() over the History-family
     // groups; state groups only need the trailing window. Sliding groups must
@@ -219,6 +228,18 @@ private:
         std::map<std::string, std::int32_t> owned_release_credit{};
     };
 
+    struct PagedCacheHostWriteBackPlan {
+        bool ok{false};
+        std::int32_t device_pages_covered{0};
+        std::vector<TreeNode*> nodes{};
+        std::vector<PagedCacheTransferGroup> transfers{};
+    };
+
+    struct PagedCacheAdmissionOutcome {
+        bool admitted{false};
+        std::vector<PagedCacheHostWriteBackPlan> writeback_plans{};
+    };
+
     // Classify which family caused `admission.ok == false`.
     AdmissionFailureKind ClassifyAdmissionFailure(const PagedCacheGroupAdmission& admission) const;
 
@@ -256,9 +277,24 @@ private:
     // null (defensive no-op). Accepts partial snapshots; the per-policy
     // "snapshot must be full" invariant is enforced upstream by CommitChunk.
     bool AttachPagedCacheSnapshotToNode(TreeNode* node, std::unique_ptr<PagedCacheSnapshot> snapshot);
+    void RefreshPagedCacheSnapshotCompleteness(PagedCacheSnapshot& snapshot) const;
 
     // Drops `node` from the membership set, then detaches and returns the snapshot.
     std::unique_ptr<PagedCacheSnapshot> DetachPagedCacheSnapshotFromNode(TreeNode* node);
+
+    PagedCacheHostWriteBackPlan PreparePagedCacheHostWriteBack(
+        const std::string& group_id, std::int32_t required_device_pages,
+        const std::unordered_set<TreeNode*>& protected_nodes = {});
+    bool OnPagedCacheHostWriteBackDone(TreeNode* node, const std::string& group_id);
+    bool CancelPagedCacheHostWriteBack(TreeNode* node, const std::string& group_id);
+    bool HasPendingPagedCacheHostWriteBack(TreeNode* node) const;
+    std::int32_t DemotePagedCacheDeviceCopiesPresentOnHost(const std::string& group_id,
+                                                           std::int32_t required_device_pages,
+                                                           const std::unordered_set<TreeNode*>& protected_nodes = {});
+    std::int32_t EvictPagedCacheHostPagesForGroup(const std::string& group_id, std::int32_t required_host_pages,
+                                                  const std::unordered_set<TreeNode*>& protected_nodes = {});
+    static void MovePagedCacheWriteBackPlans(AdmissionVerdict& verdict,
+                                             std::vector<PagedCacheHostWriteBackPlan>&& writeback_plans);
 
     void augmentMatch(MatchResult& match) const;
     void augmentMatchPagedCache(MatchResult& match) const;
@@ -268,11 +304,12 @@ private:
     // used only on kStateStarved; history/both go to full cascade.
     bool tryPrunePagedCacheSnapshot(AdmissionFailureKind kind);
 
-    bool admitPagedCacheChunk(const std::string& request_id, std::int32_t first_raw_position_of_op,
-                              std::int32_t target_raw_tokens_exclusive,
-                              std::map<std::string, std::int32_t>& simulated_free,
-                              const MatchResult::PagedCache& paged_cache_hit,
-                              const PagedCacheAdmissionContext& context);
+    PagedCacheAdmissionOutcome admitPagedCacheChunk(const std::string& request_id,
+                                                    std::int32_t first_raw_position_of_op,
+                                                    std::int32_t target_raw_tokens_exclusive,
+                                                    std::map<std::string, std::int32_t>& simulated_free,
+                                                    const MatchResult::PagedCache& paged_cache_hit,
+                                                    const PagedCacheAdmissionContext& context);
     void acquireAndPopulateOp(ForwardOperationBase& op_base, std::int32_t first_raw_position_of_op,
                               std::int32_t target_raw_tokens_exclusive, const MatchResult::PagedCache& paged_cache_hit);
 
@@ -302,6 +339,12 @@ private:
 
     // `paged_cache_history_alignment_tokens_ == 0` means adjunct disabled; tables still work.
     std::map<std::string, std::unique_ptr<PagedCacheGroupAllocator>> paged_cache_allocators_;
+    std::map<std::string, std::unique_ptr<PagedCacheGroupAllocator>> paged_cache_host_allocators_;
+    std::map<std::pair<TreeNode*, std::string>, OwnedPages> pending_paged_cache_host_writebacks_;
+    std::map<std::string, std::int64_t> paged_cache_host_writeback_pages_scheduled_total_;
+    std::map<std::string, std::int64_t> paged_cache_device_loadback_pages_scheduled_total_;
+    std::map<std::string, std::int64_t> paged_cache_host_evicted_pages_total_;
+    std::map<std::string, std::int64_t> paged_cache_device_loadback_failed_count_;
     std::unordered_map<std::string, std::map<std::string, PagedCacheGroupTable>> request_paged_cache_tables_;
     std::int32_t paged_cache_history_alignment_tokens_{0};
     std::vector<std::string> paged_cache_required_groups_;

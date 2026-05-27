@@ -113,6 +113,18 @@ protected:
         scheduler_->Advance(std::move(event));
     }
 
+    void SendPrefetchDone(cache_op_id op_id, bool success = true, const std::string& request_id = "",
+                          std::int32_t completed_pages = 0) {
+        ExecutionEvent event;
+        event.With(CacheEvent{cache::PrefetchDone{
+            .success = success,
+            .op_id = op_id,
+            .request_id = request_id,
+            .completed_pages = completed_pages,
+        }});
+        scheduler_->Advance(std::move(event));
+    }
+
     // Send ExtendResult (new decode tokens) to the scheduler.
     void SendForwardDone(const std::string& request_id, const std::vector<std::int32_t>& tokens) {
         ExecutionEvent event;
@@ -128,6 +140,14 @@ protected:
     void SendFinish(const std::string& request_id) {
         ExecutionEvent event;
         event.With(ForwardEvent{forward::Finish{
+            .request_id = request_id,
+        }});
+        scheduler_->Advance(std::move(event));
+    }
+
+    void SendAbort(const std::string& request_id) {
+        ExecutionEvent event;
+        event.With(ForwardEvent{forward::Abort{
             .request_id = request_id,
         }});
         scheduler_->Advance(std::move(event));

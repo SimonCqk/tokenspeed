@@ -297,6 +297,40 @@ std::int64_t Scheduler::PagedCacheGroupFailedAllocCount(const std::string& group
         .paged_cache_failed_alloc_count.at(group_id);
 }
 
+std::int32_t Scheduler::PagedCacheGroupHostTotalPages(const std::string& group_id) const {
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}}).paged_cache_host_total_pages.at(group_id);
+}
+
+std::int32_t Scheduler::PagedCacheGroupHostAvailablePages(const std::string& group_id) const {
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}})
+        .paged_cache_host_available_pages.at(group_id);
+}
+
+std::int64_t Scheduler::PagedCacheGroupHostFailedAllocCount(const std::string& group_id) const {
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}})
+        .paged_cache_host_failed_alloc_count.at(group_id);
+}
+
+std::int64_t Scheduler::PagedCacheGroupHostWriteBackPagesScheduledTotal(const std::string& group_id) const {
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}})
+        .paged_cache_host_writeback_pages_scheduled_total.at(group_id);
+}
+
+std::int64_t Scheduler::PagedCacheGroupDeviceLoadBackPagesScheduledTotal(const std::string& group_id) const {
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}})
+        .paged_cache_device_loadback_pages_scheduled_total.at(group_id);
+}
+
+std::int64_t Scheduler::PagedCacheGroupHostEvictedPagesTotal(const std::string& group_id) const {
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}})
+        .paged_cache_host_evicted_pages_total.at(group_id);
+}
+
+std::int64_t Scheduler::PagedCacheGroupDeviceLoadBackFailedCount(const std::string& group_id) const {
+    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}})
+        .paged_cache_device_loadback_failed_count.at(group_id);
+}
+
 std::vector<std::int32_t> Scheduler::GetRequestPagedCachePageIds(const std::string& request_id,
                                                                  const std::string& group_id) const {
     return hybrid_prefix_cache_.Stats({.request_id = request_id, .paged_cache_group_ids = {group_id}})
@@ -364,21 +398,16 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
         }
     }
 
-    auto [fwd_ops, cache_ops] = newForwardOperation(candidates);
-    plan.With(FlatForwardOperation{std::move(fwd_ops)});
+    ForwardScheduleResult scheduled = newForwardOperation(candidates);
+    plan.With(FlatForwardOperation{std::move(scheduled.forward_ops)});
 
-    // Merge retract write-backs (if any) into the Draining write-back list, then emit once.
-    if (auto* wb = std::get_if<std::vector<WriteBackOperation>>(&cache_ops)) {
-        write_back_ops.insert(write_back_ops.end(), std::make_move_iterator(wb->begin()),
-                              std::make_move_iterator(wb->end()));
-    }
+    write_back_ops.insert(write_back_ops.end(), std::make_move_iterator(scheduled.writeback_ops.begin()),
+                          std::make_move_iterator(scheduled.writeback_ops.end()));
     if (!write_back_ops.empty()) {
         plan.With(CacheOperation{FlatWriteBackOperation{write_back_ops}});
     }
-    if (auto* lb = std::get_if<std::vector<LoadBackOperation>>(&cache_ops)) {
-        if (!lb->empty()) {
-            plan.With(CacheOperation{FlatLoadBackOperation{*lb}});
-        }
+    if (!scheduled.loadback_ops.empty()) {
+        plan.With(CacheOperation{FlatLoadBackOperation{scheduled.loadback_ops}});
     }
     if (std::getenv("DEBUG_MEM")) {
         check_device_mem();

@@ -263,12 +263,10 @@ class EventLoop:
         is_deepseek_v4_pool = (
             type(token_to_kv_pool).__name__ == "DeepseekV4TokenToKVPool"
         )
-        if is_deepseek_v4_pool:
-            if server_args.enable_kvstore:
-                raise NotImplementedError(
-                    "DeepSeek V4 baseline does not support hierarchical cache "
-                    "(kvstore); pass --disable-kvstore."
-                )
+        v4_kvstore_disabled = is_deepseek_v4_pool and (
+            not server_args.enable_kvstore or server_args.kvstore_ratio <= 0
+        )
+        if v4_kvstore_disabled:
             self.memory_executor = None
             num_host_pages = 0
         else:
@@ -280,7 +278,9 @@ class EventLoop:
                 draft_device_pool=draft_token_to_kv_pool,
                 mamba_pool=mamba_pool,
             )
-            num_host_pages = self.memory_executor.host_pool.page_num
+            num_host_pages = (
+                0 if is_deepseek_v4_pool else self.memory_executor.host_pool.page_num
+            )
 
         # For DP attention, max_batch_size must be per-rank to avoid
         # req_pool_allocator overflow.  The C++ scheduler allocates
@@ -312,8 +312,11 @@ class EventLoop:
             max_batch_size=per_rank_max_batch,
             page_size=server_args.block_size,
             num_host_pages=num_host_pages,
-            disable_l2_cache=not server_args.enable_kvstore,
-            enable_l3_storage=server_args.kvstore_storage_backend is not None,
+            disable_l2_cache=(not server_args.enable_kvstore) or is_deepseek_v4_pool,
+            enable_l3_storage=(
+                server_args.kvstore_storage_backend is not None
+                and not is_deepseek_v4_pool
+            ),
             prefetch_threshold=4,  # Keep this hard-coded until it becomes configurable.
             role=server_args.disaggregation_mode,
             enable_kv_cache_events=self._kv_events_enabled,

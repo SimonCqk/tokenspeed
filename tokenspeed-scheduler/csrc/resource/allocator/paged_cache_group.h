@@ -56,12 +56,15 @@ struct PagedCacheGroupConfig {
     std::int32_t rows_per_page{};
     std::int32_t entry_stride_tokens{};
     std::int32_t total_pages{};
+    // L2 host page budget for this group. Zero means host offload is disabled.
+    std::int32_t host_total_pages{};
     Retention retention{Retention::FullHistory};
     std::optional<std::int32_t> sliding_window_tokens{};
     // History groups form a chain; State groups only need the trailing window.
     PagedCacheGroupFamily family{PagedCacheGroupFamily::History};
 
     std::int32_t RawTokensPerPage() const { return rows_per_page * entry_stride_tokens; }
+    bool HasHostPages() const { return host_total_pages > 0; }
 
     void Validate() const;
 };
@@ -89,12 +92,12 @@ public:
     std::int64_t ReleasedPagesTotal() const { return released_pages_total_; }
     std::int64_t FailedAllocCount() const { return failed_alloc_count_; }
 
+    OwnedPages AcquireOwned(std::int32_t num_pages);
+
 private:
     friend class PagedCacheGroupTable;
 
     // Empty OwnedPages on insufficient capacity (bumps failed_alloc_count_).
-    OwnedPages AcquireOwned(std::int32_t num_pages);
-
     PagedCacheGroupConfig config_;
     PageAllocator pool_;
     std::int64_t allocated_pages_total_{0};

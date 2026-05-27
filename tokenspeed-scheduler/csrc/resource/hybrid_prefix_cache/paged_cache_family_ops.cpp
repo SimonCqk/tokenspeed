@@ -53,7 +53,87 @@ std::vector<TreeNode*> CollectAncestorPathRootToLeaf(TreeNode* from) {
     return path;
 }
 
+bool IsPagedCacheNodePinned(TreeNode* node) {
+    for (TreeNode* cur = node; cur != nullptr && !cur->IsRoot(); cur = cur->Parent()) {
+        const PagedCacheSnapshot* snapshot = cur->GetPagedCacheSnapshot();
+        if (snapshot != nullptr && snapshot->IsPinned()) return true;
+        if (!cur->OnDevice()) continue;
+        if (cur->Device().RefCount() > 0) return true;
+    }
+    return false;
+}
+
+std::vector<TreeNode*> OrderedPagedCacheSnapshotCandidates(const std::unordered_set<TreeNode*>& snapshot_nodes) {
+    std::vector<TreeNode*> candidates;
+    candidates.reserve(snapshot_nodes.size());
+    for (TreeNode* node : snapshot_nodes) {
+        if (node == nullptr) continue;
+        if (!node->HasPagedCacheSnapshot()) continue;
+        candidates.push_back(node);
+    }
+    std::sort(candidates.begin(), candidates.end(), [](TreeNode* a, TreeNode* b) {
+        if (a->Time() != b->Time()) return a->Time() < b->Time();
+        if (a->DepthInTokens() != b->DepthInTokens()) return a->DepthInTokens() > b->DepthInTokens();
+        return a->SeqId() < b->SeqId();
+    });
+    return candidates;
+}
+
+bool IsPagedCacheSnapshotCompleteForTier(const PagedCacheSnapshot& snapshot, PagedCacheGroupFamily family,
+                                         bool host_tier) {
+    return host_tier ? snapshot.IsCompleteOnHostFor(family) : snapshot.IsCompleteFor(family);
+}
+
+const std::vector<std::int32_t>& PagedCacheGroupPageIdsForTier(const PagedCacheGroupSnapshot& group, bool host_tier) {
+    return host_tier ? group.HostPageIds() : group.DevicePageIds();
+}
+
 }  // namespace
+
+void HybridPrefixCache::RefreshPagedCacheSnapshotCompleteness(PagedCacheSnapshot& snapshot) const {
+    snapshot.complete_families.clear();
+    snapshot.host_complete_families.clear();
+    bool history_complete = !paged_cache_history_groups_.empty();
+    bool history_host_complete = !paged_cache_history_groups_.empty();
+    for (const auto& gid : paged_cache_history_groups_) {
+        auto it = snapshot.groups.find(gid);
+        if (it == snapshot.groups.end() || !it->second.HasDevice()) {
+            history_complete = false;
+        }
+        if (it == snapshot.groups.end() || !it->second.HasHost()) {
+            history_host_complete = false;
+        }
+        if (!history_complete && !history_host_complete) {
+            break;
+        }
+    }
+    if (history_complete) {
+        snapshot.complete_families.insert(PagedCacheGroupFamily::History);
+    }
+    if (history_host_complete) {
+        snapshot.host_complete_families.insert(PagedCacheGroupFamily::History);
+    }
+    bool state_complete = !paged_cache_state_groups_.empty();
+    bool state_host_complete = !paged_cache_state_groups_.empty();
+    for (const auto& gid : paged_cache_state_groups_) {
+        auto it = snapshot.groups.find(gid);
+        if (it == snapshot.groups.end() || !it->second.HasDevice()) {
+            state_complete = false;
+        }
+        if (it == snapshot.groups.end() || !it->second.HasHost()) {
+            state_host_complete = false;
+        }
+        if (!state_complete && !state_host_complete) {
+            break;
+        }
+    }
+    if (state_complete) {
+        snapshot.complete_families.insert(PagedCacheGroupFamily::State);
+    }
+    if (state_host_complete) {
+        snapshot.host_complete_families.insert(PagedCacheGroupFamily::State);
+    }
+}
 
 bool HybridPrefixCache::AttachPagedCacheSnapshotToNode(TreeNode* node, std::unique_ptr<PagedCacheSnapshot> snapshot) {
     if (node == nullptr || snapshot == nullptr) return false;
@@ -61,27 +141,7 @@ bool HybridPrefixCache::AttachPagedCacheSnapshotToNode(TreeNode* node, std::uniq
     // must be full" invariant is enforced upstream by CommitChunk, which only
     // attaches full snapshots; direct test hooks may attach history-only or
     // state-only snapshots without policy gating.
-    snapshot->complete_families.clear();
-    bool history_complete = !paged_cache_history_groups_.empty();
-    for (const auto& gid : paged_cache_history_groups_) {
-        if (snapshot->groups.find(gid) == snapshot->groups.end()) {
-            history_complete = false;
-            break;
-        }
-    }
-    if (history_complete) {
-        snapshot->complete_families.insert(PagedCacheGroupFamily::History);
-    }
-    bool state_complete = !paged_cache_state_groups_.empty();
-    for (const auto& gid : paged_cache_state_groups_) {
-        if (snapshot->groups.find(gid) == snapshot->groups.end()) {
-            state_complete = false;
-            break;
-        }
-    }
-    if (state_complete) {
-        snapshot->complete_families.insert(PagedCacheGroupFamily::State);
-    }
+    RefreshPagedCacheSnapshotCompleteness(*snapshot);
     node->AttachPagedCacheSnapshot(std::move(snapshot));
     paged_cache_snapshot_nodes_.insert(node);
     return true;
@@ -91,6 +151,408 @@ std::unique_ptr<PagedCacheSnapshot> HybridPrefixCache::DetachPagedCacheSnapshotF
     if (node == nullptr) return nullptr;
     paged_cache_snapshot_nodes_.erase(node);
     return node->DetachPagedCacheSnapshot();
+}
+
+HybridPrefixCache::PagedCacheHostWriteBackPlan HybridPrefixCache::PreparePagedCacheHostWriteBack(
+    const std::string& group_id, std::int32_t required_device_pages,
+    const std::unordered_set<TreeNode*>& protected_nodes) {
+    PagedCacheHostWriteBackPlan plan{};
+    if (required_device_pages <= 0) {
+        plan.ok = true;
+        return plan;
+    }
+    auto host_alloc_it = paged_cache_host_allocators_.find(group_id);
+    if (host_alloc_it == paged_cache_host_allocators_.end() || host_alloc_it->second == nullptr) {
+        return plan;
+    }
+
+    struct Candidate {
+        TreeNode* node{nullptr};
+        PagedCacheGroupSnapshot* group{nullptr};
+    };
+    std::vector<Candidate> candidates;
+    std::int32_t candidate_pages = 0;
+    for (TreeNode* node : OrderedPagedCacheSnapshotCandidates(paged_cache_snapshot_nodes_)) {
+        if (candidate_pages >= required_device_pages) break;
+        if (IsPagedCacheNodePinned(node)) continue;
+        const auto pending_key = std::make_pair(node, group_id);
+        if (pending_paged_cache_host_writebacks_.find(pending_key) != pending_paged_cache_host_writebacks_.end()) {
+            continue;
+        }
+        PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
+        if (snapshot == nullptr) continue;
+        auto group_it = snapshot->groups.find(group_id);
+        if (group_it == snapshot->groups.end()) continue;
+        PagedCacheGroupSnapshot& group = group_it->second;
+        if (!group.HasDevice() || group.HasHost()) continue;
+        candidates.push_back(Candidate{.node = node, .group = &group});
+        candidate_pages += group.device_pages.Size();
+    }
+    if (candidate_pages < required_device_pages) {
+        return plan;
+    }
+
+    if (host_alloc_it->second->AvailablePages() < candidate_pages) {
+        EvictPagedCacheHostPagesForGroup(group_id, candidate_pages - host_alloc_it->second->AvailablePages(),
+                                         protected_nodes);
+    }
+    if (host_alloc_it->second->AvailablePages() < candidate_pages) {
+        return plan;
+    }
+
+    struct PendingAllocation {
+        TreeNode* node{nullptr};
+        PagedCacheGroupSnapshot* group{nullptr};
+        OwnedPages host_pages{};
+    };
+    std::vector<PendingAllocation> pending_allocations;
+    pending_allocations.reserve(candidates.size());
+    std::int32_t allocated_pages = 0;
+    for (const Candidate& candidate : candidates) {
+        OwnedPages host_pages = host_alloc_it->second->AcquireOwned(candidate.group->device_pages.Size());
+        if (host_pages.Empty()) {
+            return {};
+        }
+        allocated_pages += host_pages.Size();
+        pending_allocations.push_back(
+            PendingAllocation{.node = candidate.node, .group = candidate.group, .host_pages = std::move(host_pages)});
+        if (allocated_pages >= required_device_pages) break;
+    }
+    if (allocated_pages < required_device_pages) {
+        return {};
+    }
+
+    PagedCacheTransferGroup transfer{.group_id = group_id};
+    for (auto& pending : pending_allocations) {
+        const auto& device_ids = pending.group->DevicePageIds();
+        const auto& host_ids = pending.host_pages.Ids();
+        transfer.src_pages.insert(transfer.src_pages.end(), device_ids.begin(), device_ids.end());
+        transfer.dst_pages.insert(transfer.dst_pages.end(), host_ids.begin(), host_ids.end());
+        plan.device_pages_covered += pending.group->device_pages.Size();
+        plan.nodes.push_back(pending.node);
+        pending_paged_cache_host_writebacks_.emplace(std::make_pair(pending.node, group_id),
+                                                     std::move(pending.host_pages));
+    }
+    plan.transfers.push_back(std::move(transfer));
+    plan.ok = plan.device_pages_covered >= required_device_pages;
+    if (plan.ok) {
+        paged_cache_host_writeback_pages_scheduled_total_[group_id] += plan.device_pages_covered;
+    }
+    return plan;
+}
+
+std::int32_t HybridPrefixCache::EvictPagedCacheHostPagesForGroup(const std::string& group_id,
+                                                                 std::int32_t required_host_pages,
+                                                                 const std::unordered_set<TreeNode*>& protected_nodes) {
+    if (required_host_pages <= 0) return 0;
+    std::int32_t released = 0;
+    for (TreeNode* node : OrderedPagedCacheSnapshotCandidates(paged_cache_snapshot_nodes_)) {
+        if (released >= required_host_pages) break;
+        if (protected_nodes.find(node) != protected_nodes.end()) continue;
+        if (IsPagedCacheNodePinned(node)) continue;
+        if (HasPendingPagedCacheHostWriteBack(node)) continue;
+        PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
+        if (snapshot == nullptr) continue;
+        auto group_it = snapshot->groups.find(group_id);
+        if (group_it == snapshot->groups.end()) continue;
+        PagedCacheGroupSnapshot& group = group_it->second;
+        if (!group.HasHost()) continue;
+        released += group.host_pages.Size();
+        group.host_pages = {};
+        if (!group.HasDevice()) {
+            snapshot->groups.erase(group_it);
+        }
+        if (snapshot->groups.empty()) {
+            auto detached = DetachPagedCacheSnapshotFromNode(node);
+            (void)detached;
+        } else {
+            RefreshPagedCacheSnapshotCompleteness(*snapshot);
+        }
+    }
+    if (released > 0) {
+        paged_cache_host_evicted_pages_total_[group_id] += released;
+    }
+    return released;
+}
+
+bool HybridPrefixCache::OnPagedCacheHostWriteBackDone(TreeNode* node, const std::string& group_id) {
+    if (node == nullptr) return false;
+    auto pending_it = pending_paged_cache_host_writebacks_.find(std::make_pair(node, group_id));
+    if (pending_it == pending_paged_cache_host_writebacks_.end()) return false;
+
+    PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
+    if (snapshot == nullptr) {
+        pending_paged_cache_host_writebacks_.erase(pending_it);
+        return false;
+    }
+    auto group_it = snapshot->groups.find(group_id);
+    if (group_it == snapshot->groups.end()) {
+        pending_paged_cache_host_writebacks_.erase(pending_it);
+        RefreshPagedCacheSnapshotCompleteness(*snapshot);
+        return false;
+    }
+
+    PagedCacheGroupSnapshot& group = group_it->second;
+    group.host_pages = std::move(pending_it->second);
+    pending_paged_cache_host_writebacks_.erase(pending_it);
+    if (!IsPagedCacheNodePinned(node)) {
+        group.device_pages = {};
+    }
+    RefreshPagedCacheSnapshotCompleteness(*snapshot);
+    return true;
+}
+
+bool HybridPrefixCache::CancelPagedCacheHostWriteBack(TreeNode* node, const std::string& group_id) {
+    if (node == nullptr) return false;
+    auto pending_it = pending_paged_cache_host_writebacks_.find(std::make_pair(node, group_id));
+    if (pending_it == pending_paged_cache_host_writebacks_.end()) return false;
+    pending_paged_cache_host_writebacks_.erase(pending_it);
+    return true;
+}
+
+bool HybridPrefixCache::HasPendingPagedCacheHostWriteBack(TreeNode* node) const {
+    if (node == nullptr) return false;
+    for (const auto& [key, _] : pending_paged_cache_host_writebacks_) {
+        if (key.first == node) return true;
+    }
+    return false;
+}
+
+std::int32_t HybridPrefixCache::DemotePagedCacheDeviceCopiesPresentOnHost(
+    const std::string& group_id, std::int32_t required_device_pages,
+    const std::unordered_set<TreeNode*>& protected_nodes) {
+    if (required_device_pages <= 0) return 0;
+    std::int32_t released = 0;
+    for (TreeNode* node : OrderedPagedCacheSnapshotCandidates(paged_cache_snapshot_nodes_)) {
+        if (released >= required_device_pages) break;
+        if (protected_nodes.find(node) != protected_nodes.end()) continue;
+        if (IsPagedCacheNodePinned(node)) continue;
+        if (HasPendingPagedCacheHostWriteBack(node)) continue;
+        PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
+        if (snapshot == nullptr) continue;
+        auto group_it = snapshot->groups.find(group_id);
+        if (group_it == snapshot->groups.end()) continue;
+        PagedCacheGroupSnapshot& group = group_it->second;
+        if (!group.HasDevice() || !group.HasHost()) continue;
+        released += group.device_pages.Size();
+        group.device_pages = {};
+        RefreshPagedCacheSnapshotCompleteness(*snapshot);
+    }
+    return released;
+}
+
+PagedCacheDeviceLoadBackResult HybridPrefixCache::PreparePagedCacheDeviceLoadBack(
+    MatchResult& match_result, std::map<std::string, std::int32_t>& simulated_free) {
+    PagedCacheDeviceLoadBackResult result{};
+    auto fail_loadback = [this, &result](const std::string& group_id) {
+        result.ok = false;
+        ++paged_cache_device_loadback_failed_count_[group_id];
+    };
+    const auto& host_hit = match_result.paged_cache_host;
+    if (host_hit.last_node == nullptr || host_hit.prefix_len_tokens <= 0) {
+        return result;
+    }
+    if (match_result.paged_cache.last_node != nullptr &&
+        match_result.paged_cache.prefix_len_tokens >= host_hit.prefix_len_tokens) {
+        return result;
+    }
+
+    struct MissingDeviceCopy {
+        std::string group_id;
+        TreeNode* node{nullptr};
+        PagedCacheGroupSnapshot* group{nullptr};
+    };
+
+    std::vector<MissingDeviceCopy> missing;
+    std::unordered_set<TreeNode*> protected_loadback_nodes;
+    std::map<std::string, std::int32_t> pages_needed_by_group;
+    for (const auto& [group_id, nodes] : host_hit.per_group_nodes) {
+        for (TreeNode* node : nodes) {
+            if (node == nullptr) {
+                fail_loadback(group_id);
+                return result;
+            }
+            PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
+            if (snapshot == nullptr) {
+                fail_loadback(group_id);
+                return result;
+            }
+            auto group_it = snapshot->groups.find(group_id);
+            if (group_it == snapshot->groups.end() || !group_it->second.HasHost()) {
+                fail_loadback(group_id);
+                return result;
+            }
+            protected_loadback_nodes.insert(node);
+            PagedCacheGroupSnapshot& group = group_it->second;
+            if (group.HasDevice()) continue;
+            missing.push_back(MissingDeviceCopy{.group_id = group_id, .node = node, .group = &group});
+            pages_needed_by_group[group_id] += group.host_pages.Size();
+        }
+    }
+    if (missing.empty()) {
+        match_result.paged_cache = host_hit;
+        return result;
+    }
+
+    for (const auto& [group_id, pages_needed] : pages_needed_by_group) {
+        auto alloc_it = paged_cache_allocators_.find(group_id);
+        if (alloc_it == paged_cache_allocators_.end() || alloc_it->second == nullptr) {
+            fail_loadback(group_id);
+            return result;
+        }
+        std::int32_t free_pages = alloc_it->second->AvailablePages();
+        auto sim_it = simulated_free.find(group_id);
+        if (sim_it != simulated_free.end()) {
+            free_pages = sim_it->second;
+        }
+        if (free_pages < pages_needed) {
+            const std::int32_t released = DemotePagedCacheDeviceCopiesPresentOnHost(group_id, pages_needed - free_pages,
+                                                                                    protected_loadback_nodes);
+            if (released > 0) {
+                simulated_free[group_id] += released;
+                free_pages += released;
+            }
+        }
+        if (free_pages < pages_needed) {
+            PagedCacheHostWriteBackPlan plan =
+                PreparePagedCacheHostWriteBack(group_id, pages_needed - free_pages, protected_loadback_nodes);
+            result.ok = false;
+            if (plan.ok && !plan.transfers.empty()) {
+                for (auto& transfer : plan.transfers) {
+                    auto& nodes = result.writeback_nodes_by_group[transfer.group_id];
+                    nodes.insert(nodes.end(), plan.nodes.begin(), plan.nodes.end());
+                    result.writeback_transfers.push_back(std::move(transfer));
+                }
+            } else {
+                ++paged_cache_device_loadback_failed_count_[group_id];
+            }
+            return result;
+        }
+    }
+
+    struct PendingDeviceAllocation {
+        std::string group_id;
+        TreeNode* node{nullptr};
+        PagedCacheGroupSnapshot* group{nullptr};
+        OwnedPages device_pages{};
+    };
+    std::vector<PendingDeviceAllocation> pending;
+    pending.reserve(missing.size());
+    std::map<std::string, std::int32_t> allocated_pages_by_group;
+    for (const MissingDeviceCopy& entry : missing) {
+        auto alloc_it = paged_cache_allocators_.find(entry.group_id);
+        OwnedPages device_pages = alloc_it->second->AcquireOwned(entry.group->host_pages.Size());
+        if (device_pages.Empty()) {
+            for (const auto& [group_id, pages] : allocated_pages_by_group) {
+                simulated_free[group_id] += pages;
+            }
+            fail_loadback(entry.group_id);
+            return result;
+        }
+        allocated_pages_by_group[entry.group_id] += device_pages.Size();
+        simulated_free[entry.group_id] -= device_pages.Size();
+        pending.push_back(PendingDeviceAllocation{
+            .group_id = entry.group_id,
+            .node = entry.node,
+            .group = entry.group,
+            .device_pages = std::move(device_pages),
+        });
+    }
+
+    std::map<std::string, PagedCacheTransferGroup> transfers_by_group;
+    for (auto& entry : pending) {
+        auto& transfer = transfers_by_group[entry.group_id];
+        transfer.group_id = entry.group_id;
+        const auto& host_ids = entry.group->HostPageIds();
+        const auto& device_ids = entry.device_pages.Ids();
+        transfer.src_pages.insert(transfer.src_pages.end(), host_ids.begin(), host_ids.end());
+        transfer.dst_pages.insert(transfer.dst_pages.end(), device_ids.begin(), device_ids.end());
+        result.loadback_nodes_by_group[entry.group_id].push_back(entry.node);
+        entry.group->device_pages = std::move(entry.device_pages);
+        if (PagedCacheSnapshot* snapshot = entry.node->GetPagedCacheSnapshotMut()) {
+            RefreshPagedCacheSnapshotCompleteness(*snapshot);
+        }
+    }
+    result.loadback_transfers.reserve(transfers_by_group.size());
+    for (auto& [_, transfer] : transfers_by_group) {
+        paged_cache_device_loadback_pages_scheduled_total_[transfer.group_id] +=
+            static_cast<std::int64_t>(transfer.dst_pages.size());
+        result.loadback_transfers.push_back(std::move(transfer));
+    }
+
+    MatchResult::PagedCache device_hit = host_hit;
+    device_hit.per_group_page_ids.clear();
+    for (const auto& [group_id, nodes] : device_hit.per_group_nodes) {
+        auto& page_ids = device_hit.per_group_page_ids[group_id];
+        for (TreeNode* node : nodes) {
+            const PagedCacheSnapshot* snapshot = node != nullptr ? node->GetPagedCacheSnapshot() : nullptr;
+            if (snapshot == nullptr) {
+                fail_loadback(group_id);
+                return result;
+            }
+            auto group_it = snapshot->groups.find(group_id);
+            if (group_it == snapshot->groups.end() || !group_it->second.HasDevice()) {
+                fail_loadback(group_id);
+                return result;
+            }
+            const auto& segment_ids = group_it->second.DevicePageIds();
+            page_ids.insert(page_ids.end(), segment_ids.begin(), segment_ids.end());
+        }
+    }
+    match_result.paged_cache = std::move(device_hit);
+    std::unordered_set<TreeNode*> pinned_nodes;
+    for (const auto& [_, nodes] : result.loadback_nodes_by_group) {
+        for (TreeNode* node : nodes) {
+            if (node == nullptr || !pinned_nodes.insert(node).second) continue;
+            result.loadback_snapshot_refs.emplace_back(node->GetPagedCacheSnapshotMut());
+        }
+    }
+    return result;
+}
+
+void HybridPrefixCache::CancelPagedCacheDeviceLoadBack(
+    const std::map<std::string, std::vector<TreeNode*>>& nodes_by_group,
+    std::map<std::string, std::int32_t>& simulated_free) {
+    for (const auto& [group_id, nodes] : nodes_by_group) {
+        for (TreeNode* node : nodes) {
+            if (node == nullptr) continue;
+            PagedCacheSnapshot* snapshot = node->GetPagedCacheSnapshotMut();
+            if (snapshot == nullptr) continue;
+            auto group_it = snapshot->groups.find(group_id);
+            if (group_it == snapshot->groups.end()) continue;
+            PagedCacheGroupSnapshot& group = group_it->second;
+            if (!group.HasDevice() || !group.HasHost()) continue;
+            const std::int32_t released = group.device_pages.Size();
+            group.device_pages = {};
+            simulated_free[group_id] += released;
+            RefreshPagedCacheSnapshotCompleteness(*snapshot);
+        }
+    }
+}
+
+void HybridPrefixCache::OnPagedCacheHostWriteBackDone(
+    const std::map<std::string, std::vector<TreeNode*>>& nodes_by_group, bool success) {
+    for (const auto& [group_id, nodes] : nodes_by_group) {
+        for (TreeNode* node : nodes) {
+            if (success) {
+                OnPagedCacheHostWriteBackDone(node, group_id);
+            } else {
+                CancelPagedCacheHostWriteBack(node, group_id);
+            }
+        }
+    }
+}
+
+void HybridPrefixCache::OnPagedCacheDeviceLoadBackDone(
+    const std::map<std::string, std::vector<TreeNode*>>& nodes_by_group, bool success) {
+    if (success) return;
+    std::map<std::string, std::int32_t> ignored_simulated_free;
+    CancelPagedCacheDeviceLoadBack(nodes_by_group, ignored_simulated_free);
+    for (const auto& [group_id, nodes] : nodes_by_group) {
+        if (!nodes.empty()) {
+            ++paged_cache_device_loadback_failed_count_[group_id];
+        }
+    }
 }
 
 void HybridPrefixCache::RegisterPagedCacheGroup(std::unique_ptr<PagedCacheGroupAllocator> allocator) {
@@ -104,11 +566,28 @@ void HybridPrefixCache::RegisterPagedCacheGroup(std::unique_ptr<PagedCacheGroupA
     paged_cache_allocators_.emplace(std::move(gid), std::move(allocator));
 }
 
+void HybridPrefixCache::RegisterPagedCacheHostGroup(std::unique_ptr<PagedCacheGroupAllocator> allocator) {
+    if (allocator == nullptr) {
+        throw std::invalid_argument("HybridPrefixCache::RegisterPagedCacheHostGroup: null allocator");
+    }
+    std::string gid = allocator->Config().group_id;
+    if (paged_cache_host_allocators_.find(gid) != paged_cache_host_allocators_.end()) {
+        throw std::invalid_argument("HybridPrefixCache::RegisterPagedCacheHostGroup: duplicate group_id: " + gid);
+    }
+    paged_cache_host_allocators_.emplace(std::move(gid), std::move(allocator));
+}
+
 void HybridPrefixCache::ConfigurePagedCacheAdjunct(std::span<const PagedCacheGroupConfig> group_configs,
                                                    std::optional<std::span<const std::string>> required_groups) {
     for (const auto& cfg : group_configs) {
         PagedCacheGroupConfig copy = cfg;
         copy.Validate();
+        if (copy.HasHostPages()) {
+            PagedCacheGroupConfig host_copy = copy;
+            host_copy.total_pages = copy.host_total_pages;
+            host_copy.host_total_pages = 0;
+            RegisterPagedCacheHostGroup(std::make_unique<PagedCacheGroupAllocator>(std::move(host_copy)));
+        }
         RegisterPagedCacheGroup(std::make_unique<PagedCacheGroupAllocator>(std::move(copy)));
     }
 
@@ -242,34 +721,6 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
         }
     };
 
-    std::vector<TreeNode*> path = CollectAncestorPathRootToLeaf(match.device.last_node);
-
-    // Phase A: history chain. Walk root->leaf, advance only on contiguous
-    // History-family completeness at every k*align boundary.
-    TreeNode* deepest_history = nullptr;
-    std::vector<TreeNode*> history_chain;
-    std::int32_t expected_depth = align;
-    for (TreeNode* n : path) {
-        const std::int32_t d = static_cast<std::int32_t>(n->DepthInTokens());
-        if (d < expected_depth) continue;
-        if (d > expected_depth) break;
-        const auto* snap = n->GetPagedCacheSnapshot();
-        if (snap == nullptr) break;
-        if (!snap->IsCompleteFor(PagedCacheGroupFamily::History)) break;
-        deepest_history = n;
-        history_chain.push_back(n);
-        expected_depth += align;
-    }
-    if (deepest_history == nullptr) {
-        cap_to_root();
-        return;
-    }
-
-    // Phase B: state window. `segments_needed` is the worst-case trailing
-    // coverage across state groups (so every state group is satisfied at the
-    // chosen depth). Walk back through history_chain, pick the deepest D'
-    // whose trailing `segments_needed` history_chain entries all have State
-    // complete.
     std::int32_t worst_window = 0;
     for (const auto& gid : paged_cache_state_groups_) {
         auto it = paged_cache_sliding_window_per_group_.find(gid);
@@ -279,87 +730,140 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
     }
     const std::int32_t segments_needed = worst_window > 0 ? (worst_window + align - 1) / align : 1;
 
-    TreeNode* usable_node = nullptr;
-    if (paged_cache_state_groups_.empty()) {
-        usable_node = deepest_history;
-    } else {
-        for (std::int32_t end_idx = static_cast<std::int32_t>(history_chain.size()) - 1; end_idx >= 0; --end_idx) {
-            const std::int32_t start_idx = std::max(0, end_idx - segments_needed + 1);
-            bool ok = true;
-            for (std::int32_t i = start_idx; i <= end_idx; ++i) {
-                const auto* snap = history_chain[i]->GetPagedCacheSnapshot();
-                if (snap == nullptr || !snap->IsCompleteFor(PagedCacheGroupFamily::State)) {
-                    ok = false;
+    const std::vector<TreeNode*> path = CollectAncestorPathRootToLeaf(match.device.last_node);
+
+    auto build_tier_hit = [&](bool host_tier) {
+        MatchResult::PagedCache hit{};
+
+        // Phase A: history chain. Walk root->leaf, advance only on contiguous
+        // History-family completeness at every k*align boundary for one tier.
+        TreeNode* deepest_history = nullptr;
+        std::vector<TreeNode*> history_chain;
+        std::int32_t expected_depth = align;
+        for (TreeNode* n : path) {
+            const std::int32_t d = static_cast<std::int32_t>(n->DepthInTokens());
+            if (d < expected_depth) continue;
+            if (d > expected_depth) break;
+            const auto* snap = n->GetPagedCacheSnapshot();
+            if (snap == nullptr) break;
+            if (!IsPagedCacheSnapshotCompleteForTier(*snap, PagedCacheGroupFamily::History, host_tier)) break;
+            deepest_history = n;
+            history_chain.push_back(n);
+            expected_depth += align;
+        }
+        if (deepest_history == nullptr) {
+            return hit;
+        }
+
+        // Phase B: state window. `segments_needed` is the worst-case trailing
+        // coverage across state groups (so every state group is satisfied at
+        // the chosen depth).
+        TreeNode* usable_node = nullptr;
+        if (paged_cache_state_groups_.empty()) {
+            usable_node = deepest_history;
+        } else {
+            for (std::int32_t end_idx = static_cast<std::int32_t>(history_chain.size()) - 1; end_idx >= 0; --end_idx) {
+                const std::int32_t start_idx = std::max(0, end_idx - segments_needed + 1);
+                bool ok = true;
+                for (std::int32_t i = start_idx; i <= end_idx; ++i) {
+                    const auto* snap = history_chain[i]->GetPagedCacheSnapshot();
+                    if (snap == nullptr ||
+                        !IsPagedCacheSnapshotCompleteForTier(*snap, PagedCacheGroupFamily::State, host_tier)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) {
+                    usable_node = history_chain[end_idx];
                     break;
                 }
             }
-            if (ok) {
-                usable_node = history_chain[end_idx];
-                break;
+        }
+        if (usable_node == nullptr) {
+            return hit;
+        }
+
+        const std::int32_t usable = static_cast<std::int32_t>(usable_node->DepthInTokens());
+        while (!history_chain.empty() && static_cast<std::int32_t>(history_chain.back()->DepthInTokens()) > usable) {
+            history_chain.pop_back();
+        }
+
+        hit.last_node = usable_node;
+        hit.prefix_len_tokens = usable;
+
+        auto assemble = [&](const std::string& gid, std::span<TreeNode* const> chain, bool is_sliding) {
+            std::vector<std::int32_t> page_ids;
+            std::vector<TreeNode*> nodes;
+            std::int32_t base_logical_page = 0;
+            if (!chain.empty()) {
+                const PagedCacheSnapshot* earliest_snap = chain.front()->GetPagedCacheSnapshot();
+                if (earliest_snap != nullptr && is_sliding) {
+                    auto git = earliest_snap->groups.find(gid);
+                    if (git != earliest_snap->groups.end()) {
+                        base_logical_page = git->second.base_logical_page;
+                    }
+                }
+                for (TreeNode* anc : chain) {
+                    const PagedCacheSnapshot* snap = anc->GetPagedCacheSnapshot();
+                    if (snap == nullptr) continue;
+                    auto git = snap->groups.find(gid);
+                    if (git == snap->groups.end()) continue;
+                    const auto& seg_ids = PagedCacheGroupPageIdsForTier(git->second, host_tier);
+                    page_ids.insert(page_ids.end(), seg_ids.begin(), seg_ids.end());
+                    nodes.push_back(anc);
+                }
+            }
+            hit.per_group_page_ids[gid] = std::move(page_ids);
+            hit.per_group_base_logical_page[gid] = base_logical_page;
+            hit.per_group_nodes[gid] = std::move(nodes);
+        };
+
+        const auto sliding_group_end = paged_cache_sliding_window_per_group_.end();
+        const auto is_sliding_group = [&](const std::string& gid) {
+            return paged_cache_sliding_window_per_group_.find(gid) != sliding_group_end;
+        };
+
+        const std::span<TreeNode* const> history_span{history_chain};
+        for (const auto& gid : paged_cache_history_groups_) {
+            assemble(gid, history_span, is_sliding_group(gid));
+        }
+        if (!paged_cache_state_groups_.empty()) {
+            const std::size_t take =
+                std::min<std::size_t>(history_chain.size(), static_cast<std::size_t>(segments_needed));
+            const std::span<TreeNode* const> state_span = history_span.last(take);
+            for (const auto& gid : paged_cache_state_groups_) {
+                assemble(gid, state_span, is_sliding_group(gid));
             }
         }
+
+        hit.restore_kind = MatchResult::PagedCache::RestoreKind::kSnapshotComplete;
+        hit.replay_start_tokens = 0;
+        return hit;
+    };
+
+    MatchResult::PagedCache device_hit = build_tier_hit(/*host_tier=*/false);
+    MatchResult::PagedCache host_hit = build_tier_hit(/*host_tier=*/true);
+    MatchResult::PagedCache* selected = nullptr;
+    if (host_hit.last_node != nullptr &&
+        (device_hit.last_node == nullptr || host_hit.prefix_len_tokens > device_hit.prefix_len_tokens)) {
+        if (device_hit.last_node != nullptr) {
+            match.paged_cache = std::move(device_hit);
+        }
+        match.paged_cache_host = std::move(host_hit);
+        selected = &match.paged_cache_host;
+    } else if (device_hit.last_node != nullptr) {
+        match.paged_cache = std::move(device_hit);
+        selected = &match.paged_cache;
     }
-    if (usable_node == nullptr) {
+
+    if (selected == nullptr) {
         cap_to_root();
         return;
     }
 
-    const std::int32_t usable = static_cast<std::int32_t>(usable_node->DepthInTokens());
-    // Trim history_chain to ancestors up to and including usable_node.
-    while (!history_chain.empty() && static_cast<std::int32_t>(history_chain.back()->DepthInTokens()) > usable) {
-        history_chain.pop_back();
-    }
-
-    // Phase C: per-group page-id assembly. History groups take the full chain;
-    // State groups share a trailing-window slice computed once.
-    match.paged_cache.last_node = usable_node;
-    match.paged_cache.prefix_len_tokens = usable;
-    match.paged_cache.per_group_page_ids.clear();
-    match.paged_cache.per_group_base_logical_page.clear();
-
-    auto assemble = [&](const std::string& gid, std::span<TreeNode* const> chain, bool is_sliding) {
-        std::vector<std::int32_t> page_ids;
-        std::int32_t base_logical_page = 0;
-        if (!chain.empty()) {
-            const PagedCacheSnapshot* earliest_snap = chain.front()->GetPagedCacheSnapshot();
-            if (earliest_snap != nullptr && is_sliding) {
-                auto git = earliest_snap->groups.find(gid);
-                if (git != earliest_snap->groups.end()) {
-                    base_logical_page = git->second.base_logical_page;
-                }
-            }
-            for (TreeNode* anc : chain) {
-                const PagedCacheSnapshot* snap = anc->GetPagedCacheSnapshot();
-                if (snap == nullptr) continue;
-                auto git = snap->groups.find(gid);
-                if (git == snap->groups.end()) continue;
-                const auto& seg_ids = git->second.pages.Ids();
-                page_ids.insert(page_ids.end(), seg_ids.begin(), seg_ids.end());
-            }
-        }
-        match.paged_cache.per_group_page_ids[gid] = std::move(page_ids);
-        match.paged_cache.per_group_base_logical_page[gid] = base_logical_page;
-    };
-
-    const auto sliding_group_end = paged_cache_sliding_window_per_group_.end();
-    const auto is_sliding_group = [&](const std::string& gid) {
-        return paged_cache_sliding_window_per_group_.find(gid) != sliding_group_end;
-    };
-
-    const std::span<TreeNode* const> history_span{history_chain};
-    for (const auto& gid : paged_cache_history_groups_) {
-        assemble(gid, history_span, is_sliding_group(gid));
-    }
-    if (!paged_cache_state_groups_.empty()) {
-        const std::size_t take = std::min<std::size_t>(history_chain.size(), static_cast<std::size_t>(segments_needed));
-        const std::span<TreeNode* const> state_span = history_span.last(take);
-        for (const auto& gid : paged_cache_state_groups_) {
-            assemble(gid, state_span, is_sliding_group(gid));
-        }
-    }
-
     // Cap device/host match nodes to the paged-cache usable depth.
-    match.device.last_node = usable_node;
+    const std::int32_t usable = selected->prefix_len_tokens;
+    match.device.last_node = selected->last_node;
     if (match.host.last_node != nullptr && static_cast<std::int32_t>(match.host.last_node->DepthInTokens()) > usable) {
         TreeNode* h = match.host.last_node;
         while (h != nullptr && !h->IsRoot() && static_cast<std::int32_t>(h->DepthInTokens()) > usable) {
@@ -367,9 +871,6 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
         }
         match.host.last_node = h;
     }
-
-    match.paged_cache.restore_kind = MatchResult::PagedCache::RestoreKind::kSnapshotComplete;
-    match.paged_cache.replay_start_tokens = 0;
 }
 
 std::map<std::string, std::int32_t> HybridPrefixCache::InitialSimulatedFree() const {
@@ -608,15 +1109,41 @@ void HybridPrefixCache::refreshPagedCacheSimulatedFree(std::map<std::string, std
     }
 }
 
-bool HybridPrefixCache::admitPagedCacheChunk(const std::string& request_id, std::int32_t first_raw_position_of_op,
-                                             std::int32_t target_raw_tokens_exclusive,
-                                             std::map<std::string, std::int32_t>& simulated_free,
-                                             const MatchResult::PagedCache& paged_cache_hit,
-                                             const PagedCacheAdmissionContext& context) {
+HybridPrefixCache::PagedCacheAdmissionOutcome HybridPrefixCache::admitPagedCacheChunk(
+    const std::string& request_id, std::int32_t first_raw_position_of_op, std::int32_t target_raw_tokens_exclusive,
+    std::map<std::string, std::int32_t>& simulated_free, const MatchResult::PagedCache& paged_cache_hit,
+    const PagedCacheAdmissionContext& context) {
+    PagedCacheAdmissionOutcome outcome{};
     PagedCacheGroupAdmission admission = checkPagedCacheGroupAdmission(
         request_id, first_raw_position_of_op, target_raw_tokens_exclusive, simulated_free, paged_cache_hit, context);
     const std::size_t prune_budget = paged_cache_snapshot_nodes_.size();
     for (std::size_t pruned = 0; !admission.ok && pruned < prune_budget; ++pruned) {
+        bool demoted_dual_resident = false;
+        for (const auto& [gid, shortfall] : admission.shortfall_pages) {
+            if (shortfall <= 0) continue;
+            const std::int32_t released = DemotePagedCacheDeviceCopiesPresentOnHost(gid, shortfall);
+            if (released > 0) {
+                demoted_dual_resident = true;
+            }
+        }
+        if (demoted_dual_resident) {
+            refreshPagedCacheSimulatedFree(simulated_free);
+            admission = checkPagedCacheGroupAdmission(request_id, first_raw_position_of_op, target_raw_tokens_exclusive,
+                                                      simulated_free, paged_cache_hit, context);
+            continue;
+        }
+
+        for (const auto& [gid, shortfall] : admission.shortfall_pages) {
+            if (shortfall <= 0) continue;
+            PagedCacheHostWriteBackPlan plan = PreparePagedCacheHostWriteBack(gid, shortfall);
+            if (plan.ok && !plan.transfers.empty()) {
+                outcome.writeback_plans.push_back(std::move(plan));
+            }
+        }
+        if (!outcome.writeback_plans.empty()) {
+            return outcome;
+        }
+
         AdmissionFailureKind kind = ClassifyAdmissionFailure(admission);
         if (kind == AdmissionFailureKind::kNone) break;
         if (!tryPrunePagedCacheSnapshot(kind)) break;
@@ -624,12 +1151,13 @@ bool HybridPrefixCache::admitPagedCacheChunk(const std::string& request_id, std:
         admission = checkPagedCacheGroupAdmission(request_id, first_raw_position_of_op, target_raw_tokens_exclusive,
                                                   simulated_free, paged_cache_hit, context);
     }
-    if (!admission.ok) return false;
+    if (!admission.ok) return outcome;
     for (const auto& [gid, credit] : context.owned_release_credit) {
         simulated_free[gid] += credit;
     }
     applyPagedCacheGroupAdmissionDebit(simulated_free, admission);
-    return true;
+    outcome.admitted = true;
+    return outcome;
 }
 
 bool HybridPrefixCache::DetachStateSnapshotFromNode(TreeNode* node) {
@@ -646,6 +1174,7 @@ bool HybridPrefixCache::DetachStateSnapshotFromNode(TreeNode* node) {
     }
     if (!removed_any) return false;
     snap->complete_families.erase(PagedCacheGroupFamily::State);
+    snap->host_complete_families.erase(PagedCacheGroupFamily::State);
     // If nothing remains, fall through to full detach to keep invariants tidy.
     if (snap->groups.empty()) {
         DetachPagedCacheSnapshotFromNode(node);
@@ -656,14 +1185,6 @@ bool HybridPrefixCache::DetachStateSnapshotFromNode(TreeNode* node) {
 bool HybridPrefixCache::tryPrunePagedCacheSnapshot(AdmissionFailureKind kind) {
     if (!HasPagedCacheAdjunct()) return false;
     if (kind == AdmissionFailureKind::kNone) return false;
-
-    auto is_pinned = [](TreeNode* node) {
-        for (TreeNode* cur = node; cur != nullptr && !cur->IsRoot(); cur = cur->Parent()) {
-            if (!cur->OnDevice()) continue;
-            if (cur->Device().RefCount() > 0) return true;
-        }
-        return false;
-    };
 
     // Sort once and share between branches: oldest first, then deepest within
     // same Time(). Both try_state_only and try_full walk this same order.
@@ -681,7 +1202,8 @@ bool HybridPrefixCache::tryPrunePagedCacheSnapshot(AdmissionFailureKind kind) {
 
     auto try_state_only = [&]() {
         for (TreeNode* node : candidates) {
-            if (is_pinned(node)) continue;
+            if (IsPagedCacheNodePinned(node)) continue;
+            if (HasPendingPagedCacheHostWriteBack(node)) continue;
             const auto* snap = node->GetPagedCacheSnapshot();
             if (snap == nullptr) continue;
             if (!snap->IsCompleteFor(PagedCacheGroupFamily::State)) continue;
@@ -693,7 +1215,8 @@ bool HybridPrefixCache::tryPrunePagedCacheSnapshot(AdmissionFailureKind kind) {
     auto try_full = [&]() {
         TreeNode* victim = nullptr;
         for (TreeNode* node : candidates) {
-            if (is_pinned(node)) continue;
+            if (IsPagedCacheNodePinned(node)) continue;
+            if (HasPendingPagedCacheHostWriteBack(node)) continue;
             victim = node;
             break;
         }
@@ -714,7 +1237,8 @@ bool HybridPrefixCache::tryPrunePagedCacheSnapshot(AdmissionFailureKind kind) {
             }
         }
         for (TreeNode* d : descendants) {
-            if (is_pinned(d)) continue;
+            if (IsPagedCacheNodePinned(d)) continue;
+            if (HasPendingPagedCacheHostWriteBack(d)) continue;
             auto cascaded = DetachPagedCacheSnapshotFromNode(d);
             (void)cascaded;
         }
@@ -740,7 +1264,8 @@ bool HybridPrefixCache::AdmitChunk(const std::string& request_id, std::int32_t f
                                    std::map<std::string, std::int32_t>& simulated_free,
                                    const MatchResult::PagedCache& paged_cache_hit) {
     return admitPagedCacheChunk(request_id, first_raw_position_of_op, target_raw_tokens_exclusive, simulated_free,
-                                paged_cache_hit, {});
+                                paged_cache_hit, {})
+        .admitted;
 }
 
 bool HybridPrefixCache::AdmitChunkFromRetracted(const std::string& request_id, std::int32_t target_raw_tokens_exclusive,
@@ -753,7 +1278,8 @@ bool HybridPrefixCache::AdmitChunkFromRetracted(const std::string& request_id, s
             context.owned_release_credit[gid] = table.OwnedPagesCount();
         }
     }
-    return admitPagedCacheChunk(request_id, 0, target_raw_tokens_exclusive, simulated_free, paged_cache_hit, context);
+    return admitPagedCacheChunk(request_id, 0, target_raw_tokens_exclusive, simulated_free, paged_cache_hit, context)
+        .admitted;
 }
 
 void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* terminal) {
@@ -854,7 +1380,7 @@ void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* ter
             auto result = cfg.family == PagedCacheGroupFamily::History ? table.CommitHistoryToSnapshot(target)
                                                                        : table.CheckpointStateToSnapshot(target);
             PagedCacheGroupSnapshot group_snap{};
-            group_snap.pages = std::move(result.pages);
+            group_snap.device_pages = std::move(result.pages);
             group_snap.base_logical_page = result.segment_base_logical_page;
             group_snap.raw_token_cursor = table.RawTokenCursor();
             group_snap.sliding = table.IsSliding();

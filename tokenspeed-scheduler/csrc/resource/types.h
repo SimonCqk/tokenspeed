@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include "resource/radix_tree/paged_cache_snapshot.h"
+
 namespace tokenspeed {
 
 class TreeNode;
@@ -82,10 +84,12 @@ struct MatchResult {
         std::int32_t prefix_len_tokens{0};
         std::map<std::string, std::vector<std::int32_t>> per_group_page_ids;
         std::map<std::string, std::int32_t> per_group_base_logical_page;
+        std::map<std::string, std::vector<TreeNode*>> per_group_nodes;
         RestoreKind restore_kind{RestoreKind::kSnapshotComplete};
         // Phase 2 placeholder; Phase 1 always 0.
         std::int32_t replay_start_tokens{0};
     } paged_cache;
+    PagedCache paged_cache_host;
 };
 
 struct InsertResult {
@@ -108,6 +112,9 @@ struct WalkResult {
 struct CacheOpSpec {
     std::string request_id;
     std::vector<TreeNode*> writeback_nodes;
+    std::map<std::string, std::vector<TreeNode*>> paged_cache_writeback_nodes_by_group;
+    std::map<std::string, std::vector<TreeNode*>> paged_cache_loadback_nodes_by_group;
+    std::vector<PagedCacheSnapshotRef> paged_cache_loadback_snapshot_refs;
 
     CacheOpSpec() = default;
     ~CacheOpSpec() = default;

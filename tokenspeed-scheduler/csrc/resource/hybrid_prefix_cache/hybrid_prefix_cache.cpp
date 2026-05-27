@@ -273,7 +273,7 @@ void HybridPrefixCache::OnKVEvict(TreeNode* node) {
     // Passive paged-cache detach on KV LRU drop: returns OwnedPages via RAII;
     // the chain scan sees the gap because `HasPagedCacheSnapshot()` is false.
     // Route through DetachPagedCacheSnapshotFromNode to keep membership set in sync.
-    if (node->HasPagedCacheSnapshot()) {
+    if (const auto* snapshot = node->GetPagedCacheSnapshot(); snapshot != nullptr && !snapshot->IsPinned()) {
         DetachPagedCacheSnapshotFromNode(node);
     }
 }
@@ -383,6 +383,29 @@ CacheStatsSnapshot HybridPrefixCache::Stats(const StatsRequest& request) const {
         snapshot.paged_cache_total_pages[gid] = alloc_it->second->TotalPages();
         snapshot.paged_cache_available_pages[gid] = alloc_it->second->AvailablePages();
         snapshot.paged_cache_failed_alloc_count[gid] = alloc_it->second->FailedAllocCount();
+        auto host_alloc_it = paged_cache_host_allocators_.find(gid);
+        if (host_alloc_it != paged_cache_host_allocators_.end() && host_alloc_it->second != nullptr) {
+            snapshot.paged_cache_host_total_pages[gid] = host_alloc_it->second->TotalPages();
+            snapshot.paged_cache_host_available_pages[gid] = host_alloc_it->second->AvailablePages();
+            snapshot.paged_cache_host_failed_alloc_count[gid] = host_alloc_it->second->FailedAllocCount();
+        } else {
+            snapshot.paged_cache_host_total_pages[gid] = 0;
+            snapshot.paged_cache_host_available_pages[gid] = 0;
+            snapshot.paged_cache_host_failed_alloc_count[gid] = 0;
+        }
+        snapshot.paged_cache_host_writeback_pages_scheduled_total[gid] =
+            paged_cache_host_writeback_pages_scheduled_total_.contains(gid)
+                ? paged_cache_host_writeback_pages_scheduled_total_.at(gid)
+                : 0;
+        snapshot.paged_cache_device_loadback_pages_scheduled_total[gid] =
+            paged_cache_device_loadback_pages_scheduled_total_.contains(gid)
+                ? paged_cache_device_loadback_pages_scheduled_total_.at(gid)
+                : 0;
+        snapshot.paged_cache_host_evicted_pages_total[gid] =
+            paged_cache_host_evicted_pages_total_.contains(gid) ? paged_cache_host_evicted_pages_total_.at(gid) : 0;
+        snapshot.paged_cache_device_loadback_failed_count[gid] = paged_cache_device_loadback_failed_count_.contains(gid)
+                                                                     ? paged_cache_device_loadback_failed_count_.at(gid)
+                                                                     : 0;
 
         if (request.request_id.has_value()) {
             std::vector<std::int32_t> pages;
@@ -490,8 +513,11 @@ cache::admit::PrefillFirstChunk::Result HybridPrefixCache::Apply(const cache::ad
             return result;
         }
     }
-    result.admitted = AdmitChunk(op.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive,
-                                 simulated_free, op.match_result.paged_cache);
+    PagedCacheAdmissionOutcome paged_outcome =
+        admitPagedCacheChunk(op.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive, simulated_free,
+                             op.match_result.paged_cache, {});
+    result.admitted = paged_outcome.admitted;
+    MovePagedCacheWriteBackPlans(result, std::move(paged_outcome.writeback_plans));
     if (result.admitted) {
         result.mamba_branching_seqlen = mamba_branching_seqlen;
         result.cache_transfer_pairs = PrepareMambaDeviceLoadBack(loadback_nodes);
@@ -511,8 +537,10 @@ cache::admit::PrefillChunk::Result HybridPrefixCache::Apply(const cache::admit::
     if (HasMambaAdjunct() && !EnsureMambaCapacityByEvict(1)) {
         return result;
     }
-    result.admitted =
-        AdmitChunk(op.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive, simulated_free);
+    PagedCacheAdmissionOutcome paged_outcome = admitPagedCacheChunk(
+        op.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive, simulated_free, {}, {});
+    result.admitted = paged_outcome.admitted;
+    MovePagedCacheWriteBackPlans(result, std::move(paged_outcome.writeback_plans));
     return result;
 }
 
@@ -525,8 +553,10 @@ cache::admit::Decode::Result HybridPrefixCache::Apply(const cache::admit::Decode
     if (op.refresh_mamba_checkpoint && HasMambaAdjunct() && !EnsureMambaCapacityByEvict(1)) {
         return result;
     }
-    result.admitted =
-        AdmitChunk(op.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive, simulated_free);
+    PagedCacheAdmissionOutcome paged_outcome = admitPagedCacheChunk(
+        op.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive, simulated_free, {}, {});
+    result.admitted = paged_outcome.admitted;
+    MovePagedCacheWriteBackPlans(result, std::move(paged_outcome.writeback_plans));
     return result;
 }
 
@@ -551,8 +581,17 @@ cache::admit::DecodeFromRetracted::Result HybridPrefixCache::Apply(
             return result;
         }
     }
-    result.admitted = AdmitChunkFromRetracted(op.request_id, op.target_raw_tokens_exclusive, simulated_free,
-                                              op.match_result.paged_cache);
+    PagedCacheAdmissionContext context{.fresh_table_view = true};
+    auto req_it = request_paged_cache_tables_.find(op.request_id);
+    if (req_it != request_paged_cache_tables_.end()) {
+        for (const auto& [gid, table] : req_it->second) {
+            context.owned_release_credit[gid] = table.OwnedPagesCount();
+        }
+    }
+    PagedCacheAdmissionOutcome paged_outcome = admitPagedCacheChunk(
+        op.request_id, 0, op.target_raw_tokens_exclusive, simulated_free, op.match_result.paged_cache, context);
+    result.admitted = paged_outcome.admitted;
+    MovePagedCacheWriteBackPlans(result, std::move(paged_outcome.writeback_plans));
     if (result.admitted) {
         result.cache_transfer_pairs = PrepareMambaDeviceLoadBack(loadback_nodes);
         if (!loadback_nodes.empty() && loadback_nodes.front()->HasMamba()) {
@@ -571,6 +610,17 @@ cache::admit::Retract::Result HybridPrefixCache::Apply(const cache::admit::Retra
 }
 
 void HybridPrefixCache::AccumulateStepResult(StepCommitResult&, cache::EmptyResult) {}
+
+void HybridPrefixCache::MovePagedCacheWriteBackPlans(AdmissionVerdict& verdict,
+                                                     std::vector<PagedCacheHostWriteBackPlan>&& writeback_plans) {
+    for (auto& plan : writeback_plans) {
+        for (auto& transfer : plan.transfers) {
+            auto& nodes = verdict.paged_cache_writeback_nodes_by_group[transfer.group_id];
+            nodes.insert(nodes.end(), plan.nodes.begin(), plan.nodes.end());
+            verdict.paged_cache_writeback_transfers.push_back(std::move(transfer));
+        }
+    }
+}
 
 void HybridPrefixCache::AccumulateStepResult(StepCommitResult& result, cache::publish::DevicePrefix::Result op_result) {
     result.device_insert_page_count = op_result.device_insert_page_count;

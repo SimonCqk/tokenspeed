@@ -149,7 +149,7 @@ private:
         // Caller chooses absolute base; fresh table commits at 0.
         auto committed = sliding ? t.CheckpointStateToSnapshot(kLcm) : t.CommitHistoryToSnapshot(kLcm);
         PagedCacheGroupSnapshot g{};
-        g.pages = std::move(committed.pages);
+        g.device_pages = std::move(committed.pages);
         g.base_logical_page = base_logical_page;
         g.raw_token_cursor = prefix_len_tokens;
         g.sliding = sliding;
