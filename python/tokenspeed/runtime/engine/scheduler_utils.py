@@ -152,14 +152,23 @@ def pool_to_paged_cache_groups(pool: Any) -> list:
 
 def pool_to_prefix_cache_adjunct_spec(
     required_group_ids: Sequence[str],
+    *,
+    replay_window_tokens: int = 0,
+    replay_seed_tokens: int = 0,
 ) -> "PrefixCacheAdjunctSpec":
-    """Build a PrefixCacheAdjunctSpec from a non-empty required-group-id list."""
+    """Build a replay PrefixCacheAdjunctSpec from required group ids."""
     if not required_group_ids:
         raise ValueError(
             "pool_to_prefix_cache_adjunct_spec: required_group_ids must be non-empty"
         )
     spec = PrefixCacheAdjunctSpec()
     spec.required_groups = [str(gid) for gid in required_group_ids]
+    if replay_window_tokens <= 0:
+        raise ValueError(
+            "pool_to_prefix_cache_adjunct_spec: replay_window_tokens must be positive"
+        )
+    spec.replay_window_tokens = int(replay_window_tokens)
+    spec.replay_seed_tokens = int(replay_seed_tokens)
     return spec
 
 

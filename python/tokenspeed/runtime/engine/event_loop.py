@@ -19,6 +19,7 @@
 # SOFTWARE.
 
 import faulthandler
+import logging
 import signal
 import time
 from collections import OrderedDict
@@ -261,13 +262,10 @@ class EventLoop:
             mamba_l2_layout=server_args.mamba_l2_layout,
             mamba_l2_io_backend=server_args.mamba_l2_io_backend,
         )
-        is_deepseek_v4_pool = (
-            type(token_to_kv_pool).__name__ == "DeepseekV4TokenToKVPool"
-        )
-        if is_deepseek_v4_pool:
+        if not token_to_kv_pool.supports_hierarchical_kv_cache:
             if server_args.enable_kvstore:
                 raise NotImplementedError(
-                    "DeepSeek V4 baseline does not support hierarchical cache "
+                    "This KV cache pool does not support hierarchical cache "
                     "(kvstore); pass --disable-kvstore."
                 )
             self.memory_executor = None
@@ -306,7 +304,11 @@ class EventLoop:
         prefix_cache_adjunct = None
         required_groups = token_to_kv_pool.prefix_cache_required_group_ids
         if required_groups is not None and server_args.enable_prefix_caching:
-            prefix_cache_adjunct = pool_to_prefix_cache_adjunct_spec(required_groups)
+            prefix_cache_adjunct = pool_to_prefix_cache_adjunct_spec(
+                required_groups,
+                replay_window_tokens=token_to_kv_pool.prefix_cache_replay_window_tokens,
+                replay_seed_tokens=token_to_kv_pool.prefix_cache_replay_seed_tokens,
+            )
         scheduler_cfg = make_config(
             num_device_pages=self.max_total_num_tokens // server_args.block_size,
             max_scheduled_tokens=server_args.chunked_prefill_size,
@@ -1054,6 +1056,7 @@ class EventLoop:
     def _record_scheduler_iteration_metrics(
         self, stats: dict, num_iteration_tokens: int
     ) -> None:
+        self._maybe_log_paged_cache_state_group_pages()
         self.metrics.record_scheduler_iteration(
             running=len(self.output_processor.rid_to_state),
             waiting=stats["num_queue_reqs"],
@@ -1061,6 +1064,29 @@ class EventLoop:
             num_total_pages=self.max_total_num_tokens // self.server_args.block_size,
             num_iteration_tokens=num_iteration_tokens,
         )
+
+    def _maybe_log_paged_cache_state_group_pages(self) -> None:
+        if self.global_rank != 0 or not self._paged_cache_state_group_ids:
+            return
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        interval = int(self.server_args.decode_log_interval)
+        if interval <= 0:
+            return
+        self._paged_cache_group_stats_log_step += 1
+        if self._paged_cache_group_stats_log_step % interval != 0:
+            return
+
+        parts = []
+        for group_id in self._paged_cache_state_group_ids:
+            total = self.scheduler.paged_cache_group_total_pages(group_id)
+            available = self.scheduler.paged_cache_group_available_pages(group_id)
+            failed = self.scheduler.paged_cache_group_failed_alloc_count(group_id)
+            used = total - available
+            parts.append(
+                f"{group_id}: used={used}/{total}, available={available}, failed_alloc={failed}"
+            )
+        logger.debug("Paged-cache state group pages. %s", "; ".join(parts))
 
     # ------------------------------------------------------------------
     # Event loops

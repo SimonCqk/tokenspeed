@@ -43,6 +43,7 @@ namespace tokenspeed {
 class MambaChunkAllocator;
 class MambaHostAllocator;
 class ForwardOperationBase;
+struct PagedCacheSnapshot;
 
 class HybridPrefixCache {
 public:
@@ -76,7 +77,7 @@ public:
     // have a window entry; full-history groups must not.
     void EnablePagedCacheAdjunct(std::vector<std::string> required_groups,
                                  std::unordered_map<std::string, std::int32_t> sliding_window_per_group,
-                                 StateRestorePolicy policy = StateRestorePolicy::kSnapshotRequired);
+                                 std::int32_t replay_window_tokens = 0, std::int32_t replay_seed_tokens = 0);
 
     bool HasMambaAdjunct() const { return mamba_allocator_ != nullptr; }
     bool HasPagedCacheAdjunct() const { return paged_cache_history_alignment_tokens_ > 0; }
@@ -168,6 +169,11 @@ private:
     // remains and the node stays registered. Returns true iff state groups removed.
     bool DetachStateSnapshotFromNode(TreeNode* node);
 
+    void RefreshPagedCacheSnapshotCompleteness(PagedCacheSnapshot& snapshot) const;
+    bool adoptExistingPagedCacheSnapshotForReplay(PagedCacheSnapshot& existing,
+                                                  std::map<std::string, PagedCacheGroupTable>& tables,
+                                                  std::int32_t target);
+
     void augmentMatch(MatchResult& match) const;
     void augmentMatchPagedCache(MatchResult& match) const;
 
@@ -215,7 +221,8 @@ private:
     // Fast hot-path lookup mirrors of the above (filled in EnablePagedCacheAdjunct).
     std::unordered_set<std::string> paged_cache_history_group_set_;
     std::unordered_set<std::string> paged_cache_state_group_set_;
-    StateRestorePolicy paged_cache_state_policy_{StateRestorePolicy::kSnapshotRequired};
+    std::int32_t paged_cache_replay_window_tokens_{0};
+    std::int32_t paged_cache_replay_seed_tokens_{0};
 
     // TODO(snapshot-lru-perf): O(N log N) per prune; swap in LRU index if profiling shows it matters.
     std::unordered_set<TreeNode*> paged_cache_snapshot_nodes_;

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any, Iterable, Optional, Sequence
@@ -22,6 +23,7 @@ import torch
 
 from tokenspeed.runtime.configs.deepseek_v4_cache_spec import (
     DEEPSEEK_V4_COMPRESSED_LOGICAL_BLOCK_SIZE,
+    DEEPSEEK_V4_CSA_OVERLAP_SEED_TOKENS,
     V4_INDEXER_COMPRESSOR_STATE_GROUP_ID,
     V4_KERNEL_BLOCK_ROWS,
     V4_SWA_KV_GROUP_ID,
@@ -511,10 +513,17 @@ class DeepseekV4CacheMetadata:
         kv_cache_block_size: int | None = None,
     ) -> torch.Tensor:
         del kv_cache_block_size
+        if compress_ratio <= 1:
+            return self.block_table
         table = self.paged_cache_block_tables.get(
             v4_compressed_kv_group_id(compress_ratio)
         )
-        return table if table is not None else self.block_table
+        if table is None:
+            raise RuntimeError(
+                "DeepSeek V4 missing paged-cache block table for compressed "
+                f"KV group {v4_compressed_kv_group_id(compress_ratio)!r}"
+            )
+        return table
 
     @staticmethod
     def safe_page_ids(
@@ -747,6 +756,8 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
     group rather than owning a separate group of its own.
     """
 
+    supports_hierarchical_kv_cache = False
+
     def __init__(
         self,
         size: int,
@@ -788,6 +799,23 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
         self.paged_cache_group_specs = tuple(
             build_v4_cache_specs(hf_config, layer_ratio=layout.layer_ratio)
         )
+        self._paged_cache_group_specs_by_id = {
+            spec.group_id: spec for spec in self.paged_cache_group_specs
+        }
+        self.prefix_cache_replay_window_tokens = self._compute_prefix_replay_window()
+        self._prefix_cache_replay_seed_group_ids = tuple(
+            gid
+            for gid in (
+                v4_compressor_state_group_id(4),
+                V4_INDEXER_COMPRESSOR_STATE_GROUP_ID,
+            )
+            if gid in self._paged_cache_group_specs_by_id
+        )
+        self.prefix_cache_replay_seed_tokens = (
+            DEEPSEEK_V4_CSA_OVERLAP_SEED_TOKENS
+            if self._prefix_cache_replay_seed_group_ids
+            else 0
+        )
         self.paged_cache_group_page_counts = compute_paged_cache_group_page_counts(
             self.paged_cache_group_specs,
             max_live_requests=max_batch_size,
@@ -795,10 +823,6 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
             max_total_tokens=size,
             max_context_len=max_context_len,
         )
-
-        self._paged_cache_group_specs_by_id = {
-            spec.group_id: spec for spec in self.paged_cache_group_specs
-        }
 
         def _group_rows(group_id: str, default: int) -> int:
             spec = self._paged_cache_group_specs_by_id.get(group_id)
@@ -946,8 +970,30 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
 
     @property
     def prefix_cache_required_group_ids(self) -> tuple[str, ...]:
-        """All V4 paged-cache groups must be present for a snapshot to be complete."""
-        return tuple(str(spec.group_id) for spec in self.paged_cache_group_specs)
+        history_group_ids = tuple(
+            str(spec.group_id)
+            for spec in self.paged_cache_group_specs
+            if spec.family == "history"
+        )
+        return history_group_ids + self._prefix_cache_replay_seed_group_ids
+
+    def _compute_prefix_replay_window(self) -> int:
+        state_windows = [
+            int(spec.sliding_window_tokens or 0)
+            for spec in self.paged_cache_group_specs
+            if spec.family == "state"
+        ]
+        # These windows are token spans, not per-layer work units. Replaying
+        # one token span rebuilds all V4 state groups across layers.
+        replay_window = max([*state_windows, 1])
+        alignment = 1
+        for spec in self.paged_cache_group_specs:
+            if spec.family != "history":
+                continue
+            alignment = math.lcm(
+                alignment, int(spec.rows_per_page) * int(spec.entry_stride_tokens)
+            )
+        return ceil_div(replay_window, alignment) * alignment
 
     def _require(
         self, buffers: list[torch.Tensor | None], layer_id: int, name: str

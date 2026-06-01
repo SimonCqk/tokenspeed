@@ -39,6 +39,9 @@ class BaseTokenToKVPool:
 
     paged_cache_group_specs: tuple[PagedCacheGroupSpec, ...] = ()
     paged_cache_group_page_counts: dict[str, int] = {}
+    prefix_cache_replay_window_tokens: int = 0
+    prefix_cache_replay_seed_tokens: int = 0
+    supports_hierarchical_kv_cache: bool = True
 
     def __init__(
         self,

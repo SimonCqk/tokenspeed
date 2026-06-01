@@ -143,6 +143,19 @@ class TestV4SlidingWindowGroupsSmoke(unittest.TestCase):
         self.assertGreater(
             pool.paged_cache_group_page_counts["v4.c4a.compressed_kv"], 1
         )
+        self.assertFalse(hasattr(pool, "prefix_cache_state_policy"))
+        self.assertFalse(pool.supports_hierarchical_kv_cache)
+        self.assertEqual(pool.prefix_cache_replay_seed_tokens, 4)
+        self.assertEqual(pool.prefix_cache_replay_window_tokens, 256)
+        self.assertEqual(
+            pool.prefix_cache_required_group_ids,
+            (
+                "v4.c4a.compressed_kv",
+                "v4.c128a.compressed_kv",
+                "v4.c4a.compressor_state",
+                "v4.c4a.indexer_compressor_state",
+            ),
+        )
 
     def test_deepseek_v4_capacity_profile_matches_pool_buffers(self):
         from tokenspeed.runtime.layers.attention.kv_cache.deepseek_v4 import (

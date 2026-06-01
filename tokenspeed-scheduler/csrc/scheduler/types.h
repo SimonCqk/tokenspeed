@@ -42,7 +42,7 @@ enum class DisaggregationMode {
     kPrefill,
     kDecode,
 };
-// `PagedCacheGroupFamily` and `StateRestorePolicy` are defined in
+// `PagedCacheGroupFamily` is defined in
 // resource/allocator/paged_cache_group.h (transitively included above).
 
 template <ResourceType>
@@ -71,6 +71,8 @@ struct SchedulerStats {
 // groups are transport-only (no snapshot chain, no prefix-cache reuse).
 struct PrefixCacheAdjunctSpec {
     std::vector<std::string> required_groups{};
+    std::int32_t replay_window_tokens{0};
+    std::int32_t replay_seed_tokens{0};
 };
 
 struct SchedulerConfig {
