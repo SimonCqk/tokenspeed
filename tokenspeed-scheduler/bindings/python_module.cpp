@@ -215,9 +215,7 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
     // sliding-window metadata from the matching PagedCacheGroupConfig entries.
     nb::class_<tokenspeed::PrefixCacheAdjunctSpec>(m, "PrefixCacheAdjunctSpec")
         .def(nb::init<>())
-        .def_rw("required_groups", &tokenspeed::PrefixCacheAdjunctSpec::required_groups)
-        .def_rw("replay_window_tokens", &tokenspeed::PrefixCacheAdjunctSpec::replay_window_tokens)
-        .def_rw("replay_seed_tokens", &tokenspeed::PrefixCacheAdjunctSpec::replay_seed_tokens);
+        .def_rw("required_groups", &tokenspeed::PrefixCacheAdjunctSpec::required_groups);
 
     scheduler_config.def(nb::init<>())
         .def_rw("page_size", &tokenspeed::SchedulerConfig::page_size)

@@ -31,7 +31,7 @@
 namespace tokenspeed::test {
 namespace {
 
-class PagedCacheReplaySchedulerTest : public SchedulerTestSuite {
+class PagedCacheTerminalSchedulerTest : public SchedulerTestSuite {
 protected:
     SchedulerConfig MakeConfig() override {
         auto cfg = SchedulerTestSuite::MakeConfig();
@@ -63,7 +63,6 @@ protected:
 
         PrefixCacheAdjunctSpec spec{};
         spec.required_groups = {"fh"};
-        spec.replay_window_tokens = 8;
         cfg.prefix_cache_adjunct = spec;
         return cfg;
     }
@@ -76,10 +75,10 @@ protected:
     }
 };
 
-class PagedCacheReplayMixedSchedulerTest : public PagedCacheReplaySchedulerTest {
+class PagedCacheTerminalMixedSchedulerTest : public PagedCacheTerminalSchedulerTest {
 protected:
     SchedulerConfig MakeConfig() override {
-        auto cfg = PagedCacheReplaySchedulerTest::MakeConfig();
+        auto cfg = PagedCacheTerminalSchedulerTest::MakeConfig();
         cfg.device_allocator.total_pages = 256;
         cfg.max_scheduled_tokens = 128;
         cfg.enable_mixed_prefill_decode = true;
@@ -90,123 +89,15 @@ protected:
     }
 };
 
-class PagedCacheReplaySeedTest : public ::testing::Test {
+class PagedCacheTerminalContinuationTest : public ::testing::Test {
 protected:
     static constexpr std::int32_t kPageSize = 64;
     static constexpr std::int32_t kDevicePages = 64;
-    static constexpr std::int32_t kHistoryRawPerPage = 256;
-    static constexpr std::int32_t kSeedTokens = 4;
-    static constexpr std::int32_t kSeedWindow = 8;
-    static constexpr const char* kHistoryGroup = "history";
-    static constexpr const char* kSeedStateGroup = "seed_state";
-    static constexpr const char* kIndexerSeedStateGroup = "indexer_seed_state";
-
-    void SetUp() override {
-        device_alloc_ = std::make_unique<PageAllocator>(kPageSize, kDevicePages);
-        kv_cache_ = std::make_unique<KVPrefixCache>(device_alloc_.get(), /*host=*/nullptr);
-
-        auto fh_owner = std::make_unique<PagedCacheGroupAllocator>(MakeHistoryGroup(kHistoryGroup));
-        auto seed_owner = std::make_unique<PagedCacheGroupAllocator>(MakeSeedGroup(kSeedStateGroup));
-        auto indexer_owner = std::make_unique<PagedCacheGroupAllocator>(MakeSeedGroup(kIndexerSeedStateGroup));
-        fh_alloc_ = fh_owner.get();
-        seed_alloc_ = seed_owner.get();
-        indexer_alloc_ = indexer_owner.get();
-
-        hybrid_ = std::make_unique<HybridPrefixCache>(*kv_cache_, /*mamba=*/nullptr,
-                                                      /*mamba_chunk_size=*/0);
-        hybrid_->RegisterPagedCacheGroup(std::move(fh_owner));
-        hybrid_->RegisterPagedCacheGroup(std::move(seed_owner));
-        hybrid_->RegisterPagedCacheGroup(std::move(indexer_owner));
-        hybrid_->EnablePagedCacheAdjunct({kHistoryGroup, kSeedStateGroup, kIndexerSeedStateGroup},
-                                         {{kSeedStateGroup, kSeedWindow}, {kIndexerSeedStateGroup, kSeedWindow}},
-                                         /*replay_window_tokens=*/512, kSeedTokens);
-        kv_cache_->GetDeviceManager().SetEvictionCallback([this](TreeNode* node) { hybrid_->OnKVEvict(node); });
-    }
-
-    TreeNode* InsertDeviceTokens(std::int32_t raw_tokens, token_t token_start = 1) {
-        const std::int32_t num_pages = raw_tokens / kPageSize;
-        auto tokens = MakeAlignedTokens(num_pages, kPageSize, token_start);
-        OwnedPages pages = device_alloc_->Allocate(num_pages);
-        auto res = kv_cache_->Insert<ResourceType::Device>(tokens, /*prefix_pages=*/{}, std::move(pages),
-                                                           /*page_hashes=*/{}, /*start_node=*/nullptr);
-        return res.last_node;
-    }
-
-    std::unique_ptr<PagedCacheSnapshot> MakeSnapshot(std::int32_t prefix_len_tokens, bool include_seed = true) {
-        auto snap = std::make_unique<PagedCacheSnapshot>();
-        snap->prefix_len_tokens = prefix_len_tokens;
-        snap->groups.emplace(kHistoryGroup, BuildHistorySnap(prefix_len_tokens));
-        if (include_seed) {
-            snap->groups.emplace(kSeedStateGroup, BuildSeedSnap(seed_alloc_, prefix_len_tokens));
-            snap->groups.emplace(kIndexerSeedStateGroup, BuildSeedSnap(indexer_alloc_, prefix_len_tokens));
-        }
-        return snap;
-    }
-
-    static PagedCacheGroupConfig MakeHistoryGroup(std::string group_id) {
-        PagedCacheGroupConfig cfg{};
-        cfg.group_id = std::move(group_id);
-        cfg.rows_per_page = 64;
-        cfg.entry_stride_tokens = 4;
-        cfg.total_pages = 32;
-        cfg.retention = PagedCacheGroupConfig::Retention::FullHistory;
-        cfg.family = PagedCacheGroupFamily::History;
-        return cfg;
-    }
-
-    static PagedCacheGroupConfig MakeSeedGroup(std::string group_id) {
-        PagedCacheGroupConfig cfg{};
-        cfg.group_id = std::move(group_id);
-        cfg.rows_per_page = kSeedTokens;
-        cfg.entry_stride_tokens = 1;
-        cfg.total_pages = 256;
-        cfg.retention = PagedCacheGroupConfig::Retention::SlidingWindow;
-        cfg.sliding_window_tokens = kSeedWindow;
-        cfg.family = PagedCacheGroupFamily::State;
-        return cfg;
-    }
-
-    PagedCacheGroupSnapshot BuildHistorySnap(std::int32_t prefix_len_tokens) {
-        PagedCacheGroupTable table{fh_alloc_};
-        table.Acquire(kHistoryRawPerPage);
-        auto committed = table.CommitHistoryToSnapshot(kHistoryRawPerPage);
-        PagedCacheGroupSnapshot snap{};
-        snap.pages = std::move(committed.pages);
-        snap.base_logical_page = committed.segment_base_logical_page;
-        snap.raw_token_cursor = prefix_len_tokens;
-        snap.sliding = false;
-        return snap;
-    }
-
-    static PagedCacheGroupSnapshot BuildSeedSnap(PagedCacheGroupAllocator* alloc, std::int32_t prefix_len_tokens) {
-        PagedCacheGroupTable table{alloc};
-        table.Acquire(prefix_len_tokens);
-        auto committed = table.CheckpointStateSeedToSnapshot(prefix_len_tokens, kSeedTokens);
-        PagedCacheGroupSnapshot snap{};
-        snap.pages = std::move(committed.pages);
-        snap.base_logical_page = committed.segment_base_logical_page;
-        snap.raw_token_cursor = prefix_len_tokens;
-        snap.sliding = true;
-        return snap;
-    }
-
-    std::unique_ptr<PageAllocator> device_alloc_;
-    std::unique_ptr<KVPrefixCache> kv_cache_;
-    PagedCacheGroupAllocator* fh_alloc_{nullptr};
-    PagedCacheGroupAllocator* seed_alloc_{nullptr};
-    PagedCacheGroupAllocator* indexer_alloc_{nullptr};
-    std::unique_ptr<HybridPrefixCache> hybrid_;
-};
-
-class PagedCacheReplayTerminalContinuationTest : public ::testing::Test {
-protected:
-    static constexpr std::int32_t kPageSize = 64;
-    static constexpr std::int32_t kDevicePages = 64;
-    static constexpr std::int32_t kSeedTokens = 4;
-    static constexpr std::int32_t kSeedWindow = 8;
+    static constexpr std::int32_t kRequiredStateRows = 4;
+    static constexpr std::int32_t kRequiredStateWindow = 8;
     static constexpr std::int32_t kWindowStateTokens = 128;
     static constexpr const char* kHistoryGroup = "history";
-    static constexpr const char* kSeedStateGroup = "seed_state";
+    static constexpr const char* kRequiredStateGroup = "required_state";
     static constexpr const char* kWindowStateGroup = "window_state";
 
     void SetUp() override {
@@ -217,10 +108,10 @@ protected:
             MakeGroup(kHistoryGroup, /*rows_per_page=*/64, /*stride=*/1, PagedCacheGroupConfig::Retention::FullHistory,
                       std::nullopt, PagedCacheGroupFamily::History,
                       /*total_pages=*/64));
-        auto seed_owner = std::make_unique<PagedCacheGroupAllocator>(
-            MakeGroup(kSeedStateGroup, /*rows_per_page=*/4, /*stride=*/1,
-                      PagedCacheGroupConfig::Retention::SlidingWindow, kSeedWindow, PagedCacheGroupFamily::State,
-                      /*total_pages=*/128));
+        auto required_state_owner = std::make_unique<PagedCacheGroupAllocator>(MakeGroup(
+            kRequiredStateGroup, kRequiredStateRows, /*stride=*/1, PagedCacheGroupConfig::Retention::SlidingWindow,
+            kRequiredStateWindow, PagedCacheGroupFamily::State,
+            /*total_pages=*/128));
         auto window_owner = std::make_unique<PagedCacheGroupAllocator>(MakeGroup(
             kWindowStateGroup, /*rows_per_page=*/64, /*stride=*/1, PagedCacheGroupConfig::Retention::SlidingWindow,
             kWindowStateTokens, PagedCacheGroupFamily::State, /*total_pages=*/6));
@@ -228,11 +119,10 @@ protected:
         hybrid_ = std::make_unique<HybridPrefixCache>(*kv_cache_, /*mamba=*/nullptr,
                                                       /*mamba_chunk_size=*/0);
         hybrid_->RegisterPagedCacheGroup(std::move(history_owner));
-        hybrid_->RegisterPagedCacheGroup(std::move(seed_owner));
+        hybrid_->RegisterPagedCacheGroup(std::move(required_state_owner));
         hybrid_->RegisterPagedCacheGroup(std::move(window_owner));
-        hybrid_->EnablePagedCacheAdjunct({kHistoryGroup, kSeedStateGroup}, {{kSeedStateGroup, kSeedWindow}},
-                                         /*replay_window_tokens=*/kWindowStateTokens,
-                                         /*replay_seed_tokens=*/kSeedTokens);
+        hybrid_->EnablePagedCacheAdjunct({kHistoryGroup, kRequiredStateGroup},
+                                         {{kRequiredStateGroup, kRequiredStateWindow}});
         kv_cache_->GetDeviceManager().SetEvictionCallback([this](TreeNode* node) { hybrid_->OnKVEvict(node); });
     }
 
@@ -314,35 +204,7 @@ void ExpectPagedGroupCoversRange(const FlatForwardOperation& fwd, const Schedule
 
 }  // namespace
 
-TEST_F(PagedCacheReplaySchedulerTest, FirstChunkStartsAtReplayAnchor) {
-    Submit(MakeRequestSpec("r1", /*num_pages=*/16, /*start=*/1));
-    PlanOnce();
-    SendForwardDone("r1", {99});
-    PlanOnce();
-    SendFinish("r1");
-    PlanOnce();
-
-    Submit(MakeRequestSpec("r2", /*num_pages=*/16, /*start=*/1));
-    auto plan = PlanOnce();
-    auto* fwd = GetForwardOp(plan);
-    ASSERT_NE(fwd, nullptr);
-    ASSERT_EQ(fwd->extend_prefix_lens.size(), 1u);
-    ASSERT_EQ(fwd->input_lengths.size(), 1u);
-    EXPECT_EQ(fwd->extend_prefix_lens[0], 20);
-    EXPECT_EQ(fwd->input_lengths[0], 12);
-
-    auto fh_it = fwd->paged_cache_block_tables.find("fh");
-    ASSERT_NE(fh_it, fwd->paged_cache_block_tables.end());
-    ASSERT_FALSE(fh_it->second.empty());
-    EXPECT_EQ(fh_it->second[0].size(), 8u);
-
-    auto swa_it = fwd->paged_cache_block_tables.find("swa");
-    ASSERT_NE(swa_it, fwd->paged_cache_block_tables.end());
-    ASSERT_FALSE(swa_it->second.empty());
-    EXPECT_EQ(swa_it->second[0].size(), 10u);
-}
-
-TEST_F(PagedCacheReplayTerminalContinuationTest, ExactTerminalHitUsesContinuationStateWithoutReplay) {
+TEST_F(PagedCacheTerminalContinuationTest, ExactTerminalHitUsesContinuationStateWithoutReplay) {
     TreeNode* n256 = InsertDeviceTokens(256);
     ASSERT_NE(n256, nullptr);
     CommitRequest("r1", /*first_token=*/0, /*target=*/256, n256);
@@ -357,8 +219,8 @@ TEST_F(PagedCacheReplayTerminalContinuationTest, ExactTerminalHitUsesContinuatio
     EXPECT_EQ(first_match.paged_cache.last_node, n256);
     EXPECT_EQ(first_match.paged_cache.per_group_base_logical_page.at(kWindowStateGroup), 2);
     EXPECT_EQ(first_match.paged_cache.per_group_page_ids.at(kWindowStateGroup).size(), 2u);
-    EXPECT_EQ(first_match.paged_cache.per_group_base_logical_page.at(kSeedStateGroup), 63);
-    EXPECT_EQ(first_match.paged_cache.per_group_page_ids.at(kSeedStateGroup).size(), 1u);
+    EXPECT_EQ(first_match.paged_cache.per_group_base_logical_page.at(kRequiredStateGroup), 62);
+    EXPECT_EQ(first_match.paged_cache.per_group_page_ids.at(kRequiredStateGroup).size(), 2u);
 
     TreeNode* n320 = InsertDeviceTokens(320);
     ASSERT_NE(n320, nullptr);
@@ -376,11 +238,11 @@ TEST_F(PagedCacheReplayTerminalContinuationTest, ExactTerminalHitUsesContinuatio
     EXPECT_EQ(second_match.paged_cache.last_node, n320);
     EXPECT_EQ(second_match.paged_cache.per_group_base_logical_page.at(kWindowStateGroup), 3);
     EXPECT_EQ(second_match.paged_cache.per_group_page_ids.at(kWindowStateGroup).size(), 2u);
-    EXPECT_EQ(second_match.paged_cache.per_group_base_logical_page.at(kSeedStateGroup), 79);
-    EXPECT_EQ(second_match.paged_cache.per_group_page_ids.at(kSeedStateGroup).size(), 1u);
+    EXPECT_EQ(second_match.paged_cache.per_group_base_logical_page.at(kRequiredStateGroup), 78);
+    EXPECT_EQ(second_match.paged_cache.per_group_page_ids.at(kRequiredStateGroup).size(), 2u);
 }
 
-TEST_F(PagedCacheReplayTerminalContinuationTest, StatePruneDropsContinuationAndFallsBackToReplay) {
+TEST_F(PagedCacheTerminalContinuationTest, StatePruneDropsContinuationAndFallsBackToColdPrefill) {
     TreeNode* n256 = InsertDeviceTokens(256);
     ASSERT_NE(n256, nullptr);
     CommitRequest("r1", /*first_token=*/0, /*target=*/256, n256);
@@ -399,61 +261,46 @@ TEST_F(PagedCacheReplayTerminalContinuationTest, StatePruneDropsContinuationAndF
               n256->GetPagedCacheSnapshot()->groups.end());
 
     auto match = MatchTokens(256);
-    EXPECT_EQ(match.paged_cache.history_hit_tokens, 256);
-    EXPECT_LT(match.paged_cache.prefix_len_tokens, 256);
+    EXPECT_EQ(match.paged_cache.history_hit_tokens, 0);
+    EXPECT_EQ(match.paged_cache.prefix_len_tokens, 0);
+    EXPECT_TRUE(match.paged_cache.per_group_page_ids.empty());
 }
 
-TEST(PagedCacheReplayAdmissionTest, FreshNonSeedSlidingGroupAdmitsLongReplayFromWindowBase) {
-    auto device_alloc = std::make_unique<PageAllocator>(64, 128);
+TEST(PagedCacheHistoryOnlyTest, HistoryOnlyPrefixHitRemainsUsable) {
+    auto device_alloc = std::make_unique<PageAllocator>(64, 64);
     auto kv_cache = std::make_unique<KVPrefixCache>(device_alloc.get(), /*host_allocator=*/nullptr);
 
     PagedCacheGroupConfig history{};
     history.group_id = "fh";
     history.rows_per_page = 64;
-    history.entry_stride_tokens = 4;
-    history.total_pages = 32;
+    history.entry_stride_tokens = 1;
+    history.total_pages = 16;
     history.retention = PagedCacheGroupConfig::Retention::FullHistory;
     history.family = PagedCacheGroupFamily::History;
 
-    PagedCacheGroupConfig swa{};
-    swa.group_id = "swa";
-    swa.rows_per_page = 64;
-    swa.entry_stride_tokens = 1;
-    swa.total_pages = 5;
-    swa.retention = PagedCacheGroupConfig::Retention::SlidingWindow;
-    swa.sliding_window_tokens = 128;
-    swa.family = PagedCacheGroupFamily::State;
-
     auto history_owner = std::make_unique<PagedCacheGroupAllocator>(history);
-    auto swa_owner = std::make_unique<PagedCacheGroupAllocator>(swa);
     HybridPrefixCache hybrid(*kv_cache, /*mamba=*/nullptr, /*mamba_chunk_size=*/0);
     hybrid.RegisterPagedCacheGroup(std::move(history_owner));
-    hybrid.RegisterPagedCacheGroup(std::move(swa_owner));
+    hybrid.EnablePagedCacheAdjunct({"fh"}, {});
 
-    MatchResult::PagedCache hit{};
-    hit.last_node = kv_cache->GetRadixTree().Root();
-    hit.prefix_len_tokens = 3968;
-    hit.history_hit_tokens = 4096;
-    std::vector<std::int32_t> history_pages(16);
-    for (std::int32_t i = 0; i < static_cast<std::int32_t>(history_pages.size()); ++i) {
-        history_pages[static_cast<std::size_t>(i)] = i + 1;
-    }
-    hit.per_group_page_ids.emplace("fh", std::move(history_pages));
-    hit.per_group_base_logical_page.emplace("fh", 0);
+    auto tokens = MakeAlignedTokens(/*num_pages=*/4, /*page_size=*/64, /*start=*/1);
+    OwnedPages pages = device_alloc->Allocate(4);
+    auto inserted = kv_cache->Insert<ResourceType::Device>(tokens, /*prefix_pages=*/{}, std::move(pages),
+                                                           /*page_hashes=*/{}, /*start_node=*/nullptr);
+    ASSERT_NE(inserted.last_node, nullptr);
 
-    auto simulated_free = hybrid.InitialSimulatedFree();
-    ASSERT_EQ(simulated_free.at("swa"), 4);
-    ASSERT_TRUE(hybrid.AdmitChunk("r", /*first_raw_position_of_op=*/3968,
-                                  /*target_raw_tokens_exclusive=*/4096, simulated_free, hit));
-    EXPECT_EQ(simulated_free.at("swa"), 0);
+    hybrid.AcquireForRequest("r1", /*first_raw_position_of_op=*/0, /*target_raw_tokens_exclusive=*/256);
+    hybrid.CommitChunk("r1", inserted.last_node);
+    hybrid.ReleaseRequest("r1");
 
-    hybrid.AcquireForRequest("r", /*first_raw_position_of_op=*/3968,
-                             /*target_raw_tokens_exclusive=*/4096, hit);
-    EXPECT_EQ(hybrid.GetRequestPagedCacheBaseLogicalPage("r", "swa"), 60);
-    EXPECT_EQ(hybrid.GetRequestPagedCachePageIds("r", "swa").size(), 4u);
+    auto match = hybrid.Match(MakeAlignedTokens(/*num_pages=*/4, /*page_size=*/64, /*start=*/1));
+    EXPECT_EQ(match.paged_cache.history_hit_tokens, 256);
+    EXPECT_EQ(match.paged_cache.prefix_len_tokens, 256);
+    ASSERT_NE(match.paged_cache.last_node, nullptr);
+    ASSERT_EQ(match.paged_cache.per_group_page_ids.at("fh").size(), 4u);
 }
 
-TEST(PagedCacheReplayAdmissionTest, ExistingTransportStateGroupUsesSlidingWindowCredit) {
+TEST(PagedCacheAdmissionTest, ExistingTransportStateGroupUsesSlidingWindowCredit) {
     auto device_alloc = std::make_unique<PageAllocator>(64, 128);
     auto kv_cache = std::make_unique<KVPrefixCache>(device_alloc.get(), /*host_allocator=*/nullptr);
 
@@ -479,7 +326,7 @@ TEST(PagedCacheReplayAdmissionTest, ExistingTransportStateGroupUsesSlidingWindow
     HybridPrefixCache hybrid(*kv_cache, /*mamba=*/nullptr, /*mamba_chunk_size=*/0);
     hybrid.RegisterPagedCacheGroup(std::move(history_owner));
     hybrid.RegisterPagedCacheGroup(std::move(swa_owner));
-    hybrid.EnablePagedCacheAdjunct({"fh"}, {}, /*replay_window_tokens=*/32, /*replay_seed_tokens=*/4);
+    hybrid.EnablePagedCacheAdjunct({"fh"}, {});
 
     hybrid.AcquireForRequest("r", /*first_raw_position_of_op=*/0, /*target_raw_tokens_exclusive=*/32);
 
@@ -492,7 +339,7 @@ TEST(PagedCacheReplayAdmissionTest, ExistingTransportStateGroupUsesSlidingWindow
                  std::runtime_error);
 }
 
-TEST_F(PagedCacheReplayMixedSchedulerTest, MixedPrefillDecodePagedTablesCoverScheduledTokens) {
+TEST_F(PagedCacheTerminalMixedSchedulerTest, MixedPrefillDecodePagedTablesCoverScheduledTokens) {
     std::vector<std::string> decode_ids;
     for (int i = 0; i < 5; ++i) {
         decode_ids.push_back("decode_" + std::to_string(i));
@@ -537,68 +384,6 @@ TEST_F(PagedCacheReplayMixedSchedulerTest, MixedPrefillDecodePagedTablesCoverSch
         ExpectPagedGroupCoversRange(*fwd, Config(), "fh", row, first_token, fwd->input_lengths[row]);
         ExpectPagedGroupCoversRange(*fwd, Config(), "swa", row, first_token, fwd->input_lengths[row]);
     }
-}
-
-TEST_F(PagedCacheReplaySeedTest, ReplayImportsSeedHaloAtAnchorAndCapsHistoryExposure) {
-    TreeNode* terminal = InsertDeviceTokens(768);
-    ASSERT_NE(terminal, nullptr);
-
-    TreeNode* n256 = kv_cache_->GetRadixTree().SplitAt(terminal, 256);
-    TreeNode* n512 = kv_cache_->GetRadixTree().SplitAt(terminal, 512);
-    TreeNode* n768 = kv_cache_->GetRadixTree().SplitAt(terminal, 768);
-    ASSERT_NE(n256, nullptr);
-    ASSERT_NE(n512, nullptr);
-    ASSERT_NE(n768, nullptr);
-
-    hybrid_->AttachPagedCacheSnapshotToNode(n256, MakeSnapshot(256));
-    hybrid_->AttachPagedCacheSnapshotToNode(n512, MakeSnapshot(512, /*include_seed=*/false));
-    hybrid_->AttachPagedCacheSnapshotToNode(n768, MakeSnapshot(768, /*include_seed=*/false));
-
-    auto match = hybrid_->Match(MakeAlignedTokens(768 / kPageSize, kPageSize, /*start=*/1));
-    ASSERT_NE(match.paged_cache.last_node, nullptr);
-    EXPECT_EQ(match.paged_cache.history_hit_tokens, 768);
-    EXPECT_EQ(match.paged_cache.prefix_len_tokens, 256);
-    EXPECT_EQ(match.paged_cache.last_node, n256);
-
-    ASSERT_EQ(match.paged_cache.per_group_page_ids.at(kHistoryGroup).size(), 1u);
-    ASSERT_EQ(match.paged_cache.per_group_page_ids.at(kSeedStateGroup).size(), 1u);
-    ASSERT_EQ(match.paged_cache.per_group_page_ids.at(kIndexerSeedStateGroup).size(), 1u);
-    EXPECT_EQ(match.paged_cache.per_group_base_logical_page.at(kSeedStateGroup), 63);
-    EXPECT_EQ(match.paged_cache.per_group_base_logical_page.at(kIndexerSeedStateGroup), 63);
-
-    EXPECT_FALSE(n768->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::State));
-    hybrid_->AcquireForRequest("r", match.paged_cache.prefix_len_tokens, 768, match.paged_cache);
-    EXPECT_EQ(hybrid_->GetRequestPagedCacheBaseLogicalPage("r", kSeedStateGroup), 63);
-    EXPECT_EQ(hybrid_->GetRequestPagedCacheBaseLogicalPage("r", kIndexerSeedStateGroup), 63);
-
-    ASSERT_NO_THROW(hybrid_->CommitChunk("r", n768));
-    ASSERT_TRUE(n768->GetPagedCacheSnapshot()->IsCompleteFor(PagedCacheGroupFamily::State));
-    EXPECT_EQ(hybrid_->GetRequestPagedCacheBaseLogicalPage("r", kSeedStateGroup), 191);
-    EXPECT_EQ(hybrid_->GetRequestPagedCacheBaseLogicalPage("r", kIndexerSeedStateGroup), 191);
-    EXPECT_EQ(hybrid_->GetRequestPagedCachePageIds("r", kSeedStateGroup),
-              n768->GetPagedCacheSnapshot()->groups.at(kSeedStateGroup).pages.Ids());
-    EXPECT_EQ(hybrid_->GetRequestPagedCachePageIds("r", kIndexerSeedStateGroup),
-              n768->GetPagedCacheSnapshot()->groups.at(kIndexerSeedStateGroup).pages.Ids());
-}
-
-TEST_F(PagedCacheReplaySeedTest, ReplayDoesNotAdvancePastRequestedAnchorForDeeperSeed) {
-    TreeNode* terminal = InsertDeviceTokens(768);
-    ASSERT_NE(terminal, nullptr);
-
-    TreeNode* n256 = kv_cache_->GetRadixTree().SplitAt(terminal, 256);
-    TreeNode* n512 = kv_cache_->GetRadixTree().SplitAt(terminal, 512);
-    TreeNode* n768 = kv_cache_->GetRadixTree().SplitAt(terminal, 768);
-    ASSERT_NE(n256, nullptr);
-    ASSERT_NE(n512, nullptr);
-    ASSERT_NE(n768, nullptr);
-
-    hybrid_->AttachPagedCacheSnapshotToNode(n256, MakeSnapshot(256, /*include_seed=*/false));
-    hybrid_->AttachPagedCacheSnapshotToNode(n512, MakeSnapshot(512));
-    hybrid_->AttachPagedCacheSnapshotToNode(n768, MakeSnapshot(768, /*include_seed=*/false));
-
-    auto match = hybrid_->Match(MakeAlignedTokens(768 / kPageSize, kPageSize, /*start=*/1));
-    EXPECT_EQ(match.paged_cache.prefix_len_tokens, 0);
-    EXPECT_TRUE(match.paged_cache.per_group_page_ids.empty());
 }
 
 }  // namespace tokenspeed::test

@@ -281,9 +281,9 @@ void HybridPrefixCache::RefreshPagedCacheSnapshotCompleteness(PagedCacheSnapshot
     snapshot.continuation_state_complete = continuation_state_complete;
 }
 
-bool HybridPrefixCache::adoptExistingPagedCacheSnapshotForReplay(PagedCacheSnapshot& existing,
-                                                                 std::map<std::string, PagedCacheGroupTable>& tables,
-                                                                 std::int32_t target) {
+bool HybridPrefixCache::adoptExistingPagedCacheSnapshot(PagedCacheSnapshot& existing,
+                                                        std::map<std::string, PagedCacheGroupTable>& tables,
+                                                        std::int32_t target) {
     struct Adoption {
         std::string gid;
         PagedCacheGroupTable* table{nullptr};
@@ -302,12 +302,11 @@ bool HybridPrefixCache::adoptExistingPagedCacheSnapshotForReplay(PagedCacheSnaps
 
         const PagedCacheGroupFamily family = alloc_it->second->Config().family;
         auto segment_it = existing.groups.find(gid);
-        const bool has_segment = segment_it != existing.groups.end();
-        if (family == PagedCacheGroupFamily::History && !has_segment) {
+        if (segment_it == existing.groups.end()) {
             return false;
         }
 
-        actions.push_back(Adoption{gid, &table_it->second, has_segment ? &segment_it->second : nullptr, family});
+        actions.push_back(Adoption{gid, &table_it->second, &segment_it->second, family});
     }
 
     for (const auto& action : actions) {
@@ -316,26 +315,13 @@ bool HybridPrefixCache::adoptExistingPagedCacheSnapshotForReplay(PagedCacheSnaps
             continue;
         }
 
-        if (action.segment != nullptr) {
-            action.table->AdoptStateSnapshotSegment(action.segment->pages.Ids(), action.segment->base_logical_page,
-                                                    target);
-            continue;
-        }
-
-        auto result = action.table->CheckpointStateSeedToSnapshot(target, paged_cache_replay_seed_tokens_);
-        PagedCacheGroupSnapshot group_snap{};
-        group_snap.pages = std::move(result.pages);
-        group_snap.base_logical_page = result.segment_base_logical_page;
-        group_snap.raw_token_cursor = action.table->RawTokenCursor();
-        group_snap.sliding = action.table->IsSliding();
-        existing.groups.emplace(action.gid, std::move(group_snap));
+        action.table->AdoptStateSnapshotSegment(action.segment->pages.Ids(), action.segment->base_logical_page, target);
     }
     return true;
 }
 
 bool HybridPrefixCache::commitTerminalContinuationSnapshot(std::map<std::string, PagedCacheGroupTable>& tables,
                                                            TreeNode* terminal, std::int32_t target) {
-    if (paged_cache_replay_window_tokens_ <= 0) return false;
     if (paged_cache_continuation_state_groups_.empty()) return false;
     if (terminal == nullptr || target <= 0) return false;
 
@@ -348,7 +334,6 @@ bool HybridPrefixCache::commitTerminalContinuationSnapshot(std::map<std::string,
     struct Action {
         std::string gid;
         PagedCacheGroupTable* table{nullptr};
-        bool use_replay_seed{false};
     };
 
     std::vector<Action> actions;
@@ -366,9 +351,7 @@ bool HybridPrefixCache::commitTerminalContinuationSnapshot(std::map<std::string,
             return false;
         }
 
-        const bool replay_seed_group = paged_cache_state_group_set_.find(gid) != paged_cache_state_group_set_.end();
-        const std::int32_t retained_tokens =
-            replay_seed_group ? paged_cache_replay_seed_tokens_ : cfg.sliding_window_tokens.value_or(0);
+        const std::int32_t retained_tokens = cfg.sliding_window_tokens.value_or(0);
         if (retained_tokens <= 0 || retained_tokens % raw_per_page != 0) return false;
 
         const std::int32_t lower_raw = std::max(0, target - retained_tokens);
@@ -378,14 +361,12 @@ bool HybridPrefixCache::commitTerminalContinuationSnapshot(std::map<std::string,
         const std::int32_t table_end = table_base + table_it->second.Size();
         if (table_base > lower_page || table_end < target_page) return false;
 
-        actions.push_back(Action{gid, &table_it->second, replay_seed_group});
+        actions.push_back(Action{gid, &table_it->second});
     }
 
     bool committed_all = true;
     for (const auto& action : actions) {
-        auto result = action.use_replay_seed
-                          ? action.table->CheckpointStateSeedToSnapshot(target, paged_cache_replay_seed_tokens_)
-                          : action.table->CheckpointStateToSnapshot(target);
+        auto result = action.table->CheckpointStateToSnapshot(target);
         if (result.pages.Empty()) {
             committed_all = false;
             break;
@@ -537,9 +518,8 @@ void HybridPrefixCache::RegisterPagedCacheGroup(std::unique_ptr<PagedCacheGroupA
     paged_cache_allocators_.emplace(std::move(gid), std::move(allocator));
 }
 
-void HybridPrefixCache::EnablePagedCacheAdjunct(std::vector<std::string> required_groups,
-                                                std::unordered_map<std::string, std::int32_t> sliding_window_per_group,
-                                                std::int32_t replay_window_tokens, std::int32_t replay_seed_tokens) {
+void HybridPrefixCache::EnablePagedCacheAdjunct(
+    std::vector<std::string> required_groups, std::unordered_map<std::string, std::int32_t> sliding_window_per_group) {
     if (required_groups.empty()) {
         throw std::invalid_argument("HybridPrefixCache::EnablePagedCacheAdjunct: required_groups must be non-empty");
     }
@@ -587,30 +567,6 @@ void HybridPrefixCache::EnablePagedCacheAdjunct(std::vector<std::string> require
             "HybridPrefixCache::EnablePagedCacheAdjunct: sliding_window_per_group keys must exactly "
             "match the set of required groups whose retention is SlidingWindow");
     }
-    if (replay_window_tokens < 0) {
-        throw std::invalid_argument("HybridPrefixCache::EnablePagedCacheAdjunct: replay_window_tokens must be >= 0");
-    }
-    const bool replay_tail = replay_window_tokens > 0;
-    if (replay_tail && !state_gids.empty()) {
-        if (replay_seed_tokens <= 0) {
-            throw std::invalid_argument(
-                "HybridPrefixCache::EnablePagedCacheAdjunct: replay_seed_tokens must be positive when replay requires "
-                "State seed groups");
-        }
-        for (const auto& gid : state_gids) {
-            const auto& cfg = paged_cache_allocators_.find(gid)->second->Config();
-            const std::int32_t raw_per_page = cfg.RawTokensPerPage();
-            if (replay_seed_tokens % raw_per_page != 0) {
-                throw std::invalid_argument("HybridPrefixCache::EnablePagedCacheAdjunct: replay seed group '" + gid +
-                                            "' requires replay_seed_tokens to be page-aligned");
-            }
-            if (!cfg.sliding_window_tokens.has_value() || replay_seed_tokens > *cfg.sliding_window_tokens) {
-                throw std::invalid_argument("HybridPrefixCache::EnablePagedCacheAdjunct: replay seed group '" + gid +
-                                            "' has a seed larger than its sliding window");
-            }
-        }
-    }
-
     // History alignment = LCM(raw_per_page) across History-family groups.
     std::int32_t history_alignment = 1;
     for (const auto& gid : history_gids) {
@@ -629,17 +585,16 @@ void HybridPrefixCache::EnablePagedCacheAdjunct(std::vector<std::string> require
         }
         continuation_state_gids.push_back(gid);
     }
-    // Snapshot restore needs page-aligned State segments; replay restore derives
-    // State locally, so only History alignment matters.
-    if (!replay_tail) {
-        for (const auto& gid : state_gids) {
-            const auto& cfg = paged_cache_allocators_.find(gid)->second->Config();
-            const std::int32_t raw_per_page = cfg.RawTokensPerPage();
-            if (history_alignment % raw_per_page != 0) {
-                throw std::invalid_argument("HybridPrefixCache::EnablePagedCacheAdjunct: state group '" + gid +
-                                            "' RawTokensPerPage=" + std::to_string(raw_per_page) +
-                                            " does not divide history_alignment=" + std::to_string(history_alignment));
-            }
+    // Required State restore needs page-aligned State segments at every history
+    // snapshot boundary. Transport-only State groups are only restored from the
+    // exact terminal continuation snapshot.
+    for (const auto& gid : state_gids) {
+        const auto& cfg = paged_cache_allocators_.find(gid)->second->Config();
+        const std::int32_t raw_per_page = cfg.RawTokensPerPage();
+        if (history_alignment % raw_per_page != 0) {
+            throw std::invalid_argument("HybridPrefixCache::EnablePagedCacheAdjunct: state group '" + gid +
+                                        "' RawTokensPerPage=" + std::to_string(raw_per_page) +
+                                        " does not divide history_alignment=" + std::to_string(history_alignment));
         }
     }
 
@@ -655,8 +610,6 @@ void HybridPrefixCache::EnablePagedCacheAdjunct(std::vector<std::string> require
         std::unordered_set<std::string>(paged_cache_state_groups_.begin(), paged_cache_state_groups_.end());
     paged_cache_continuation_state_group_set_ = std::unordered_set<std::string>(
         paged_cache_continuation_state_groups_.begin(), paged_cache_continuation_state_groups_.end());
-    paged_cache_replay_window_tokens_ = replay_tail ? replay_window_tokens : 0;
-    paged_cache_replay_seed_tokens_ = replay_tail ? replay_seed_tokens : 0;
 }
 
 namespace {
@@ -778,56 +731,6 @@ bool AssemblePagedCacheStateGroupPagesToTarget(MatchResult::PagedCache& out, con
     return true;
 }
 
-struct ReplayTailAnchorSelection {
-    TreeNode* anchor_node{nullptr};
-    std::int32_t replay_start{0};
-    std::vector<TreeNode*> import_chain{};
-};
-
-ReplayTailAnchorSelection SelectReplayTailAnchor(TreeNode* root, std::span<TreeNode* const> history_chain,
-                                                 std::int32_t requested_replay_start, bool requires_state_seed) {
-    ReplayTailAnchorSelection selected{};
-    selected.anchor_node = root;
-
-    if (!requires_state_seed) {
-        if (requested_replay_start == 0) return selected;
-        for (TreeNode* n : history_chain) {
-            const std::int32_t depth = static_cast<std::int32_t>(n->DepthInTokens());
-            if (depth > requested_replay_start) break;
-            selected.import_chain.push_back(n);
-            if (depth == requested_replay_start) {
-                selected.anchor_node = n;
-                selected.replay_start = depth;
-                return selected;
-            }
-        }
-        selected.import_chain.clear();
-        selected.anchor_node = root;
-        selected.replay_start = 0;
-        return selected;
-    }
-
-    // The replay window is the minimum warmup needed to rebuild non-snapshot
-    // state such as SWA, so missing seeds may only move the anchor earlier.
-    for (TreeNode* n : history_chain) {
-        const std::int32_t depth = static_cast<std::int32_t>(n->DepthInTokens());
-        if (depth > requested_replay_start) break;
-        const auto* snap = n->GetPagedCacheSnapshot();
-        if (snap != nullptr && snap->IsCompleteFor(PagedCacheGroupFamily::State)) {
-            selected.anchor_node = n;
-            selected.replay_start = depth;
-        }
-    }
-
-    if (selected.replay_start == 0) return selected;
-    for (TreeNode* n : history_chain) {
-        const std::int32_t depth = static_cast<std::int32_t>(n->DepthInTokens());
-        if (depth > selected.replay_start) break;
-        selected.import_chain.push_back(n);
-    }
-    return selected;
-}
-
 }  // namespace
 
 void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
@@ -868,8 +771,8 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
     match.paged_cache.per_group_base_logical_page.clear();
     match.paged_cache.history_hit_tokens = static_cast<std::int32_t>(deepest_history->DepthInTokens());
 
-    if (paged_cache_replay_window_tokens_ > 0) {
-        const std::int32_t history_hit = match.paged_cache.history_hit_tokens;
+    const std::int32_t history_hit = match.paged_cache.history_hit_tokens;
+    if (!paged_cache_continuation_state_groups_.empty()) {
         const auto* terminal_snap = deepest_history->GetPagedCacheSnapshot();
         if (terminal_snap != nullptr && terminal_snap->continuation_state_complete &&
             terminal_snap->prefix_len_tokens == history_hit) {
@@ -892,11 +795,7 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
                     continuation_ok = false;
                     break;
                 }
-                const bool replay_seed_group =
-                    paged_cache_state_group_set_.find(gid) != paged_cache_state_group_set_.end();
-                const std::int32_t retained_tokens = replay_seed_group
-                                                         ? paged_cache_replay_seed_tokens_
-                                                         : alloc_it->second->Config().sliding_window_tokens.value_or(0);
+                const std::int32_t retained_tokens = alloc_it->second->Config().sliding_window_tokens.value_or(0);
                 if (!AssemblePagedCacheStateGroupPagesToTarget(terminal_hit, gid, history_span, *alloc_it->second,
                                                                history_hit, retained_tokens)) {
                     continuation_ok = false;
@@ -912,52 +811,10 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
         }
     }
 
-    if (paged_cache_replay_window_tokens_ > 0) {
-        const std::int32_t history_hit = match.paged_cache.history_hit_tokens;
-        const std::int32_t raw_anchor = std::max(0, history_hit - paged_cache_replay_window_tokens_);
-        const std::int32_t replay_start_floor = (raw_anchor / align) * align;
-        const std::int32_t requested_replay_start = replay_start_floor;
-        const auto anchor =
-            SelectReplayTailAnchor(RootOf(match.device.last_node), std::span<TreeNode* const>{history_chain},
-                                   requested_replay_start, !paged_cache_state_groups_.empty());
-        const std::int32_t replay_start = anchor.replay_start;
-
-        if (anchor.anchor_node == nullptr) {
-            cap_to_root();
-            return;
-        }
-
-        match.paged_cache.last_node = anchor.anchor_node;
-        match.paged_cache.prefix_len_tokens = replay_start;
-
-        if (!anchor.import_chain.empty()) {
-            const std::span<TreeNode* const> history_span{anchor.import_chain};
-            for (const auto& gid : paged_cache_history_groups_) {
-                const bool is_sliding =
-                    paged_cache_sliding_window_per_group_.find(gid) != paged_cache_sliding_window_per_group_.end();
-                AssemblePagedCacheGroupPages(match.paged_cache, gid, history_span, is_sliding);
-            }
-        }
-        if (!paged_cache_state_groups_.empty() && replay_start > 0) {
-            const auto* snap = anchor.anchor_node != nullptr ? anchor.anchor_node->GetPagedCacheSnapshot() : nullptr;
-            if (snap == nullptr || !snap->IsCompleteFor(PagedCacheGroupFamily::State)) {
-                cap_to_root();
-                return;
-            }
-            for (const auto& gid : paged_cache_state_groups_) {
-                const auto snap_it = snap->groups.find(gid);
-                const auto alloc_it = paged_cache_allocators_.find(gid);
-                if (snap_it == snap->groups.end() || alloc_it == paged_cache_allocators_.end() ||
-                    !ImportPagedCacheGroupSnapshot(match.paged_cache, gid, snap_it->second, *alloc_it->second,
-                                                   replay_start)) {
-                    cap_to_root();
-                    return;
-                }
-            }
-        }
-
-        match.device.last_node = anchor.anchor_node;
-        match.host.last_node = CapNodeToDepth(match.host.last_node, replay_start);
+    const bool has_transport_only_state =
+        paged_cache_continuation_state_group_set_.size() != paged_cache_state_group_set_.size();
+    if (has_transport_only_state) {
+        cap_to_root();
         return;
     }
 
@@ -1244,19 +1101,15 @@ HybridPrefixCache::PagedCacheGroupAdmission HybridPrefixCache::checkPagedCacheGr
             // Required State-family groups: CommitChunk converts the retained
             // snapshot tail from owned to borrowed before ReleaseSkipped runs,
             // so the only immediate pool credit is from stale-owned pages
-            // dropped at the first commit step. Replay-tail seed groups retain
-            // only their seed halo. Transport-only State groups do not
-            // participate in CommitChunk and must keep the ReleaseSkipped
-            // estimate above.
+            // dropped at the first commit step. Transport-only State groups do
+            // not participate in intermediate snapshots and must keep the
+            // ReleaseSkipped estimate above.
             const std::int32_t lcm = paged_cache_history_alignment_tokens_;
             const bool required_state_group =
                 paged_cache_state_group_set_.find(gid) != paged_cache_state_group_set_.end();
             if (required_state_group && table_exists && lcm > 0 && committed_prefix + lcm <= raw_cursor) {
                 const std::int32_t commit_target = committed_prefix + lcm;
-                const std::int32_t retained_tokens =
-                    (paged_cache_replay_window_tokens_ > 0 && paged_cache_replay_seed_tokens_ > 0)
-                        ? paged_cache_replay_seed_tokens_
-                        : *cfg.sliding_window_tokens;
+                const std::int32_t retained_tokens = *cfg.sliding_window_tokens;
                 const std::int32_t live_lower_raw = std::max(0, commit_target - retained_tokens);
                 const std::int32_t live_lower_page = live_lower_raw / raw_per_page;
                 std::int32_t base = already_released;
@@ -1504,41 +1357,16 @@ void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* ter
         if (attach_node == nullptr) break;
 
         if (attach_node->HasPagedCacheSnapshot()) {
-            if (paged_cache_replay_window_tokens_ > 0) {
-                PagedCacheSnapshot* existing = attach_node->GetPagedCacheSnapshotMut();
-                const bool adopted =
-                    existing != nullptr && adoptExistingPagedCacheSnapshotForReplay(*existing, tables, target);
-                if (!adopted) {
-                    spdlog::warn(
-                        "[HybridPrefixCache] CommitChunk: replay adoption failed for request {} at target depth {}; "
-                        "leaving existing snapshot intact",
-                        request_id, target);
-                    break;
-                }
-                RefreshPagedCacheSnapshotCompleteness(*existing);
-                last_committed = target;
-                continue;
-            }
-            bool covered = true;
-            for (const auto& gid : required_groups) {
-                auto t_it = tables.find(gid);
-                if (t_it == tables.end()) {
-                    covered = false;
-                    break;
-                }
-                if (t_it->second.CommittedPrefixLenTokens() < target) {
-                    covered = false;
-                    break;
-                }
-            }
-            if (!covered) {
+            PagedCacheSnapshot* existing = attach_node->GetPagedCacheSnapshotMut();
+            const bool adopted = existing != nullptr && adoptExistingPagedCacheSnapshot(*existing, tables, target);
+            if (!adopted) {
                 spdlog::warn(
-                    "[HybridPrefixCache] CommitChunk: target depth {} already has a paged-cache "
-                    "snapshot but request {} has uncommitted owned pages in [{}, {}); leaving "
-                    "existing snapshot intact",
-                    target, request_id, last_committed, target);
+                    "[HybridPrefixCache] CommitChunk: existing snapshot adoption failed for request {} at target "
+                    "depth {}; leaving existing snapshot intact",
+                    request_id, target);
                 break;
             }
+            RefreshPagedCacheSnapshotCompleteness(*existing);
             last_committed = target;
             continue;
         }
@@ -1587,11 +1415,8 @@ void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* ter
             auto& table = tables.find(gid)->second;
             auto group_alloc_it = paged_cache_allocators_.find(gid);
             const auto& cfg = group_alloc_it->second->Config();
-            auto result = cfg.family == PagedCacheGroupFamily::History
-                              ? table.CommitHistoryToSnapshot(target)
-                              : (paged_cache_replay_window_tokens_ > 0
-                                     ? table.CheckpointStateSeedToSnapshot(target, paged_cache_replay_seed_tokens_)
-                                     : table.CheckpointStateToSnapshot(target));
+            auto result = cfg.family == PagedCacheGroupFamily::History ? table.CommitHistoryToSnapshot(target)
+                                                                       : table.CheckpointStateToSnapshot(target);
             PagedCacheGroupSnapshot group_snap{};
             group_snap.pages = std::move(result.pages);
             group_snap.base_logical_page = result.segment_base_logical_page;

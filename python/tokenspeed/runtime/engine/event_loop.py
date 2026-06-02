@@ -303,11 +303,7 @@ class EventLoop:
         prefix_cache_adjunct = None
         required_groups = token_to_kv_pool.prefix_cache_required_group_ids
         if required_groups is not None and server_args.enable_prefix_caching:
-            prefix_cache_adjunct = pool_to_prefix_cache_adjunct_spec(
-                required_groups,
-                replay_window_tokens=token_to_kv_pool.prefix_cache_replay_window_tokens,
-                replay_seed_tokens=token_to_kv_pool.prefix_cache_replay_seed_tokens,
-            )
+            prefix_cache_adjunct = pool_to_prefix_cache_adjunct_spec(required_groups)
         scheduler_cfg = make_config(
             num_device_pages=self.max_total_num_tokens // server_args.block_size,
             max_scheduled_tokens=server_args.chunked_prefill_size,

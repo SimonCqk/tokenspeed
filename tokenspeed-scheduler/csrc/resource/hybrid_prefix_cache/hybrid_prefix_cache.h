@@ -76,8 +76,7 @@ public:
     // groups; state groups only need the trailing window. Sliding groups must
     // have a window entry; full-history groups must not.
     void EnablePagedCacheAdjunct(std::vector<std::string> required_groups,
-                                 std::unordered_map<std::string, std::int32_t> sliding_window_per_group,
-                                 std::int32_t replay_window_tokens = 0, std::int32_t replay_seed_tokens = 0);
+                                 std::unordered_map<std::string, std::int32_t> sliding_window_per_group);
 
     bool HasMambaAdjunct() const { return mamba_allocator_ != nullptr; }
     bool HasPagedCacheAdjunct() const { return paged_cache_history_alignment_tokens_ > 0; }
@@ -171,9 +170,8 @@ private:
     bool DetachStateSnapshotFromNode(TreeNode* node);
 
     void RefreshPagedCacheSnapshotCompleteness(PagedCacheSnapshot& snapshot) const;
-    bool adoptExistingPagedCacheSnapshotForReplay(PagedCacheSnapshot& existing,
-                                                  std::map<std::string, PagedCacheGroupTable>& tables,
-                                                  std::int32_t target);
+    bool adoptExistingPagedCacheSnapshot(PagedCacheSnapshot& existing,
+                                         std::map<std::string, PagedCacheGroupTable>& tables, std::int32_t target);
     bool commitTerminalContinuationSnapshot(std::map<std::string, PagedCacheGroupTable>& tables, TreeNode* terminal,
                                             std::int32_t target);
 
@@ -226,8 +224,6 @@ private:
     std::unordered_set<std::string> paged_cache_history_group_set_;
     std::unordered_set<std::string> paged_cache_state_group_set_;
     std::unordered_set<std::string> paged_cache_continuation_state_group_set_;
-    std::int32_t paged_cache_replay_window_tokens_{0};
-    std::int32_t paged_cache_replay_seed_tokens_{0};
 
     // TODO(snapshot-lru-perf): O(N log N) per prune; swap in LRU index if profiling shows it matters.
     std::unordered_set<TreeNode*> paged_cache_snapshot_nodes_;

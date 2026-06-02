@@ -149,15 +149,11 @@ class TestV4SlidingWindowGroupsSmoke(unittest.TestCase):
         )
         self.assertFalse(hasattr(pool, "prefix_cache_state_policy"))
         self.assertFalse(pool.supports_hierarchical_kv_cache)
-        self.assertEqual(pool.prefix_cache_replay_seed_tokens, 4)
-        self.assertEqual(pool.prefix_cache_replay_window_tokens, 256)
         self.assertEqual(
             pool.prefix_cache_required_group_ids,
             (
                 "v4.c4a.compressed_kv",
                 "v4.c128a.compressed_kv",
-                "v4.c4a.compressor_state",
-                "v4.c4a.indexer_compressor_state",
             ),
         )
 

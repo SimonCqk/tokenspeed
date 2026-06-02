@@ -127,8 +127,7 @@ Scheduler::Scheduler(SchedulerConfig config)
                     sliding_window_per_group.emplace(gid, *cfg->sliding_window_tokens);
                 }
             }
-            hybrid_prefix_cache_->EnablePagedCacheAdjunct(spec.required_groups, std::move(sliding_window_per_group),
-                                                          spec.replay_window_tokens, spec.replay_seed_tokens);
+            hybrid_prefix_cache_->EnablePagedCacheAdjunct(spec.required_groups, std::move(sliding_window_per_group));
         }
     }
 }

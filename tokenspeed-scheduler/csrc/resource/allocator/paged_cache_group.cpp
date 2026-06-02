@@ -197,7 +197,7 @@ void PagedCacheGroupTable::AdoptSnapshotSegment(const std::vector<std::int32_t>&
         throw std::invalid_argument("PagedCacheGroupTable::AdoptSnapshotSegment: snapshot segment size mismatch");
     }
     if (pages_to_adopt > owned_pages_.Size()) {
-        throw std::logic_error("PagedCacheGroupTable::AdoptSnapshotSegment: not enough replay-owned pages");
+        throw std::logic_error("PagedCacheGroupTable::AdoptSnapshotSegment: not enough local pages");
     }
 
     OwnedPages dropped = owned_pages_.TakeFirst(pages_to_adopt);
@@ -286,84 +286,6 @@ PagedCacheGroupTable::CommitResult PagedCacheGroupTable::CheckpointStateToSnapsh
     return CommitResult{std::move(segment), segment_base_logical_page};
 }
 
-PagedCacheGroupTable::CommitResult PagedCacheGroupTable::CheckpointStateSeedToSnapshot(std::int32_t target_raw_tokens,
-                                                                                       std::int32_t seed_tokens) {
-    if (allocator_ == nullptr) {
-        throw std::logic_error("PagedCacheGroupTable::CheckpointStateSeedToSnapshot: no allocator bound");
-    }
-    const auto& cfg = allocator_->Config();
-    if (cfg.family != PagedCacheGroupFamily::State) {
-        throw std::logic_error("PagedCacheGroupTable::CheckpointStateSeedToSnapshot: requires State family; group=" +
-                               cfg.group_id);
-    }
-    if (!cfg.sliding_window_tokens.has_value() || *cfg.sliding_window_tokens <= 0) {
-        throw std::logic_error(
-            "PagedCacheGroupTable::CheckpointStateSeedToSnapshot: State family requires positive"
-            " sliding_window_tokens; group=" +
-            cfg.group_id);
-    }
-    if (target_raw_tokens <= committed_prefix_len_tokens_) {
-        return {};
-    }
-    if (target_raw_tokens > raw_token_cursor_) {
-        throw std::invalid_argument(
-            "PagedCacheGroupTable::CheckpointStateSeedToSnapshot: target exceeds raw_token_cursor; target=" +
-            std::to_string(target_raw_tokens) + "; cursor=" + std::to_string(raw_token_cursor_));
-    }
-    const std::int32_t raw_per_page = cfg.RawTokensPerPage();
-    if (raw_per_page <= 0) {
-        throw std::logic_error(
-            "PagedCacheGroupTable::CheckpointStateSeedToSnapshot: invalid group config (raw_per_page <= 0)");
-    }
-    if (seed_tokens <= 0 || seed_tokens % raw_per_page != 0) {
-        throw std::invalid_argument(
-            "PagedCacheGroupTable::CheckpointStateSeedToSnapshot: seed_tokens must be positive and page-aligned");
-    }
-    if (seed_tokens > *cfg.sliding_window_tokens) {
-        throw std::invalid_argument(
-            "PagedCacheGroupTable::CheckpointStateSeedToSnapshot: seed_tokens exceeds sliding window");
-    }
-    if (target_raw_tokens % raw_per_page != 0) {
-        throw std::invalid_argument(
-            "PagedCacheGroupTable::CheckpointStateSeedToSnapshot: target not page-aligned; target=" +
-            std::to_string(target_raw_tokens) + "; raw_per_page=" + std::to_string(raw_per_page));
-    }
-
-    const std::int32_t seed_lower_raw = std::max(0, target_raw_tokens - seed_tokens);
-    const std::int32_t seed_lower_page = seed_lower_raw / raw_per_page;
-    if (seed_lower_page > base_logical_page_) {
-        const std::int32_t borrowed_to_drop = std::min<std::int32_t>(
-            seed_lower_page - base_logical_page_, static_cast<std::int32_t>(borrowed_page_ids_.size()));
-        if (borrowed_to_drop > 0) {
-            borrowed_page_ids_.erase(borrowed_page_ids_.begin(), borrowed_page_ids_.begin() + borrowed_to_drop);
-            base_logical_page_ += borrowed_to_drop;
-        }
-    }
-    if (seed_lower_page > base_logical_page_) {
-        const std::int32_t owned_to_drop =
-            std::min<std::int32_t>(seed_lower_page - base_logical_page_, owned_pages_.Size());
-        if (owned_to_drop > 0) {
-            OwnedPages dropped = owned_pages_.TakeFirst(owned_to_drop);
-            (void)dropped;
-            base_logical_page_ += owned_to_drop;
-        }
-    }
-
-    const std::int32_t pages_to_commit = (target_raw_tokens - seed_lower_raw) / raw_per_page;
-    if (pages_to_commit > owned_pages_.Size()) {
-        throw std::logic_error(
-            "PagedCacheGroupTable::CheckpointStateSeedToSnapshot: not enough owned seed pages; want=" +
-            std::to_string(pages_to_commit) + "; have_owned=" + std::to_string(owned_pages_.Size()));
-    }
-    const std::int32_t segment_base_logical_page = seed_lower_page;
-    OwnedPages segment = owned_pages_.TakeFirst(pages_to_commit);
-    const auto& seg_ids = segment.Ids();
-    borrowed_page_ids_.insert(borrowed_page_ids_.end(), seg_ids.begin(), seg_ids.end());
-    committed_prefix_len_tokens_ = target_raw_tokens;
-    RefreshPageIdsView();
-    return CommitResult{std::move(segment), segment_base_logical_page};
-}
-
 void PagedCacheGroupTable::AdoptStateSnapshotSegment(const std::vector<std::int32_t>& ids,
                                                      std::int32_t base_logical_page, std::int32_t target_raw_tokens) {
     if (allocator_ == nullptr) {
@@ -422,7 +344,7 @@ void PagedCacheGroupTable::AdoptStateSnapshotSegment(const std::vector<std::int3
     }
 
     if (pages_to_adopt > Size()) {
-        throw std::logic_error("PagedCacheGroupTable::AdoptStateSnapshotSegment: not enough replay pages to replace");
+        throw std::logic_error("PagedCacheGroupTable::AdoptStateSnapshotSegment: not enough local pages to replace");
     }
     const std::int32_t borrowed_replace =
         std::min(pages_to_adopt, static_cast<std::int32_t>(borrowed_page_ids_.size()));

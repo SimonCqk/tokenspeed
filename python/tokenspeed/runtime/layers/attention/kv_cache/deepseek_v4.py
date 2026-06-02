@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any, Iterable, Optional, Sequence
@@ -24,7 +23,6 @@ import torch
 
 from tokenspeed.runtime.configs.deepseek_v4_cache_spec import (
     DEEPSEEK_V4_COMPRESSED_LOGICAL_BLOCK_SIZE,
-    DEEPSEEK_V4_CSA_OVERLAP_SEED_TOKENS,
     V4_INDEXER_COMPRESSOR_STATE_GROUP_ID,
     V4_KERNEL_BLOCK_ROWS,
     V4_SWA_KV_GROUP_ID,
@@ -809,20 +807,6 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
             for spec in self.paged_cache_group_specs
             if spec.family == "state"
         )
-        self.prefix_cache_replay_window_tokens = self._compute_prefix_replay_window()
-        self._prefix_cache_replay_seed_group_ids = tuple(
-            gid
-            for gid in (
-                v4_compressor_state_group_id(4),
-                V4_INDEXER_COMPRESSOR_STATE_GROUP_ID,
-            )
-            if gid in self._paged_cache_group_specs_by_id
-        )
-        self.prefix_cache_replay_seed_tokens = (
-            DEEPSEEK_V4_CSA_OVERLAP_SEED_TOKENS
-            if self._prefix_cache_replay_seed_group_ids
-            else 0
-        )
         self.paged_cache_group_page_counts = compute_paged_cache_group_page_counts(
             self.paged_cache_group_specs,
             max_live_requests=max_batch_size,
@@ -977,12 +961,11 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
 
     @property
     def prefix_cache_required_group_ids(self) -> tuple[str, ...]:
-        history_group_ids = tuple(
+        return tuple(
             str(spec.group_id)
             for spec in self.paged_cache_group_specs
             if spec.family == "history"
         )
-        return history_group_ids + self._prefix_cache_replay_seed_group_ids
 
     def bind_paged_cache_scheduler(self, scheduler: object) -> None:
         self._paged_cache_scheduler = scheduler
@@ -1004,24 +987,6 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
                 f"available={available}, failed_alloc={failed}"
             )
         logger.debug("DeepSeek V4 paged-cache state group pages. %s", "; ".join(parts))
-
-    def _compute_prefix_replay_window(self) -> int:
-        state_windows = [
-            int(spec.sliding_window_tokens or 0)
-            for spec in self.paged_cache_group_specs
-            if spec.family == "state"
-        ]
-        # These windows are token spans, not per-layer work units. Replaying
-        # one token span rebuilds all V4 state groups across layers.
-        replay_window = max([*state_windows, 1])
-        alignment = 1
-        for spec in self.paged_cache_group_specs:
-            if spec.family != "history":
-                continue
-            alignment = math.lcm(
-                alignment, int(spec.rows_per_page) * int(spec.entry_stride_tokens)
-            )
-        return ceil_div(replay_window, alignment) * alignment
 
     def _require(
         self, buffers: list[torch.Tensor | None], layer_id: int, name: str

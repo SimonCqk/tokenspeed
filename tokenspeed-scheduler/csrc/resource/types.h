@@ -72,8 +72,9 @@ struct MatchResult {
     std::int32_t mamba_cow_src_index{-1};
     std::int32_t mamba_host_src_index{-1};
 
-    // Paged-cache adjunct hit. Null last_node or zero prefix means no imported prefix
-    // (replay may still report a deeper history_hit_tokens).
+    // Paged-cache adjunct hit. Null last_node or zero prefix means no imported prefix.
+    // history_hit_tokens records the deepest complete history chain observed; it may
+    // be deeper than prefix_len_tokens when state restoration is unavailable.
     // When hit, device/host last_node also sit at or before prefix_len_tokens.
     // base_logical_page is 0 for full-history groups; > 0 for sliding windows.
     // TODO(match-result-pagedcache-zero-copy): return snapshot+depth and walk on demand.

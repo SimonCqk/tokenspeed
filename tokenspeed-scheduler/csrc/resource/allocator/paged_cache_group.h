@@ -131,8 +131,8 @@ public:
     // borrowed_page_ids_. Throws for non-History family groups.
     CommitResult CommitHistoryToSnapshot(std::int32_t target_raw_tokens);
 
-    // History replay: discard locally-replayed duplicate pages for
-    // [committed, target) and replace them with the canonical snapshot segment.
+    // History adoption: discard local duplicate pages for [committed, target)
+    // and replace them with the canonical snapshot segment.
     void AdoptSnapshotSegment(const std::vector<std::int32_t>& ids, std::int32_t target_raw_tokens);
 
     // State checkpoint: snapshot the live trailing window [max(0,target-W),
@@ -141,13 +141,8 @@ public:
     // non-State family groups or when sliding_window_tokens is missing/non-positive.
     CommitResult CheckpointStateToSnapshot(std::int32_t target_raw_tokens);
 
-    // Replay seed checkpoint: snapshot only the tail [target-seed, target).
-    // This is for non-replayable overlap state and deliberately stores less
-    // than the full sliding window.
-    CommitResult CheckpointStateSeedToSnapshot(std::int32_t target_raw_tokens, std::int32_t seed_tokens);
-
-    // Replay seed adoption: replace locally replayed duplicate pages for the
-    // snapshot segment with canonical borrowed ids.
+    // State adoption: replace local duplicate pages for the snapshot segment
+    // with canonical borrowed ids.
     void AdoptStateSnapshotSegment(const std::vector<std::int32_t>& ids, std::int32_t base_logical_page,
                                    std::int32_t target_raw_tokens);
 
