@@ -19,7 +19,6 @@
 # SOFTWARE.
 
 import faulthandler
-import logging
 import signal
 import time
 from collections import OrderedDict
@@ -355,6 +354,7 @@ class EventLoop:
             [group.group_id for group in paged_cache_groups],
         )
         self.scheduler = Scheduler(scheduler_cfg)
+        token_to_kv_pool.bind_paged_cache_scheduler(self.scheduler)
         if attn_tp_rank == 0:
             self.kv_event_publisher = EventPublisherFactory.create(
                 server_args.kv_events_config,
@@ -1056,7 +1056,6 @@ class EventLoop:
     def _record_scheduler_iteration_metrics(
         self, stats: dict, num_iteration_tokens: int
     ) -> None:
-        self._maybe_log_paged_cache_state_group_pages()
         self.metrics.record_scheduler_iteration(
             running=len(self.output_processor.rid_to_state),
             waiting=stats["num_queue_reqs"],
@@ -1064,29 +1063,6 @@ class EventLoop:
             num_total_pages=self.max_total_num_tokens // self.server_args.block_size,
             num_iteration_tokens=num_iteration_tokens,
         )
-
-    def _maybe_log_paged_cache_state_group_pages(self) -> None:
-        if self.global_rank != 0 or not self._paged_cache_state_group_ids:
-            return
-        if not logger.isEnabledFor(logging.DEBUG):
-            return
-        interval = int(self.server_args.decode_log_interval)
-        if interval <= 0:
-            return
-        self._paged_cache_group_stats_log_step += 1
-        if self._paged_cache_group_stats_log_step % interval != 0:
-            return
-
-        parts = []
-        for group_id in self._paged_cache_state_group_ids:
-            total = self.scheduler.paged_cache_group_total_pages(group_id)
-            available = self.scheduler.paged_cache_group_available_pages(group_id)
-            failed = self.scheduler.paged_cache_group_failed_alloc_count(group_id)
-            used = total - available
-            parts.append(
-                f"{group_id}: used={used}/{total}, available={available}, failed_alloc={failed}"
-            )
-        logger.debug("Paged-cache state group pages. %s", "; ".join(parts))
 
     # ------------------------------------------------------------------
     # Event loops

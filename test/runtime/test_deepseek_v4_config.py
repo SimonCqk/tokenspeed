@@ -72,7 +72,7 @@ from tokenspeed.runtime.layers.attention.kv_cache.deepseek_v4 import (
     DeepseekV4CacheMetadata,
     DeepseekV4TokenToKVPool,
     _group_slot_mapping_from_raw,
-    _mask_slot_mapping_with_valid_tokens,
+    _mask_invalid_graph_tokens,
     _split_paged_cache_block_tables_into_v4_metadata,
     deepseek_v4_cache_layout_from_config,
 )
@@ -791,7 +791,7 @@ class TestDeepseekV4Config(unittest.TestCase):
         draft_kwargs = captured["draft"]["kwargs"]
         self.assertEqual(
             draft_kwargs["paged_cache_block_tables"]["v4.swa"].tolist(),
-            [[7], [8], [0], [0]],
+            [[7], [8], [-1], [-1]],
         )
         self.assertEqual(
             draft_kwargs["paged_cache_block_table_base_offsets"]["v4.swa"].tolist(),
@@ -2068,7 +2068,7 @@ class TestDeepseekV4Config(unittest.TestCase):
         )
 
     def test_deepseek_v4_slot_mapping_masks_invalid_tokens(self):
-        slots = _mask_slot_mapping_with_valid_tokens(
+        slots = _mask_invalid_graph_tokens(
             torch.tensor([10, 20, -1, 40], dtype=torch.int64),
             torch.tensor([True, False, True, False]),
         )

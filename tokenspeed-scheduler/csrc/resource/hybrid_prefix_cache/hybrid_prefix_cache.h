@@ -153,6 +153,7 @@ private:
 
     struct PagedCacheGroupAdmission {
         bool ok{true};
+        std::unordered_set<std::string> failed_groups{};
         std::map<std::string, std::int32_t> releasable_owned_pages{};
         std::map<std::string, std::int32_t> new_pages_needed{};
     };
@@ -173,6 +174,8 @@ private:
     bool adoptExistingPagedCacheSnapshotForReplay(PagedCacheSnapshot& existing,
                                                   std::map<std::string, PagedCacheGroupTable>& tables,
                                                   std::int32_t target);
+    bool commitTerminalContinuationSnapshot(std::map<std::string, PagedCacheGroupTable>& tables, TreeNode* terminal,
+                                            std::int32_t target);
 
     void augmentMatch(MatchResult& match) const;
     void augmentMatchPagedCache(MatchResult& match) const;
@@ -218,9 +221,11 @@ private:
     // Subset of `paged_cache_required_groups_` partitioned by family.
     std::vector<std::string> paged_cache_history_groups_;
     std::vector<std::string> paged_cache_state_groups_;
+    std::vector<std::string> paged_cache_continuation_state_groups_;
     // Fast hot-path lookup mirrors of the above (filled in EnablePagedCacheAdjunct).
     std::unordered_set<std::string> paged_cache_history_group_set_;
     std::unordered_set<std::string> paged_cache_state_group_set_;
+    std::unordered_set<std::string> paged_cache_continuation_state_group_set_;
     std::int32_t paged_cache_replay_window_tokens_{0};
     std::int32_t paged_cache_replay_seed_tokens_{0};
 

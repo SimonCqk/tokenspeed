@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -802,6 +803,12 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
         self._paged_cache_group_specs_by_id = {
             spec.group_id: spec for spec in self.paged_cache_group_specs
         }
+        self._paged_cache_scheduler: object | None = None
+        self._paged_cache_state_group_ids = tuple(
+            str(spec.group_id)
+            for spec in self.paged_cache_group_specs
+            if spec.family == "state"
+        )
         self.prefix_cache_replay_window_tokens = self._compute_prefix_replay_window()
         self._prefix_cache_replay_seed_group_ids = tuple(
             gid
@@ -976,6 +983,27 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
             if spec.family == "history"
         )
         return history_group_ids + self._prefix_cache_replay_seed_group_ids
+
+    def bind_paged_cache_scheduler(self, scheduler: object) -> None:
+        self._paged_cache_scheduler = scheduler
+
+    def maybe_log_paged_cache_group_pages(self) -> None:
+        scheduler = self._paged_cache_scheduler
+        if self.rank != 0 or scheduler is None or not self._paged_cache_state_group_ids:
+            return
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+
+        parts = []
+        for group_id in self._paged_cache_state_group_ids:
+            total = scheduler.paged_cache_group_total_pages(group_id)
+            available = scheduler.paged_cache_group_available_pages(group_id)
+            failed = scheduler.paged_cache_group_failed_alloc_count(group_id)
+            parts.append(
+                f"{group_id}: used={total - available}/{total}, "
+                f"available={available}, failed_alloc={failed}"
+            )
+        logger.debug("DeepSeek V4 paged-cache state group pages. %s", "; ".join(parts))
 
     def _compute_prefix_replay_window(self) -> int:
         state_windows = [
