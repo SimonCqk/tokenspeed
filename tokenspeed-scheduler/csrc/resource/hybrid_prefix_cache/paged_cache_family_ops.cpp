@@ -421,11 +421,13 @@ void HybridPrefixCache::FinishRequest(const std::string& request_id) {
 
 void HybridPrefixCache::ReleaseRequest(const std::string& request_id) {
     auto it = request_paged_cache_tables_.find(request_id);
-    if (it == request_paged_cache_tables_.end()) return;
-    for (auto& [_, table] : it->second) {
-        table.ReleaseAll();
+    if (it != request_paged_cache_tables_.end()) {
+        for (auto& [_, table] : it->second) {
+            table.ReleaseAll();
+        }
+        request_paged_cache_tables_.erase(it);
     }
-    request_paged_cache_tables_.erase(it);
+    DemoteIdleMambaDeviceCopiesPresentOnHost();
 }
 
 void HybridPrefixCache::PopulateOp(ForwardOperationBase& op_base) const {

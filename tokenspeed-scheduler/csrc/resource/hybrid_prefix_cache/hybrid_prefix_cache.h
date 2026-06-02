@@ -89,7 +89,7 @@ public:
     [[nodiscard]] cache::worker::CommitDecodeRecoveryMetadata::Result Apply(
         const cache::worker::CommitDecodeRecoveryMetadata& op);
 
-    template <cache::StepOp... Ops>
+    template <typename... Ops>
     StepCommitResult StepCommit(Ops&&... ops) {
         StepCommitResult result{};
         auto apply = [this, &result](auto&& op) {

@@ -117,7 +117,6 @@ HybridPrefixCache::~HybridPrefixCache() {
 
 RecoveryPlan HybridPrefixCache::MatchPrefix(const std::vector<std::span<const std::int32_t>>& token_pages,
                                             MatchIntent intent) {
-    DemoteIdleMambaDeviceCopiesPresentOnHost();
     return BuildRecoveryPlan(kv_prefix_cache_.Match(token_pages, intent), intent);
 }
 

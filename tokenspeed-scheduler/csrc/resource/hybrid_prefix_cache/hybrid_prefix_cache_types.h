@@ -20,7 +20,6 @@
 
 #pragma once
 
-#include <concepts>
 #include <cstdint>
 #include <cstddef>
 #include <map>
@@ -28,7 +27,6 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -303,41 +301,6 @@ struct CommitDecodeRecoveryMetadata {
 };
 
 }  // namespace worker
-
-template <typename T>
-struct IsStepOp : std::false_type {};
-
-template <>
-struct IsStepOp<publish::DevicePrefix> : std::true_type {};
-template <>
-struct IsStepOp<publish::FinishedRequest> : std::true_type {};
-template <>
-struct IsStepOp<publish::RetractPrefixPlan> : std::true_type {};
-template <>
-struct IsStepOp<publish::RetractPrefixCommit> : std::true_type {};
-template <>
-struct IsStepOp<materialize::PrefixOnDevice> : std::true_type {};
-template <>
-struct IsStepOp<materialize::HostWritebackPages> : std::true_type {};
-template <>
-struct IsStepOp<state::CreateRequestLocalCache> : std::true_type {};
-template <>
-struct IsStepOp<state::AcquireRequestLocalCache> : std::true_type {};
-template <>
-struct IsStepOp<state::PublishTreeOwnedRequestState> : std::true_type {};
-template <>
-struct IsStepOp<worker::CommitPrefillFirstChunkMetadata> : std::true_type {};
-template <>
-struct IsStepOp<worker::CommitPrefillMetadata> : std::true_type {};
-template <>
-struct IsStepOp<worker::CommitDecodeAfterPrefillMetadata> : std::true_type {};
-template <>
-struct IsStepOp<worker::CommitDecodeMetadata> : std::true_type {};
-template <>
-struct IsStepOp<worker::CommitDecodeRecoveryMetadata> : std::true_type {};
-
-template <typename Op>
-concept StepOp = IsStepOp<std::remove_cvref_t<Op>>::value;
 
 }  // namespace cache
 
