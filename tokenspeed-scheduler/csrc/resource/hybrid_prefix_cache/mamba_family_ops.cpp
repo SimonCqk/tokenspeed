@@ -65,19 +65,27 @@ HybridPrefixCache::DecodeFromRetractedRecovery HybridPrefixCache::PrepareDecodeF
     MatchResult& match_result) const {
     if (!HasMambaAdjunct()) return {};
 
-    TreeNode* mamba_recovery_node = FindLastMambaNode(match_result.host.last_node);
+    const std::int32_t page_size =
+        match_result.device.page_size > 0 ? match_result.device.page_size : match_result.host.page_size;
+    TreeNode* mamba_recovery_node = FindLastMambaNode(match_result.device.last_node);
+    TreeNode* host_mamba_recovery_node = FindLastMambaNode(match_result.host.last_node);
+    if (host_mamba_recovery_node != nullptr &&
+        (mamba_recovery_node == nullptr ||
+         host_mamba_recovery_node->DepthInPage(page_size) > mamba_recovery_node->DepthInPage(page_size))) {
+        mamba_recovery_node = host_mamba_recovery_node;
+    }
     if (mamba_recovery_node != nullptr) {
         match_result.mamba_cow_src_index = mamba_recovery_node->MambaSlotIndex();
         return {.protected_source_node = mamba_recovery_node};
     }
 
-    TreeNode* host_mamba_recovery_node = FindLastMambaHostNode(match_result.host.last_node);
-    if (host_mamba_recovery_node == nullptr) {
+    TreeNode* mamba_l2_recovery_node = FindLastMambaHostNode(match_result.host.last_node);
+    if (mamba_l2_recovery_node == nullptr) {
         return {.ok = false};
     }
-    match_result.mamba_host_src_index = host_mamba_recovery_node->MambaHostSlotIndex();
+    match_result.mamba_host_src_index = mamba_l2_recovery_node->MambaHostSlotIndex();
     match_result.mamba_cow_src_index = -1;
-    return {.protected_source_node = host_mamba_recovery_node};
+    return {.protected_source_node = mamba_l2_recovery_node};
 }
 
 void HybridPrefixCache::PopulateMambaMatchCompatibilityFields(ForwardOperationBase& op_base,
@@ -142,15 +150,6 @@ void HybridPrefixCache::RefreshRequestLocalStateCheckpoint(RequestLocalCacheStat
     LocalMambaAllocator* allocator = local_cache.AdjunctState();
     if (!HasMambaAdjunct() || allocator == nullptr || !checkpoint_raw_position.has_value()) return;
 
-    const auto should_materialize_checkpoint = [&]() {
-        const std::int32_t position = *checkpoint_raw_position;
-        return position > 0 && AlignMambaCacheSeqlen(position) == position;
-    };
-
-    if (!should_materialize_checkpoint()) {
-        (void)allocator->DetachCheckpoint();
-        return;
-    }
     (void)allocator->DetachCheckpoint();
     if (!allocator->AllocateCheckpoint(*checkpoint_raw_position)) {
         throw std::logic_error("HybridPrefixCache::RefreshRequestLocalStateCheckpoint: failed to allocate checkpoint");
@@ -239,11 +238,9 @@ void HybridPrefixCache::augmentMatch(MatchResult& match) const {
     if (root == nullptr) return;
 
     if (mamba_host_allocator_ == nullptr) {
-        const std::int32_t page_size = match.device.page_size > 0 ? match.device.page_size : match.host.page_size;
-        const std::int32_t kv_depth = std::max(match.device.DepthInPage(), match.host.DepthInPage());
-        TreeNode* device_mamba_node = FindLastMambaNode(match.device.last_node);
-        TreeNode* host_mamba_node = device_mamba_node == nullptr ? FindLastMambaNode(match.host.last_node) : nullptr;
-        TreeNode* mamba_node = device_mamba_node != nullptr ? device_mamba_node : host_mamba_node;
+        const std::int32_t page_size = match.device.page_size;
+        const std::int32_t kv_depth = match.device.DepthInPage();
+        TreeNode* mamba_node = FindLastMambaNode(match.device.last_node);
         if (mamba_node == nullptr) {
             const std::int32_t aligned_seqlen = AlignMambaCacheSeqlen(kv_depth * page_size);
             if (aligned_seqlen > 0) {
@@ -262,7 +259,7 @@ void HybridPrefixCache::augmentMatch(MatchResult& match) const {
                 match.mamba_branching_seqlen = aligned_seqlen;
             }
         }
-        match.device.last_node = device_mamba_node != nullptr ? mamba_node : root;
+        match.device.last_node = mamba_node;
         match.host.last_node = mamba_node;
         return;
     }
