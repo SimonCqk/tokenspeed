@@ -20,13 +20,14 @@
 
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -86,8 +87,6 @@ struct RecoveryPlan {
 
 struct AdmissionVerdict {
     bool admitted{false};
-    std::optional<std::int32_t> mamba_branching_seqlen{};
-    std::optional<std::int32_t> mamba_cow_src_index{};
     std::vector<TransferPair> cache_transfer_pairs{};
 };
 
@@ -96,8 +95,8 @@ namespace cache {
 namespace admit {
 
 struct PrefillFirstChunk {
-    const std::string& request_id;
-    const MatchResult& match_result;
+    std::string_view request_id;
+    MatchResult& match_result;
     std::int32_t device_pages_needed{0};
     std::int32_t tokens_this_round{0};
     std::int32_t first_raw_position_of_op{0};
@@ -107,7 +106,7 @@ struct PrefillFirstChunk {
 };
 
 struct PrefillChunk {
-    const std::string& request_id;
+    std::string_view request_id;
     std::int32_t device_pages_needed{0};
     std::int32_t first_raw_position_of_op{0};
     std::int32_t target_raw_tokens_exclusive{0};
@@ -116,7 +115,7 @@ struct PrefillChunk {
 };
 
 struct Decode {
-    const std::string& request_id;
+    std::string_view request_id;
     std::int32_t device_pages_needed{0};
     std::int32_t first_raw_position_of_op{0};
     std::int32_t target_raw_tokens_exclusive{0};
@@ -126,8 +125,8 @@ struct Decode {
 };
 
 struct DecodeFromRetracted {
-    const std::string& request_id;
-    const MatchResult& match_result;
+    std::string_view request_id;
+    MatchResult& match_result;
     std::int32_t device_pages_needed{0};
     std::int32_t target_raw_tokens_exclusive{0};
     TreeNode* protected_recovery_node{nullptr};
@@ -171,19 +170,10 @@ struct FinishedRequest {
     };
 };
 
-struct RetractPrefixPlan {
-    const std::vector<std::span<const std::int32_t>>& full_paged_tokens;
-    const TreeNode& current_device_node;
-
-    struct Result {
-        std::int32_t device_insert_page_count{0};
-    };
-};
-
 struct RetractPrefixCommit {
     const std::vector<std::span<const std::int32_t>>& full_paged_tokens;
     const TreeNode& current_device_node;
-    OwnedPages pages_to_insert{};
+    RequestLocalCacheState& local_cache;
 
     struct Result {
         MatchResult match_result{};

@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -70,8 +71,7 @@ public:
                                                       std::map<std::string, std::int32_t>& simulated_free);
     [[nodiscard]] cache::publish::DevicePrefix::Result Apply(const cache::publish::DevicePrefix& op);
     [[nodiscard]] cache::publish::FinishedRequest::Result Apply(const cache::publish::FinishedRequest& op);
-    [[nodiscard]] cache::publish::RetractPrefixPlan::Result Apply(const cache::publish::RetractPrefixPlan& op);
-    [[nodiscard]] cache::publish::RetractPrefixCommit::Result Apply(cache::publish::RetractPrefixCommit&& op);
+    [[nodiscard]] cache::publish::RetractPrefixCommit::Result Apply(const cache::publish::RetractPrefixCommit& op);
     [[nodiscard]] cache::materialize::PrefixOnDevice::Result Apply(const cache::materialize::PrefixOnDevice& op);
     [[nodiscard]] cache::materialize::HostWritebackPages::Result Apply(
         const cache::materialize::HostWritebackPages& op);
@@ -91,6 +91,11 @@ public:
 
     template <typename... Ops>
     StepCommitResult StepCommit(Ops&&... ops) {
+        static_assert((requires(HybridPrefixCache& cache, StepCommitResult& result, Ops&& op) {
+                          AccumulateStepResult(result, cache.Apply(std::forward<Ops>(op)));
+                      } && ...),
+                      "HybridPrefixCache::StepCommit only accepts step-commit ops; admit op must call Apply(op, "
+                      "simulated_free)");
         StepCommitResult result{};
         auto apply = [this, &result](auto&& op) {
             if (!result.ok) return;
@@ -101,6 +106,15 @@ public:
         return result;
     }
 
+    [[nodiscard]] std::size_t AvailableDevicePages() const;
+    [[nodiscard]] std::vector<std::string> PagedCacheGroupIds() const;
+    [[nodiscard]] std::int32_t PagedCacheGroupTotalPages(std::string_view group_id) const;
+    [[nodiscard]] std::int32_t PagedCacheGroupAvailablePages(std::string_view group_id) const;
+    [[nodiscard]] std::int64_t PagedCacheGroupFailedAllocCount(std::string_view group_id) const;
+    [[nodiscard]] std::vector<std::int32_t> GetRequestPagedCachePageIds(std::string_view request_id,
+                                                                        std::string_view group_id) const;
+    [[nodiscard]] std::int32_t GetRequestPagedCacheBaseLogicalPage(std::string_view request_id,
+                                                                   std::string_view group_id) const;
     [[nodiscard]] CacheStatsSnapshot Stats(const StatsRequest& request = {}) const;
 
     struct RawHostStorageHashSeed {
@@ -154,7 +168,6 @@ private:
     static void AccumulateStepResult(StepCommitResult& result, cache::EmptyResult);
     static void AccumulateStepResult(StepCommitResult& result, cache::publish::DevicePrefix::Result op_result);
     static void AccumulateStepResult(StepCommitResult& result, cache::publish::FinishedRequest::Result&& op_result);
-    static void AccumulateStepResult(StepCommitResult& result, cache::publish::RetractPrefixPlan::Result op_result);
     static void AccumulateStepResult(StepCommitResult& result, cache::publish::RetractPrefixCommit::Result&& op_result);
     static void AccumulateStepResult(StepCommitResult& result, cache::materialize::PrefixOnDevice::Result op_result);
     static void AccumulateStepResult(StepCommitResult& result,
@@ -165,6 +178,7 @@ private:
     bool HasMambaAdjunct() const { return mamba_allocator_ != nullptr; }
     bool HasPagedCacheAdjunct() const { return paged_cache_history_alignment_tokens_ > 0; }
     RecoveryPlan BuildRecoveryPlan(MatchResult raw_match, MatchIntent intent) const;
+    void EnsureKvEvictionCallbacksInstalled();
 
     // Takes ownership. Duplicate group_id throws std::invalid_argument.
     void RegisterPagedCacheGroup(std::unique_ptr<PagedCacheGroupAllocator> allocator);
@@ -229,7 +243,7 @@ private:
 
     // Ensure tables exist and cover [first_raw_position_of_op, target_raw_tokens_exclusive).
     // Borrowed prefix is imported BEFORE any fresh allocation on a fresh table.
-    void AcquireForRequest(const std::string& request_id, std::int32_t first_raw_position_of_op,
+    void AcquireForRequest(std::string_view request_id, std::int32_t first_raw_position_of_op,
                            std::int32_t target_raw_tokens_exclusive,
                            const MatchResult::PagedCache& paged_cache_hit = {});
 
@@ -238,13 +252,13 @@ private:
 
     // Run paged-cache admission against `simulated_free`; prunes evictable
     // snapshots on group-pool pressure, then applies the debit on success.
-    bool AdmitChunk(const std::string& request_id, std::int32_t first_raw_position_of_op,
+    bool AdmitChunk(std::string_view request_id, std::int32_t first_raw_position_of_op,
                     std::int32_t target_raw_tokens_exclusive, std::map<std::string, std::int32_t>& simulated_free,
                     const MatchResult::PagedCache& paged_cache_hit = {});
 
     // Retract-decode variant: admission uses a fresh-table view and credits
     // pages owned by the stale table before it is released.
-    bool AdmitChunkFromRetracted(const std::string& request_id, std::int32_t target_raw_tokens_exclusive,
+    bool AdmitChunkFromRetracted(std::string_view request_id, std::int32_t target_raw_tokens_exclusive,
                                  std::map<std::string, std::int32_t>& simulated_free,
                                  const MatchResult::PagedCache& paged_cache_hit);
 
@@ -269,7 +283,7 @@ private:
     // used only on kStateStarved; history/both go to full cascade.
     bool tryPrunePagedCacheSnapshot(AdmissionFailureKind kind);
 
-    bool admitPagedCacheChunk(const std::string& request_id, std::int32_t first_raw_position_of_op,
+    bool admitPagedCacheChunk(std::string_view request_id, std::int32_t first_raw_position_of_op,
                               std::int32_t target_raw_tokens_exclusive,
                               std::map<std::string, std::int32_t>& simulated_free,
                               const MatchResult::PagedCache& paged_cache_hit,
@@ -278,7 +292,7 @@ private:
                               std::int32_t target_raw_tokens_exclusive, const MatchResult::PagedCache& paged_cache_hit);
 
     // Build admission record without mutating any table.
-    PagedCacheGroupAdmission checkPagedCacheGroupAdmission(const std::string& request_id,
+    PagedCacheGroupAdmission checkPagedCacheGroupAdmission(std::string_view request_id,
                                                            std::int32_t first_raw_position_of_op,
                                                            std::int32_t target_raw_tokens_exclusive,
                                                            const std::map<std::string, std::int32_t>& simulated_free,
@@ -300,6 +314,7 @@ private:
     std::unordered_map<TreeNode*, std::unique_ptr<MambaSlot>> pending_mamba_host_writebacks_;
     std::unordered_set<TreeNode*> mamba_host_writeback_done_nodes_;
     bool has_facade_kv_event_sink_{false};
+    bool has_kv_eviction_callbacks_{false};
 
     // `paged_cache_history_alignment_tokens_ == 0` means adjunct disabled; tables still work.
     std::map<std::string, std::unique_ptr<PagedCacheGroupAllocator>> paged_cache_allocators_;

@@ -85,10 +85,9 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
 
     const std::int32_t first_pos = request->PrefillSize() - unscheduled;
     const std::int32_t target = first_pos + tokens_this_round;
-    const std::string request_id = request->Id();
     AdmissionVerdict admission = hybrid_prefix_cache_.Apply(
         cache::admit::PrefillFirstChunk{
-            .request_id = request_id,
+            .request_id = request->Id(),
             .match_result = match_result,
             .device_pages_needed = device_pages_needed,
             .tokens_this_round = tokens_this_round,
@@ -98,12 +97,6 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
         simulated_free);
     if (!admission.admitted) {
         return {};
-    }
-    if (admission.mamba_branching_seqlen.has_value()) {
-        match_result.mamba_branching_seqlen = *admission.mamba_branching_seqlen;
-    }
-    if (admission.mamba_cow_src_index.has_value()) {
-        match_result.mamba_cow_src_index = *admission.mamba_cow_src_index;
     }
 
     return fsm::SchedulePrefillFirstChunkEvent{
@@ -123,11 +116,10 @@ std::optional<fsm::SchedulePrefillEvent> Scheduler::schedulePrefill(
 
     const std::int32_t first_pos = request->PrefillSize() - unscheduled;
     const std::int32_t target = first_pos + tokens_this_round;
-    const std::string request_id = request->Id();
     if (!hybrid_prefix_cache_
              .Apply(
                  cache::admit::PrefillChunk{
-                     .request_id = request_id,
+                     .request_id = request->Id(),
                      .device_pages_needed = pages_needed,
                      .first_raw_position_of_op = first_pos,
                      .target_raw_tokens_exclusive = target,
@@ -149,11 +141,10 @@ std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(Request* reque
 
     const std::int32_t first_pos = request->TokenSize();
     const std::int32_t target = first_pos + config_.decode_input_tokens;
-    const std::string request_id = request->Id();
     if (!hybrid_prefix_cache_
              .Apply(
                  cache::admit::Decode{
-                     .request_id = request_id,
+                     .request_id = request->Id(),
                      .device_pages_needed = pages_needed,
                      .first_raw_position_of_op = first_pos,
                      .target_raw_tokens_exclusive = target,
@@ -195,10 +186,9 @@ std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFr
     std::int32_t device_pages_needed = (num_tokens + config_.page_size - 1) / config_.page_size;
 
     const std::int32_t target = request->TokenSize();
-    const std::string request_id = request->Id();
     AdmissionVerdict admission = hybrid_prefix_cache_.Apply(
         cache::admit::DecodeFromRetracted{
-            .request_id = request_id,
+            .request_id = request->Id(),
             .match_result = match_result,
             .device_pages_needed = device_pages_needed,
             .target_raw_tokens_exclusive = target,
@@ -207,9 +197,6 @@ std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFr
         simulated_free);
     if (!admission.admitted) {
         return {};
-    }
-    if (admission.mamba_cow_src_index.has_value()) {
-        match_result.mamba_cow_src_index = *admission.mamba_cow_src_index;
     }
 
     return fsm::ScheduleDecodeFromRetractedEvent{config_.decode_input_tokens,
@@ -233,17 +220,11 @@ std::optional<fsm::ScheduleRetractEvent> Scheduler::scheduleRetract(Request* req
 
     RequestCacheMutation cache_mutation(*request);
     TreeNode* terminal_device_node = cache_mutation.MutableTerminalDeviceNode();
-    const std::int32_t alloc_count = hybrid_prefix_cache_
-                                         .StepCommit(cache::publish::RetractPrefixPlan{
-                                             .full_paged_tokens = full_paged_tokens,
-                                             .current_device_node = *terminal_device_node,
-                                         })
-                                         .device_insert_page_count;
     MatchResult match_result = hybrid_prefix_cache_
                                    .StepCommit(cache::publish::RetractPrefixCommit{
                                        .full_paged_tokens = full_paged_tokens,
                                        .current_device_node = *terminal_device_node,
-                                       .pages_to_insert = cache_mutation.TakeFirstLocalKVPages(alloc_count),
+                                       .local_cache = cache_mutation.LocalCache(),
                                    })
                                    .match_result;
 

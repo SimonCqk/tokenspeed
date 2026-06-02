@@ -33,7 +33,6 @@
 #include "core/token_container.h"
 #include "fsm/forward_states.h"
 #include "fsm/states.h"
-#include "resource/allocator/owned_pages.h"
 #include "scheduler/request_spec.h"
 #include "utils.h"
 
@@ -51,7 +50,7 @@ class Request {
 public:
     Request(const RequestSpec& spec, std::int32_t page_size, Role role);
 
-    std::string Id() const { return id_; }
+    const std::string& Id() const { return id_; }
 
     // Keep Apply the only non-const function in Request
     // The wrapper lambda converts any concrete state type returned by event's operator()
@@ -176,32 +175,6 @@ public:
             [](const fsm::Retracting& s) -> std::vector<std::int32_t> { return s.GetLocalAllocatorPages(); },
             [](const fsm::Retracted& s) -> std::vector<std::int32_t> { return s.GetLocalAllocatorPages(); },
             [](const auto&) -> std::vector<std::int32_t> { return {}; },
-            },
-            state_);
-    }
-
-    OwnedPages TakeFullPages() {
-        return std::visit(Overloaded{
-            []<typename T>(T& s) -> OwnedPages
-                requires(std::same_as<T, fsm::Decoding> || std::same_as<T, fsm::PrefillDone>)
-            { return s.GetLocalCache()->TakeFullKVPages(); },
-            [this](auto&) -> OwnedPages {
-                throw std::logic_error("Request::TakeFullPages: expected state=Decoding or PrefillDone; got state=" +
-                                       StateName());
-            },
-            },
-            state_);
-    }
-
-    OwnedPages TakeFirstPages(std::int32_t n) {
-        return std::visit(Overloaded{
-            [n]<typename T>(T& s) -> OwnedPages
-                requires(std::same_as<T, fsm::Decoding> || std::same_as<T, fsm::PrefillDone>)
-            { return s.GetLocalCache()->TakeFirstKVPages(n); },
-            [this](auto&) -> OwnedPages {
-                throw std::logic_error("Request::TakeFirstPages: expected state=Decoding or PrefillDone; got state=" +
-                                       StateName());
-            },
             },
             state_);
     }

@@ -324,7 +324,7 @@ protected:
 // Better approach: use decode_input_tokens=0, 1-page request fills the 2 usable pages.
 // SendReserveNumTokens(3) → reserve=3, tail=2 → need (3-2+1)/2=1 extra page → device full → retract.
 // At retract: GetFullPagedTokens(true) on 2 tokens → except_last → 0 full pages.
-// Hmm, that means alloc_count=0 and TakeFirstPages(0) takes nothing. No bug here.
+// Hmm, that means alloc_count=0 and local-cache publish takes nothing. No bug here.
 //
 // Need: tail_page_available == 0 AND alloc_count > 0 AND local_kv_allocator.Size() > alloc_count.
 // This means: enough tokens to have full pages, and extra pages beyond what's inserted.
@@ -335,7 +335,7 @@ protected:
 // After PrefillDone → SendForwardDone → 3 tokens.
 // Next PlanOnce: scheduleDecode needs Acquire(2). tail=0, need 1 page → fails → retract.
 // At retract: GetFullPagedTokens(true) on 3 tokens except_last → 2 tokens → 1 full page.
-// prefix=0. alloc_count=1. TakeFirstPages(1) from 2 pages → 1 inserted, 1 remains.
+// prefix=0. alloc_count=1. TakeFirstKVPages(1) from 2 pages → 1 inserted, 1 remains.
 // This tests the fix! The remaining page holds token 2's KV (position 2, partially fills page).
 // device_total=3 (2 usable). decode_input_tokens=0, page_size=2.
 // r1: 1-page (2 tokens). Prefill: 1 page, tail=0.
@@ -344,7 +344,7 @@ protected:
 // scheduleDecode needs (3 - 0 + 1)/2 = 2 extra pages → 0 free → fails → retract.
 //
 // At retract: GetFullPagedTokens(true) on 3 tokens except_last → 2 tokens → 1 full page.
-// alloc_count=1. TakeFullPages returns 1 page (all), then TakeFirst(1) uses it.
+// alloc_count=1. TakeFirstKVPages(1) takes the only local page.
 // No extra page to lose here (only 1 page total). tail_available=0 but pages=alloc_count.
 //
 // For the bug to manifest, we need local_kv_allocator.Size() > alloc_count when tail=0.
@@ -357,7 +357,7 @@ protected:
 // Now 3/3 usable used. SendReserveNumTokens(3) → scheduleDecode needs (3-0+1)/2=2 pages → fails → retract.
 //
 // At retract: 3 tokens (2 prefill + 1 output). except_last → 2 → 1 full page.
-// alloc_count=1. TakeFirstPages(1) from 3 → 1 inserted, 2 remain.
+// alloc_count=1. TakeFirstKVPages(1) from 3 → 1 inserted, 2 remain.
 // After WriteBackDone: 1 prefix-cache evictable, 2 local held. Total free after eviction: 3-2=1.
 // Recovery needs: 1 (loadback) + 1 (Acquire(2)) = 2. Only 1 free → fails.
 // Need more device pages for recovery. Use device_total=6 (5 usable).

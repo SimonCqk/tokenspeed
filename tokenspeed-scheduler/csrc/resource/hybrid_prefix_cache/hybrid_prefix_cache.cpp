@@ -105,14 +105,18 @@ HybridPrefixCache::HybridPrefixCache(KVPrefixCache& kv_prefix_cache, PageAllocat
       mamba_host_allocator_{mamba_host_allocator},
       mamba_eviction_manager_{mamba_allocator},
       mamba_cache_chunk_size_{mamba_cache_chunk_size} {
-    kv_prefix_cache_.GetDeviceManager().SetEvictionCallback([this](TreeNode* node) { OnKVEvict(node); });
-    kv_prefix_cache_.GetHostManager().SetEvictionCallback([this](TreeNode* node) { OnKVHostEvict(node); });
+    if (HasMambaAdjunct() || mamba_host_allocator_ != nullptr) {
+        EnsureKvEvictionCallbacksInstalled();
+    }
 }
 
 HybridPrefixCache::~HybridPrefixCache() {
     SetKvEventSink({});
-    kv_prefix_cache_.GetDeviceManager().SetEvictionCallback({});
-    kv_prefix_cache_.GetHostManager().SetEvictionCallback({});
+    if (has_kv_eviction_callbacks_) {
+        kv_prefix_cache_.GetDeviceManager().SetEvictionCallback({});
+        kv_prefix_cache_.GetHostManager().SetEvictionCallback({});
+        has_kv_eviction_callbacks_ = false;
+    }
 }
 
 RecoveryPlan HybridPrefixCache::MatchPrefix(const std::vector<std::span<const std::int32_t>>& token_pages,
@@ -159,6 +163,13 @@ void HybridPrefixCache::SetKvEventSink(KvEventSink sink) {
 
     kv_prefix_cache_.SetKvEventSink(std::move(sink));
     has_facade_kv_event_sink_ = true;
+}
+
+void HybridPrefixCache::EnsureKvEvictionCallbacksInstalled() {
+    if (has_kv_eviction_callbacks_) return;
+    kv_prefix_cache_.GetDeviceManager().SetEvictionCallback([this](TreeNode* node) { OnKVEvict(node); });
+    kv_prefix_cache_.GetHostManager().SetEvictionCallback([this](TreeNode* node) { OnKVHostEvict(node); });
+    has_kv_eviction_callbacks_ = true;
 }
 
 cache::publish::DevicePrefix::Result HybridPrefixCache::Apply(const cache::publish::DevicePrefix& op) {
@@ -231,20 +242,7 @@ cache::publish::FinishedRequest::Result HybridPrefixCache::Apply(const cache::pu
     return result;
 }
 
-cache::publish::RetractPrefixPlan::Result HybridPrefixCache::Apply(const cache::publish::RetractPrefixPlan& op) {
-    cache::publish::RetractPrefixPlan::Result result{};
-    std::vector<std::int32_t> prefix_pages = DevicePagesFromRoot(&op.current_device_node);
-    const std::int32_t full_page_count = static_cast<std::int32_t>(op.full_paged_tokens.size());
-    const std::int32_t prefix_page_count = static_cast<std::int32_t>(prefix_pages.size());
-    if (full_page_count < prefix_page_count) {
-        throw std::logic_error(
-            "HybridPrefixCache::Apply(RetractPrefixPlan): current device prefix exceeds available full token pages");
-    }
-    result.device_insert_page_count = full_page_count - prefix_page_count;
-    return result;
-}
-
-cache::publish::RetractPrefixCommit::Result HybridPrefixCache::Apply(cache::publish::RetractPrefixCommit&& op) {
+cache::publish::RetractPrefixCommit::Result HybridPrefixCache::Apply(const cache::publish::RetractPrefixCommit& op) {
     cache::publish::RetractPrefixCommit::Result result{};
     std::vector<std::int32_t> prefix_pages = DevicePagesFromRoot(&op.current_device_node);
     const std::int32_t alloc_count =
@@ -253,11 +251,12 @@ cache::publish::RetractPrefixCommit::Result HybridPrefixCache::Apply(cache::publ
         throw std::logic_error(
             "HybridPrefixCache::Apply(RetractPrefixCommit): current device prefix exceeds available full token pages");
     }
-    if (op.pages_to_insert.Size() != alloc_count) {
+    OwnedPages pages_to_insert = op.local_cache.TakeFirstKVPages(alloc_count);
+    if (pages_to_insert.Size() != alloc_count) {
         throw std::logic_error("HybridPrefixCache::Apply(RetractPrefixCommit): request-local page count mismatch");
     }
 
-    kv_prefix_cache_.Insert<ResourceType::Device>(op.full_paged_tokens, prefix_pages, std::move(op.pages_to_insert));
+    kv_prefix_cache_.Insert<ResourceType::Device>(op.full_paged_tokens, prefix_pages, std::move(pages_to_insert));
     result.device_insert_page_count = alloc_count;
     result.match_result = kv_prefix_cache_.Match(op.full_paged_tokens, MatchIntent::StateRecovery);
     return result;
@@ -411,42 +410,90 @@ void HybridPrefixCache::CompleteHostWriteBack(const PendingHostWritebackState& p
     DemoteIdleMambaDeviceCopiesPresentOnHost();
 }
 
+std::size_t HybridPrefixCache::AvailableDevicePages() const {
+    return static_cast<std::size_t>(device_allocator_.AvailablePages());
+}
+
+std::vector<std::string> HybridPrefixCache::PagedCacheGroupIds() const {
+    std::vector<std::string> ids;
+    ids.reserve(paged_cache_allocators_.size());
+    for (const auto& [gid, _] : paged_cache_allocators_) {
+        ids.push_back(gid);
+    }
+    return ids;
+}
+
+std::int32_t HybridPrefixCache::PagedCacheGroupTotalPages(std::string_view group_id) const {
+    auto alloc_it = std::find_if(paged_cache_allocators_.begin(), paged_cache_allocators_.end(),
+                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    if (alloc_it == paged_cache_allocators_.end() || alloc_it->second == nullptr) {
+        throw std::out_of_range("HybridPrefixCache::PagedCacheGroupTotalPages: group_id not configured");
+    }
+    return alloc_it->second->TotalPages();
+}
+
+std::int32_t HybridPrefixCache::PagedCacheGroupAvailablePages(std::string_view group_id) const {
+    auto alloc_it = std::find_if(paged_cache_allocators_.begin(), paged_cache_allocators_.end(),
+                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    if (alloc_it == paged_cache_allocators_.end() || alloc_it->second == nullptr) {
+        throw std::out_of_range("HybridPrefixCache::PagedCacheGroupAvailablePages: group_id not configured");
+    }
+    return alloc_it->second->AvailablePages();
+}
+
+std::int64_t HybridPrefixCache::PagedCacheGroupFailedAllocCount(std::string_view group_id) const {
+    auto alloc_it = std::find_if(paged_cache_allocators_.begin(), paged_cache_allocators_.end(),
+                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    if (alloc_it == paged_cache_allocators_.end() || alloc_it->second == nullptr) {
+        throw std::out_of_range("HybridPrefixCache::PagedCacheGroupFailedAllocCount: group_id not configured");
+    }
+    return alloc_it->second->FailedAllocCount();
+}
+
+std::vector<std::int32_t> HybridPrefixCache::GetRequestPagedCachePageIds(std::string_view request_id,
+                                                                         std::string_view group_id) const {
+    (void)PagedCacheGroupTotalPages(group_id);
+    auto req_it = std::find_if(request_paged_cache_tables_.begin(), request_paged_cache_tables_.end(),
+                               [request_id](const auto& entry) { return entry.first == request_id; });
+    if (req_it == request_paged_cache_tables_.end()) return {};
+    auto group_it = std::find_if(req_it->second.begin(), req_it->second.end(),
+                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    if (group_it == req_it->second.end()) return {};
+    return group_it->second.PageIds();
+}
+
+std::int32_t HybridPrefixCache::GetRequestPagedCacheBaseLogicalPage(std::string_view request_id,
+                                                                    std::string_view group_id) const {
+    (void)PagedCacheGroupTotalPages(group_id);
+    auto req_it = std::find_if(request_paged_cache_tables_.begin(), request_paged_cache_tables_.end(),
+                               [request_id](const auto& entry) { return entry.first == request_id; });
+    if (req_it == request_paged_cache_tables_.end()) return 0;
+    auto group_it = std::find_if(req_it->second.begin(), req_it->second.end(),
+                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    if (group_it == req_it->second.end()) return 0;
+    return group_it->second.BaseLogicalPage();
+}
+
 CacheStatsSnapshot HybridPrefixCache::Stats(const StatsRequest& request) const {
     CacheStatsSnapshot snapshot{
-        .available_device_pages = static_cast<std::size_t>(device_allocator_.AvailablePages()),
+        .available_device_pages = AvailableDevicePages(),
     };
 
-    snapshot.paged_cache_group_ids.reserve(paged_cache_allocators_.size());
-    for (const auto& [gid, _] : paged_cache_allocators_) {
-        snapshot.paged_cache_group_ids.push_back(gid);
-    }
+    snapshot.paged_cache_group_ids = PagedCacheGroupIds();
 
     std::vector<std::string> requested_groups = request.paged_cache_group_ids;
     if (requested_groups.empty()) {
         requested_groups = snapshot.paged_cache_group_ids;
     }
     for (const auto& gid : requested_groups) {
-        auto alloc_it = paged_cache_allocators_.find(gid);
-        if (alloc_it == paged_cache_allocators_.end() || alloc_it->second == nullptr) {
-            throw std::out_of_range("HybridPrefixCache::Stats: group_id not configured");
-        }
-        snapshot.paged_cache_total_pages[gid] = alloc_it->second->TotalPages();
-        snapshot.paged_cache_available_pages[gid] = alloc_it->second->AvailablePages();
-        snapshot.paged_cache_failed_alloc_count[gid] = alloc_it->second->FailedAllocCount();
+        snapshot.paged_cache_total_pages[gid] = PagedCacheGroupTotalPages(gid);
+        snapshot.paged_cache_available_pages[gid] = PagedCacheGroupAvailablePages(gid);
+        snapshot.paged_cache_failed_alloc_count[gid] = PagedCacheGroupFailedAllocCount(gid);
 
         if (request.request_id.has_value()) {
-            std::vector<std::int32_t> pages;
-            std::int32_t base_logical_page = 0;
-            auto req_it = request_paged_cache_tables_.find(*request.request_id);
-            if (req_it != request_paged_cache_tables_.end()) {
-                auto group_it = req_it->second.find(gid);
-                if (group_it != req_it->second.end()) {
-                    pages = group_it->second.PageIds();
-                    base_logical_page = group_it->second.BaseLogicalPage();
-                }
-            }
-            snapshot.request_paged_cache_page_ids[gid] = std::move(pages);
-            snapshot.request_paged_cache_base_logical_page[gid] = base_logical_page;
+            snapshot.request_paged_cache_page_ids[gid] = GetRequestPagedCachePageIds(*request.request_id, gid);
+            snapshot.request_paged_cache_base_logical_page[gid] =
+                GetRequestPagedCacheBaseLogicalPage(*request.request_id, gid);
         }
     }
 
@@ -543,10 +590,12 @@ cache::admit::PrefillFirstChunk::Result HybridPrefixCache::Apply(const cache::ad
     result.admitted = AdmitChunk(op.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive,
                                  simulated_free, op.match_result.paged_cache);
     if (result.admitted) {
-        result.mamba_branching_seqlen = mamba_branching_seqlen;
+        if (mamba_branching_seqlen.has_value()) {
+            op.match_result.mamba_branching_seqlen = *mamba_branching_seqlen;
+        }
         result.cache_transfer_pairs = PrepareMambaDeviceLoadBack(loadback_nodes);
         if (!loadback_nodes.empty() && loadback_nodes.front()->HasMamba()) {
-            result.mamba_cow_src_index = loadback_nodes.front()->MambaSlotIndex();
+            op.match_result.mamba_cow_src_index = loadback_nodes.front()->MambaSlotIndex();
         }
     }
     return result;
@@ -606,7 +655,7 @@ cache::admit::DecodeFromRetracted::Result HybridPrefixCache::Apply(
     if (result.admitted) {
         result.cache_transfer_pairs = PrepareMambaDeviceLoadBack(loadback_nodes);
         if (!loadback_nodes.empty() && loadback_nodes.front()->HasMamba()) {
-            result.mamba_cow_src_index = loadback_nodes.front()->MambaSlotIndex();
+            op.match_result.mamba_cow_src_index = loadback_nodes.front()->MambaSlotIndex();
         }
     }
     return result;
@@ -629,11 +678,6 @@ void HybridPrefixCache::AccumulateStepResult(StepCommitResult& result, cache::pu
 void HybridPrefixCache::AccumulateStepResult(StepCommitResult& result,
                                              cache::publish::FinishedRequest::Result&& op_result) {
     result.match_result = std::move(op_result.match_result);
-    result.device_insert_page_count = op_result.device_insert_page_count;
-}
-
-void HybridPrefixCache::AccumulateStepResult(StepCommitResult& result,
-                                             cache::publish::RetractPrefixPlan::Result op_result) {
     result.device_insert_page_count = op_result.device_insert_page_count;
 }
 

@@ -36,6 +36,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -223,6 +224,7 @@ void HybridPrefixCache::EnablePagedCacheAdjunct(std::vector<std::string> require
         std::unordered_set<std::string>(paged_cache_history_groups_.begin(), paged_cache_history_groups_.end());
     paged_cache_state_group_set_ =
         std::unordered_set<std::string>(paged_cache_state_groups_.begin(), paged_cache_state_groups_.end());
+    EnsureKvEvictionCallbacksInstalled();
 }
 
 void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
@@ -380,11 +382,11 @@ std::map<std::string, std::int32_t> HybridPrefixCache::InitialSimulatedFree() co
     return out;
 }
 
-void HybridPrefixCache::AcquireForRequest(const std::string& request_id, std::int32_t first_raw_position_of_op,
+void HybridPrefixCache::AcquireForRequest(std::string_view request_id, std::int32_t first_raw_position_of_op,
                                           std::int32_t target_raw_tokens_exclusive,
                                           const MatchResult::PagedCache& paged_cache_hit) {
     if (paged_cache_allocators_.empty()) return;
-    auto& tables = request_paged_cache_tables_[request_id];
+    auto& tables = request_paged_cache_tables_[std::string{request_id}];
     const bool has_hit = (paged_cache_hit.last_node != nullptr) && (paged_cache_hit.prefix_len_tokens > 0);
     for (const auto& [group_id, allocator] : paged_cache_allocators_) {
         auto it = tables.find(group_id);
@@ -458,7 +460,7 @@ void HybridPrefixCache::acquireAndPopulateOp(ForwardOperationBase& op_base, std:
 }
 
 HybridPrefixCache::PagedCacheGroupAdmission HybridPrefixCache::checkPagedCacheGroupAdmission(
-    const std::string& request_id, std::int32_t first_raw_position_of_op, std::int32_t target_raw_tokens_exclusive,
+    std::string_view request_id, std::int32_t first_raw_position_of_op, std::int32_t target_raw_tokens_exclusive,
     const std::map<std::string, std::int32_t>& simulated_free, const MatchResult::PagedCache& paged_cache_hit,
     const PagedCacheAdmissionContext& context) const {
     PagedCacheGroupAdmission result;
@@ -466,8 +468,9 @@ HybridPrefixCache::PagedCacheGroupAdmission HybridPrefixCache::checkPagedCacheGr
         return result;
     }
 
+    const std::string request_key{request_id};
     auto req_it =
-        context.fresh_table_view ? request_paged_cache_tables_.end() : request_paged_cache_tables_.find(request_id);
+        context.fresh_table_view ? request_paged_cache_tables_.end() : request_paged_cache_tables_.find(request_key);
     const bool has_hit = (paged_cache_hit.last_node != nullptr) && (paged_cache_hit.prefix_len_tokens > 0);
     for (const auto& [gid, allocator] : paged_cache_allocators_) {
         const auto& cfg = allocator->Config();
@@ -610,11 +613,12 @@ void HybridPrefixCache::refreshPagedCacheSimulatedFree(std::map<std::string, std
     }
 }
 
-bool HybridPrefixCache::admitPagedCacheChunk(const std::string& request_id, std::int32_t first_raw_position_of_op,
+bool HybridPrefixCache::admitPagedCacheChunk(std::string_view request_id, std::int32_t first_raw_position_of_op,
                                              std::int32_t target_raw_tokens_exclusive,
                                              std::map<std::string, std::int32_t>& simulated_free,
                                              const MatchResult::PagedCache& paged_cache_hit,
                                              const PagedCacheAdmissionContext& context) {
+    if (paged_cache_allocators_.empty()) return true;
     PagedCacheGroupAdmission admission = checkPagedCacheGroupAdmission(
         request_id, first_raw_position_of_op, target_raw_tokens_exclusive, simulated_free, paged_cache_hit, context);
     const std::size_t prune_budget = paged_cache_snapshot_nodes_.size();
@@ -737,7 +741,7 @@ bool HybridPrefixCache::tryPrunePagedCacheSnapshot(AdmissionFailureKind kind) {
     return false;
 }
 
-bool HybridPrefixCache::AdmitChunk(const std::string& request_id, std::int32_t first_raw_position_of_op,
+bool HybridPrefixCache::AdmitChunk(std::string_view request_id, std::int32_t first_raw_position_of_op,
                                    std::int32_t target_raw_tokens_exclusive,
                                    std::map<std::string, std::int32_t>& simulated_free,
                                    const MatchResult::PagedCache& paged_cache_hit) {
@@ -745,11 +749,12 @@ bool HybridPrefixCache::AdmitChunk(const std::string& request_id, std::int32_t f
                                 paged_cache_hit, {});
 }
 
-bool HybridPrefixCache::AdmitChunkFromRetracted(const std::string& request_id, std::int32_t target_raw_tokens_exclusive,
+bool HybridPrefixCache::AdmitChunkFromRetracted(std::string_view request_id, std::int32_t target_raw_tokens_exclusive,
                                                 std::map<std::string, std::int32_t>& simulated_free,
                                                 const MatchResult::PagedCache& paged_cache_hit) {
+    if (paged_cache_allocators_.empty()) return true;
     PagedCacheAdmissionContext context{.fresh_table_view = true};
-    auto req_it = request_paged_cache_tables_.find(request_id);
+    auto req_it = request_paged_cache_tables_.find(std::string{request_id});
     if (req_it != request_paged_cache_tables_.end()) {
         for (const auto& [gid, table] : req_it->second) {
             context.owned_release_credit[gid] = table.OwnedPagesCount();

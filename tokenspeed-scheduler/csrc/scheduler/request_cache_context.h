@@ -23,7 +23,6 @@
 #include <cstdint>
 #include <vector>
 
-#include "resource/allocator/owned_pages.h"
 #include "scheduler/request.h"
 
 namespace tokenspeed {
@@ -71,7 +70,7 @@ public:
 
     TreeNode* MutableTerminalDeviceNode() { return request_.GetMutableDeviceNode(); }
 
-    OwnedPages TakeFirstLocalKVPages(std::int32_t alloc_count) { return request_.TakeFirstPages(alloc_count); }
+    RequestLocalCacheState& LocalCache() { return *request_.GetLocalCache(); }
 
 private:
     Request& request_;

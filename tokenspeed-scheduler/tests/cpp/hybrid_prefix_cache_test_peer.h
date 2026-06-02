@@ -85,6 +85,10 @@ public:
     static LocalMambaAllocator* AdjunctState(RequestLocalCacheState& state) { return state.AdjunctState(); }
 
     static const LocalMambaAllocator* AdjunctState(const RequestLocalCacheState& state) { return state.AdjunctState(); }
+
+    static bool HasKvEvictionCallbacksInstalled(const HybridPrefixCache& cache) {
+        return cache.has_kv_eviction_callbacks_;
+    }
 };
 
 }  // namespace tokenspeed

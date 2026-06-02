@@ -51,6 +51,7 @@
 #include "scheduler/request_cache_context.h"
 #include "scheduler/request_spec.h"
 #include "scheduler/types.h"
+#include "utils.h"
 
 namespace tokenspeed {
 
@@ -264,7 +265,7 @@ std::size_t Scheduler::RetractedSize() const {
 }
 
 std::size_t Scheduler::AvailableKvPages() const {
-    return hybrid_prefix_cache_.Stats().available_device_pages;
+    return hybrid_prefix_cache_.AvailableDevicePages();
 }
 
 std::size_t Scheduler::ActiveKvPages() const {
@@ -281,32 +282,29 @@ std::size_t Scheduler::ActiveKvPages() const {
 }
 
 std::vector<std::string> Scheduler::PagedCacheGroupIds() const {
-    return hybrid_prefix_cache_.Stats().paged_cache_group_ids;
+    return hybrid_prefix_cache_.PagedCacheGroupIds();
 }
 
 std::int32_t Scheduler::PagedCacheGroupTotalPages(const std::string& group_id) const {
-    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}}).paged_cache_total_pages.at(group_id);
+    return hybrid_prefix_cache_.PagedCacheGroupTotalPages(group_id);
 }
 
 std::int32_t Scheduler::PagedCacheGroupAvailablePages(const std::string& group_id) const {
-    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}}).paged_cache_available_pages.at(group_id);
+    return hybrid_prefix_cache_.PagedCacheGroupAvailablePages(group_id);
 }
 
 std::int64_t Scheduler::PagedCacheGroupFailedAllocCount(const std::string& group_id) const {
-    return hybrid_prefix_cache_.Stats({.paged_cache_group_ids = {group_id}})
-        .paged_cache_failed_alloc_count.at(group_id);
+    return hybrid_prefix_cache_.PagedCacheGroupFailedAllocCount(group_id);
 }
 
 std::vector<std::int32_t> Scheduler::GetRequestPagedCachePageIds(const std::string& request_id,
                                                                  const std::string& group_id) const {
-    return hybrid_prefix_cache_.Stats({.request_id = request_id, .paged_cache_group_ids = {group_id}})
-        .request_paged_cache_page_ids.at(group_id);
+    return hybrid_prefix_cache_.GetRequestPagedCachePageIds(request_id, group_id);
 }
 
 std::int32_t Scheduler::GetRequestPagedCacheBaseLogicalPage(const std::string& request_id,
                                                             const std::string& group_id) const {
-    return hybrid_prefix_cache_.Stats({.request_id = request_id, .paged_cache_group_ids = {group_id}})
-        .request_paged_cache_base_logical_page.at(group_id);
+    return hybrid_prefix_cache_.GetRequestPagedCacheBaseLogicalPage(request_id, group_id);
 }
 
 std::int32_t Scheduler::GetRequestTokenSize(const std::string& id) const {
@@ -401,9 +399,8 @@ void Scheduler::check_device_mem() {
     }
 
     auto stats_snapshot = hybrid_prefix_cache_.Stats({.include_device_memory_diagnostics = true});
-    if (!stats_snapshot.device_memory_diagnostics.has_value()) {
-        throw std::runtime_error("Scheduler::check_device_mem: missing diagnostics snapshot");
-    }
+    _assert(stats_snapshot.device_memory_diagnostics.has_value(),
+            "Scheduler::check_device_mem: diagnostics requested but snapshot was missing");
     auto device_snapshot = std::move(*stats_snapshot.device_memory_diagnostics);
 
     // ── 5. Summary ────────────────────────────────────────────────────────────

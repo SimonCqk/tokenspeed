@@ -31,6 +31,7 @@
 #include "resource/allocator/page_allocator.h"
 #include "resource/allocator/paged_cache_group.h"
 #include "resource/hybrid_prefix_cache/hybrid_prefix_cache.h"
+#include "hybrid_prefix_cache_test_peer.h"
 #include "resource/kv_prefix_cache/kv_prefix_cache.h"
 
 namespace tokenspeed::test {
@@ -68,6 +69,14 @@ TEST(HybridPrefixCacheStatsTest, PagedGroupsReportPublicStatsAndMissingRequestSt
 
     hybrid_prefix_cache.ConfigurePagedCacheAdjunct(std::span<const PagedCacheGroupConfig>{groups}, std::nullopt);
 
+    EXPECT_EQ(hybrid_prefix_cache.AvailableDevicePages(), 7u);
+    EXPECT_EQ(hybrid_prefix_cache.PagedCacheGroupIds(), std::vector<std::string>({"v4.history", "v4.swa"}));
+    EXPECT_EQ(hybrid_prefix_cache.PagedCacheGroupTotalPages("v4.history"), 16);
+    EXPECT_EQ(hybrid_prefix_cache.PagedCacheGroupAvailablePages("v4.history"), 15);
+    EXPECT_EQ(hybrid_prefix_cache.PagedCacheGroupFailedAllocCount("v4.history"), 0);
+    EXPECT_TRUE(hybrid_prefix_cache.GetRequestPagedCachePageIds("missing", "v4.history").empty());
+    EXPECT_EQ(hybrid_prefix_cache.GetRequestPagedCacheBaseLogicalPage("missing", "v4.history"), 0);
+
     const CacheStatsSnapshot all_stats = hybrid_prefix_cache.Stats();
     EXPECT_EQ(all_stats.available_device_pages, 7u);
     EXPECT_EQ(all_stats.paged_cache_group_ids, std::vector<std::string>({"v4.history", "v4.swa"}));
@@ -81,6 +90,28 @@ TEST(HybridPrefixCacheStatsTest, PagedGroupsReportPublicStatsAndMissingRequestSt
     EXPECT_EQ(history_stats.request_paged_cache_base_logical_page.at("v4.history"), 0);
 
     EXPECT_THROW((void)hybrid_prefix_cache.Stats({.paged_cache_group_ids = {"missing"}}), std::out_of_range);
+    EXPECT_THROW((void)hybrid_prefix_cache.PagedCacheGroupTotalPages("missing"), std::out_of_range);
+}
+
+TEST(HybridPrefixCacheStatsTest, PureKvDoesNotInstallEvictionCallbacksUntilAdjunctIsEnabled) {
+    PageAllocator device_allocator{kPageSize, /*total_pages=*/8};
+    PageAllocator host_allocator{kPageSize, /*total_pages=*/0};
+    KVPrefixCache prefix_cache{&device_allocator, &host_allocator};
+    HybridPrefixCache hybrid_prefix_cache{prefix_cache, device_allocator, /*allocator=*/nullptr, kMambaChunkSize};
+
+    EXPECT_FALSE(HybridPrefixCacheTestPeer::HasKvEvictionCallbacksInstalled(hybrid_prefix_cache));
+
+    auto history_owner = std::make_unique<PagedCacheGroupAllocator>(
+        MakePagedGroup("v4.history", PagedCacheGroupFamily::History, PagedCacheGroupConfig::Retention::FullHistory));
+    auto state_owner = std::make_unique<PagedCacheGroupAllocator>(
+        MakePagedGroup("v4.swa", PagedCacheGroupFamily::State, PagedCacheGroupConfig::Retention::SlidingWindow,
+                       /*sliding_window_tokens=*/16));
+    HybridPrefixCacheTestPeer::RegisterPagedCacheGroup(hybrid_prefix_cache, std::move(history_owner));
+    HybridPrefixCacheTestPeer::RegisterPagedCacheGroup(hybrid_prefix_cache, std::move(state_owner));
+    EXPECT_FALSE(HybridPrefixCacheTestPeer::HasKvEvictionCallbacksInstalled(hybrid_prefix_cache));
+
+    HybridPrefixCacheTestPeer::EnablePagedCacheAdjunct(hybrid_prefix_cache, {"v4.history", "v4.swa"}, {{"v4.swa", 16}});
+    EXPECT_TRUE(HybridPrefixCacheTestPeer::HasKvEvictionCallbacksInstalled(hybrid_prefix_cache));
 }
 
 }  // namespace tokenspeed::test

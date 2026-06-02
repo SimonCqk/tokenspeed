@@ -27,6 +27,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -829,25 +830,20 @@ TEST_F(MambaCacheTest, StepCommitRetractPublicationInsertsKvAndReturnsRawStateRe
     ASSERT_FALSE(prefix->HasMamba());
 
     const auto full_pages = PagedTokenSpans(tokens);
-    EXPECT_EQ(hybrid_prefix_cache_
-                  ->StepCommit(cache::publish::RetractPrefixPlan{
-                      .full_paged_tokens = full_pages,
-                      .current_device_node = *prefix,
-                  })
-                  .device_insert_page_count,
-              2);
-
     const std::vector<std::int32_t> existing_pages = DevicePagesFromRoot(prefix);
-    auto pages_to_insert = device_alloc_->Allocate(/*num_pages=*/2);
-    const std::vector<std::int32_t> inserted_pages = pages_to_insert.Ids();
+    auto retract_local_cache = std::make_unique<RequestLocalCacheState>(
+        std::make_unique<LocalKVAllocator>(device_alloc_.get(), /*num_tokens=*/0));
+    retract_local_cache->AcquireKV(/*tokens=*/2 * kPageSize);
+    const std::vector<std::int32_t> inserted_pages = retract_local_cache->LocalKVPages();
 
-    MatchResult match = hybrid_prefix_cache_
-                            ->StepCommit(cache::publish::RetractPrefixCommit{
-                                .full_paged_tokens = full_pages,
-                                .current_device_node = *prefix,
-                                .pages_to_insert = std::move(pages_to_insert),
-                            })
-                            .match_result;
+    StepCommitResult publish_result = hybrid_prefix_cache_->StepCommit(cache::publish::RetractPrefixCommit{
+        .full_paged_tokens = full_pages,
+        .current_device_node = *prefix,
+        .local_cache = *retract_local_cache,
+    });
+    EXPECT_EQ(publish_result.device_insert_page_count, 2);
+    MatchResult match = std::move(publish_result.match_result);
+    EXPECT_TRUE(retract_local_cache->LocalKVPages().empty());
 
     EXPECT_EQ(match.device.DepthInPage(), 3);
     EXPECT_EQ(match.host.DepthInPage(), 0);
@@ -887,6 +883,29 @@ TEST_F(MambaCacheTest, StepCommitRetractPublicationInsertsKvAndReturnsRawStateRe
     EXPECT_EQ(mamba_alloc_->AvailableSlots(), kMambaSlots - 1);
 }
 
+TEST(HybridPrefixCacheAdmissionApiTest, AdmitRequestIdAcceptsStringViewWithoutOwningCopy) {
+    constexpr std::int32_t kPageSize = 2;
+    constexpr std::int32_t kMambaCacheChunkSize = 4;
+    PageAllocator device_allocator{kPageSize, /*total_pages=*/8};
+    PageAllocator host_allocator{kPageSize, /*total_pages=*/0};
+    KVPrefixCache prefix_cache{&device_allocator, &host_allocator};
+    HybridPrefixCache hybrid_prefix_cache{prefix_cache, device_allocator, /*allocator=*/nullptr, kMambaCacheChunkSize};
+
+    std::string request_id = "request-backed-by-local-string";
+    std::string_view request_id_view{request_id};
+    std::map<std::string, std::int32_t> simulated_free;
+    AdmissionVerdict verdict = hybrid_prefix_cache.Apply(
+        cache::admit::PrefillChunk{
+            .request_id = request_id_view,
+            .device_pages_needed = 0,
+            .first_raw_position_of_op = 0,
+            .target_raw_tokens_exclusive = 0,
+        },
+        simulated_free);
+
+    EXPECT_TRUE(verdict.admitted);
+}
+
 TEST_F(MambaCacheTest, AdmitMambaCapacityForPrefillDecodeAndRecovery) {
     std::int32_t fill_start = 1000;
     auto saturate_mamba_slots = [this, &fill_start]() {
@@ -911,9 +930,7 @@ TEST_F(MambaCacheTest, AdmitMambaCapacityForPrefillDecodeAndRecovery) {
         simulated_free);
 
     EXPECT_TRUE(prefill_first.admitted);
-    ASSERT_TRUE(prefill_first.mamba_branching_seqlen.has_value());
-    EXPECT_EQ(*prefill_first.mamba_branching_seqlen, 4);
-    EXPECT_EQ(prefill_first_match.mamba_branching_seqlen, -1);
+    EXPECT_EQ(prefill_first_match.mamba_branching_seqlen, 4);
     EXPECT_GE(mamba_alloc_->AvailableSlots(), 2);
 
     saturate_mamba_slots();
