@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -234,6 +235,23 @@ private:
         std::map<std::string, std::int32_t> owned_release_credit{};
     };
 
+    struct TransparentStringHash {
+        using is_transparent = void;
+
+        std::size_t operator()(std::string_view value) const noexcept { return std::hash<std::string_view>{}(value); }
+    };
+
+    struct TransparentStringEqual {
+        using is_transparent = void;
+
+        bool operator()(std::string_view lhs, std::string_view rhs) const noexcept { return lhs == rhs; }
+    };
+
+    using PagedCacheAllocatorMap = std::map<std::string, std::unique_ptr<PagedCacheGroupAllocator>, std::less<>>;
+    using RequestPagedCacheGroupTables = std::map<std::string, PagedCacheGroupTable, std::less<>>;
+    using RequestPagedCacheTableMap =
+        std::unordered_map<std::string, RequestPagedCacheGroupTables, TransparentStringHash, TransparentStringEqual>;
+
     // Classify which family caused `admission.ok == false`.
     AdmissionFailureKind ClassifyAdmissionFailure(const PagedCacheGroupAdmission& admission) const;
 
@@ -266,9 +284,9 @@ private:
     void CommitChunk(const std::string& request_id, TreeNode* terminal);
 
     void RefreshPagedCacheSnapshotCompleteness(PagedCacheSnapshot& snapshot) const;
-    bool adoptExistingPagedCacheSnapshot(PagedCacheSnapshot& existing,
-                                         std::map<std::string, PagedCacheGroupTable>& tables, std::int32_t target);
-    bool commitTerminalContinuationSnapshot(std::map<std::string, PagedCacheGroupTable>& tables, TreeNode* terminal,
+    bool adoptExistingPagedCacheSnapshot(PagedCacheSnapshot& existing, RequestPagedCacheGroupTables& tables,
+                                         std::int32_t target);
+    bool commitTerminalContinuationSnapshot(RequestPagedCacheGroupTables& tables, TreeNode* terminal,
                                             std::int32_t target);
 
     // Attach a snapshot to `node`, computing `complete_families` from which
@@ -323,8 +341,8 @@ private:
     bool has_kv_eviction_callbacks_{false};
 
     // `paged_cache_history_alignment_tokens_ == 0` means adjunct disabled; tables still work.
-    std::map<std::string, std::unique_ptr<PagedCacheGroupAllocator>> paged_cache_allocators_;
-    std::unordered_map<std::string, std::map<std::string, PagedCacheGroupTable>> request_paged_cache_tables_;
+    PagedCacheAllocatorMap paged_cache_allocators_;
+    RequestPagedCacheTableMap request_paged_cache_tables_;
     std::int32_t paged_cache_history_alignment_tokens_{0};
     std::vector<std::string> paged_cache_required_groups_;
     std::unordered_map<std::string, std::int32_t> paged_cache_sliding_window_per_group_;

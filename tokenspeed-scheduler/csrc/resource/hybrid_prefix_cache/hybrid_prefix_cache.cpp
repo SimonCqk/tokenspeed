@@ -434,8 +434,7 @@ std::vector<std::string> HybridPrefixCache::PagedCacheGroupIds() const {
 }
 
 std::int32_t HybridPrefixCache::PagedCacheGroupTotalPages(std::string_view group_id) const {
-    auto alloc_it = std::find_if(paged_cache_allocators_.begin(), paged_cache_allocators_.end(),
-                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    auto alloc_it = paged_cache_allocators_.find(group_id);
     if (alloc_it == paged_cache_allocators_.end() || alloc_it->second == nullptr) {
         throw std::out_of_range("HybridPrefixCache::PagedCacheGroupTotalPages: group_id not configured");
     }
@@ -443,8 +442,7 @@ std::int32_t HybridPrefixCache::PagedCacheGroupTotalPages(std::string_view group
 }
 
 std::int32_t HybridPrefixCache::PagedCacheGroupAvailablePages(std::string_view group_id) const {
-    auto alloc_it = std::find_if(paged_cache_allocators_.begin(), paged_cache_allocators_.end(),
-                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    auto alloc_it = paged_cache_allocators_.find(group_id);
     if (alloc_it == paged_cache_allocators_.end() || alloc_it->second == nullptr) {
         throw std::out_of_range("HybridPrefixCache::PagedCacheGroupAvailablePages: group_id not configured");
     }
@@ -452,8 +450,7 @@ std::int32_t HybridPrefixCache::PagedCacheGroupAvailablePages(std::string_view g
 }
 
 std::int64_t HybridPrefixCache::PagedCacheGroupFailedAllocCount(std::string_view group_id) const {
-    auto alloc_it = std::find_if(paged_cache_allocators_.begin(), paged_cache_allocators_.end(),
-                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    auto alloc_it = paged_cache_allocators_.find(group_id);
     if (alloc_it == paged_cache_allocators_.end() || alloc_it->second == nullptr) {
         throw std::out_of_range("HybridPrefixCache::PagedCacheGroupFailedAllocCount: group_id not configured");
     }
@@ -463,11 +460,9 @@ std::int64_t HybridPrefixCache::PagedCacheGroupFailedAllocCount(std::string_view
 std::vector<std::int32_t> HybridPrefixCache::GetRequestPagedCachePageIds(std::string_view request_id,
                                                                          std::string_view group_id) const {
     (void)PagedCacheGroupTotalPages(group_id);
-    auto req_it = std::find_if(request_paged_cache_tables_.begin(), request_paged_cache_tables_.end(),
-                               [request_id](const auto& entry) { return entry.first == request_id; });
+    auto req_it = request_paged_cache_tables_.find(request_id);
     if (req_it == request_paged_cache_tables_.end()) return {};
-    auto group_it = std::find_if(req_it->second.begin(), req_it->second.end(),
-                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    auto group_it = req_it->second.find(group_id);
     if (group_it == req_it->second.end()) return {};
     return group_it->second.PageIds();
 }
@@ -475,11 +470,9 @@ std::vector<std::int32_t> HybridPrefixCache::GetRequestPagedCachePageIds(std::st
 std::int32_t HybridPrefixCache::GetRequestPagedCacheBaseLogicalPage(std::string_view request_id,
                                                                     std::string_view group_id) const {
     (void)PagedCacheGroupTotalPages(group_id);
-    auto req_it = std::find_if(request_paged_cache_tables_.begin(), request_paged_cache_tables_.end(),
-                               [request_id](const auto& entry) { return entry.first == request_id; });
+    auto req_it = request_paged_cache_tables_.find(request_id);
     if (req_it == request_paged_cache_tables_.end()) return 0;
-    auto group_it = std::find_if(req_it->second.begin(), req_it->second.end(),
-                                 [group_id](const auto& entry) { return entry.first == group_id; });
+    auto group_it = req_it->second.find(group_id);
     if (group_it == req_it->second.end()) return 0;
     return group_it->second.BaseLogicalPage();
 }

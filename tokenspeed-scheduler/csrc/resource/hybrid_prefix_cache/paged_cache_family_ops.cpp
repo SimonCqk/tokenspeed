@@ -187,8 +187,7 @@ void HybridPrefixCache::RefreshPagedCacheSnapshotCompleteness(PagedCacheSnapshot
 }
 
 bool HybridPrefixCache::adoptExistingPagedCacheSnapshot(PagedCacheSnapshot& existing,
-                                                        std::map<std::string, PagedCacheGroupTable>& tables,
-                                                        std::int32_t target) {
+                                                        RequestPagedCacheGroupTables& tables, std::int32_t target) {
     struct Adoption {
         std::string gid;
         PagedCacheGroupTable* table{nullptr};
@@ -225,8 +224,8 @@ bool HybridPrefixCache::adoptExistingPagedCacheSnapshot(PagedCacheSnapshot& exis
     return true;
 }
 
-bool HybridPrefixCache::commitTerminalContinuationSnapshot(std::map<std::string, PagedCacheGroupTable>& tables,
-                                                           TreeNode* terminal, std::int32_t target) {
+bool HybridPrefixCache::commitTerminalContinuationSnapshot(RequestPagedCacheGroupTables& tables, TreeNode* terminal,
+                                                           std::int32_t target) {
     if (paged_cache_continuation_state_groups_.empty()) return false;
     if (terminal == nullptr || target <= 0) return false;
 
@@ -710,9 +709,8 @@ HybridPrefixCache::PagedCacheGroupAdmission HybridPrefixCache::checkPagedCacheGr
         return result;
     }
 
-    const std::string request_key{request_id};
     auto req_it =
-        context.fresh_table_view ? request_paged_cache_tables_.end() : request_paged_cache_tables_.find(request_key);
+        context.fresh_table_view ? request_paged_cache_tables_.end() : request_paged_cache_tables_.find(request_id);
     const bool has_hit = (paged_cache_hit.last_node != nullptr) && (paged_cache_hit.prefix_len_tokens > 0);
     for (const auto& [gid, allocator] : paged_cache_allocators_) {
         const auto& cfg = allocator->Config();
@@ -761,10 +759,15 @@ HybridPrefixCache::PagedCacheGroupAdmission HybridPrefixCache::checkPagedCacheGr
 
         std::int32_t releasable_total = 0;
         std::int32_t releasable_owned = 0;
+        std::int32_t empty_sliding_base_after_release = -1;
         if (cfg.retention == PagedCacheGroupConfig::Retention::SlidingWindow && cfg.sliding_window_tokens.has_value()) {
             const std::int32_t lower = std::max(0, first_raw_position_of_op - *cfg.sliding_window_tokens + 1);
             const std::int32_t target_releases = lower / raw_per_page;
             const std::int32_t logical_released_base = table_exists ? already_released : borrowed_base;
+            const std::int32_t logical_size = table_exists ? current_size : borrowed_count;
+            if (logical_size == 0 && target_releases > logical_released_base) {
+                empty_sliding_base_after_release = target_releases;
+            }
             releasable_total = std::max(0, target_releases - logical_released_base);
             releasable_total = std::min(releasable_total, current_active + borrowed_count);
 
@@ -776,16 +779,19 @@ HybridPrefixCache::PagedCacheGroupAdmission HybridPrefixCache::checkPagedCacheGr
                 releasable_owned = std::min(releasable_owned, owned_in_table);
             }
 
-            // State-family: CommitChunk converts all owned pages to borrowed
-            // before ReleaseSkipped runs, so owned pages do not return to the
-            // pool via release. The only pool credit comes from
-            // CheckpointStateToSnapshot's stale-owned drop below the live
-            // lower bound at the first commit step.
+            // Required State-family groups: CommitChunk converts the retained
+            // snapshot tail from owned to borrowed before ReleaseSkipped runs,
+            // so the only immediate pool credit is from stale-owned pages
+            // dropped at the first commit step. Transport-only State groups do
+            // not participate in intermediate snapshots and must keep the
+            // ReleaseSkipped estimate above.
             const std::int32_t lcm = paged_cache_history_alignment_tokens_;
-            if (cfg.family == PagedCacheGroupFamily::State && table_exists && lcm > 0 &&
-                committed_prefix + lcm <= raw_cursor) {
+            const bool required_state_group =
+                paged_cache_state_group_set_.find(gid) != paged_cache_state_group_set_.end();
+            if (required_state_group && table_exists && lcm > 0 && committed_prefix + lcm <= raw_cursor) {
                 const std::int32_t commit_target = committed_prefix + lcm;
-                const std::int32_t live_lower_raw = std::max(0, commit_target - *cfg.sliding_window_tokens);
+                const std::int32_t retained_tokens = *cfg.sliding_window_tokens;
+                const std::int32_t live_lower_raw = std::max(0, commit_target - retained_tokens);
                 const std::int32_t live_lower_page = live_lower_raw / raw_per_page;
                 std::int32_t base = already_released;
                 if (live_lower_page > base) {
@@ -795,8 +801,11 @@ HybridPrefixCache::PagedCacheGroupAdmission HybridPrefixCache::checkPagedCacheGr
             }
         }
 
-        const std::int32_t absolute_have =
+        std::int32_t absolute_have =
             table_exists ? (already_released + current_size) : (borrowed_base + borrowed_count);
+        if (empty_sliding_base_after_release > absolute_have) {
+            absolute_have = empty_sliding_base_after_release;
+        }
         const std::int32_t new_pages = std::max(0, required - absolute_have);
         std::int32_t free = allocator->AvailablePages();
         auto sf_it = simulated_free.find(gid);
@@ -886,9 +895,7 @@ bool HybridPrefixCache::DetachStateSnapshotFromNode(TreeNode* node) {
     PagedCacheSnapshot* snap = node->GetPagedCacheSnapshotMut();
     if (snap == nullptr) return false;
     bool removed_any = false;
-    std::unordered_set<std::string> state_groups(paged_cache_state_groups_.begin(), paged_cache_state_groups_.end());
-    state_groups.insert(paged_cache_continuation_state_groups_.begin(), paged_cache_continuation_state_groups_.end());
-    for (const auto& gid : state_groups) {
+    for (const auto& gid : paged_cache_continuation_state_groups_) {
         auto it = snap->groups.find(gid);
         if (it != snap->groups.end()) {
             snap->groups.erase(it);
@@ -896,11 +903,11 @@ bool HybridPrefixCache::DetachStateSnapshotFromNode(TreeNode* node) {
         }
     }
     if (!removed_any) return false;
+    snap->complete_families.erase(PagedCacheGroupFamily::State);
+    snap->continuation_state_complete = false;
     // If nothing remains, fall through to full detach to keep invariants tidy.
     if (snap->groups.empty()) {
         DetachPagedCacheSnapshotFromNode(node);
-    } else {
-        RefreshPagedCacheSnapshotCompleteness(*snap);
     }
     return true;
 }
@@ -1000,7 +1007,7 @@ bool HybridPrefixCache::AdmitChunkFromRetracted(std::string_view request_id, std
                                                 const MatchResult::PagedCache& paged_cache_hit) {
     if (paged_cache_allocators_.empty()) return true;
     PagedCacheAdmissionContext context{.fresh_table_view = true};
-    auto req_it = request_paged_cache_tables_.find(std::string{request_id});
+    auto req_it = request_paged_cache_tables_.find(request_id);
     if (req_it != request_paged_cache_tables_.end()) {
         for (const auto& [gid, table] : req_it->second) {
             context.owned_release_credit[gid] = table.OwnedPagesCount();

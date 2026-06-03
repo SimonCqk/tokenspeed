@@ -184,10 +184,7 @@ void HybridPrefixCache::PublishFinishMambaState(const std::vector<std::span<cons
 
     std::unique_ptr<MambaSlot> slot_to_publish;
     if (local_mamba_allocator->HasCheckpoint()) {
-        const std::int32_t checkpoint_position = local_mamba_allocator->CheckpointPosition();
-        if (checkpoint_position < 0 || checkpoint_position == static_cast<std::int32_t>(terminal->DepthInTokens())) {
-            slot_to_publish = local_mamba_allocator->DetachCheckpoint();
-        }
+        slot_to_publish = local_mamba_allocator->DetachCheckpoint();
     }
     if (slot_to_publish == nullptr && local_mamba_allocator->HasWorking()) {
         slot_to_publish = local_mamba_allocator->DetachWorking();

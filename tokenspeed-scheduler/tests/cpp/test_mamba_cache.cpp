@@ -862,6 +862,41 @@ TEST_F(MambaCacheTest, StepCommitFinishStateInsertsKvPagesHashesAndMamba) {
     EXPECT_EQ(local_mamba->WorkingIndex(), working_index);
 }
 
+TEST_F(MambaCacheTest, StepCommitFinishStatePublishesCheckpointWhenPositionDiffersFromTerminal) {
+    auto tokens = MakeAlignedTokens(3, kPageSize);
+    auto page_hashes = MakePageHashes(/*num_pages=*/3);
+    TreeNode* root = prefix_cache_->Match(token_vec_t{}).device.last_node;
+
+    RequestLocalCacheState local_cache(
+        std::make_unique<LocalKVAllocator>(device_alloc_.get(), static_cast<std::int32_t>(tokens.size())),
+        std::make_unique<LocalMambaAllocator>(mamba_alloc_.get()));
+    auto* local_mamba = HybridPrefixCacheTestPeer::AdjunctState(local_cache);
+    ASSERT_NE(local_mamba, nullptr);
+    ASSERT_TRUE(local_mamba->AllocateWorking());
+    const std::int32_t working_index = local_mamba->WorkingIndex();
+    ASSERT_TRUE(local_mamba->AllocateCheckpoint(/*raw_position=*/kPageSize));
+    const std::int32_t checkpoint_index = local_mamba->CheckpointIndex();
+
+    const auto full_pages = PagedTokenSpans(tokens);
+    MatchResult match = hybrid_prefix_cache_
+                            ->StepCommit(cache::publish::FinishedRequest{
+                                .full_paged_tokens = full_pages,
+                                .current_device_node = *root,
+                                .local_cache = local_cache,
+                                .page_hashes = page_hashes,
+                            })
+                            .match_result;
+
+    TreeNode* terminal = match.device.last_node;
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_TRUE(terminal->HasMamba());
+    EXPECT_EQ(terminal->MambaSlotIndex(), checkpoint_index)
+        << "MTP updates accepted state into the checkpoint slot without updating C++ checkpoint position";
+    EXPECT_EQ(local_mamba->CheckpointPosition(), -1);
+    ASSERT_TRUE(local_mamba->HasWorking());
+    EXPECT_EQ(local_mamba->WorkingIndex(), working_index);
+}
+
 TEST_F(MambaCacheTest, StepCommitKeepsUnalignedCheckpointForMetadata) {
     auto tokens = MakeAlignedTokens(3, kPageSize);
 

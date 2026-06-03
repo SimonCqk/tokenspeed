@@ -361,6 +361,100 @@ TEST(PagedCacheAdmissionTest, ExistingTransportStateGroupUsesSlidingWindowCredit
                  std::runtime_error);
 }
 
+TEST(PagedCacheAdmissionTest, TransportStateKeepsReleaseSkippedEstimate) {
+    auto device_alloc = std::make_unique<PageAllocator>(64, 128);
+    auto kv_cache = std::make_unique<KVPrefixCache>(device_alloc.get(), /*host_allocator=*/nullptr);
+
+    PagedCacheGroupConfig history{};
+    history.group_id = "fh";
+    history.rows_per_page = 8;
+    history.entry_stride_tokens = 4;
+    history.total_pages = 32;
+    history.retention = PagedCacheGroupConfig::Retention::FullHistory;
+    history.family = PagedCacheGroupFamily::History;
+
+    PagedCacheGroupConfig swa{};
+    swa.group_id = "swa";
+    swa.rows_per_page = 4;
+    swa.entry_stride_tokens = 1;
+    swa.total_pages = 17;
+    swa.retention = PagedCacheGroupConfig::Retention::SlidingWindow;
+    swa.sliding_window_tokens = 16;
+    swa.family = PagedCacheGroupFamily::State;
+
+    auto history_owner = std::make_unique<PagedCacheGroupAllocator>(history);
+    auto swa_owner = std::make_unique<PagedCacheGroupAllocator>(swa);
+    HybridPrefixCache hybrid(*kv_cache, *device_alloc, /*mamba=*/nullptr, /*mamba_chunk_size=*/0);
+    HybridPrefixCacheTestPeer::RegisterPagedCacheGroup(hybrid, std::move(history_owner));
+    HybridPrefixCacheTestPeer::RegisterPagedCacheGroup(hybrid, std::move(swa_owner));
+    HybridPrefixCacheTestPeer::EnablePagedCacheAdjunct(hybrid, {"fh"}, std::unordered_map<std::string, std::int32_t>{});
+
+    HybridPrefixCacheTestPeer::AcquireForRequest(hybrid, "r", /*first_raw_position_of_op=*/0,
+                                                 /*target_raw_tokens_exclusive=*/64);
+
+    auto simulated_free = hybrid.InitialSimulatedFree();
+    ASSERT_EQ(simulated_free.at("swa"), 0);
+    ASSERT_TRUE(hybrid
+                    .Apply(
+                        cache::admit::PrefillChunk{
+                            .request_id = "r",
+                            .device_pages_needed = 0,
+                            .first_raw_position_of_op = 64,
+                            .target_raw_tokens_exclusive = 96,
+                        },
+                        simulated_free)
+                    .admitted);
+    EXPECT_NO_THROW(HybridPrefixCacheTestPeer::AcquireForRequest(hybrid, "r", /*first_raw_position_of_op=*/64,
+                                                                 /*target_raw_tokens_exclusive=*/96));
+}
+
+TEST(PagedCacheAdmissionTest, EmptySlidingTableAdvancesBaseInAdmission) {
+    auto device_alloc = std::make_unique<PageAllocator>(64, 128);
+    auto kv_cache = std::make_unique<KVPrefixCache>(device_alloc.get(), /*host_allocator=*/nullptr);
+
+    PagedCacheGroupConfig history{};
+    history.group_id = "fh";
+    history.rows_per_page = 8;
+    history.entry_stride_tokens = 4;
+    history.total_pages = 32;
+    history.retention = PagedCacheGroupConfig::Retention::FullHistory;
+    history.family = PagedCacheGroupFamily::History;
+
+    PagedCacheGroupConfig swa{};
+    swa.group_id = "swa";
+    swa.rows_per_page = 4;
+    swa.entry_stride_tokens = 1;
+    swa.total_pages = 12;
+    swa.retention = PagedCacheGroupConfig::Retention::SlidingWindow;
+    swa.sliding_window_tokens = 16;
+    swa.family = PagedCacheGroupFamily::State;
+
+    auto history_owner = std::make_unique<PagedCacheGroupAllocator>(history);
+    auto swa_owner = std::make_unique<PagedCacheGroupAllocator>(swa);
+    HybridPrefixCache hybrid(*kv_cache, *device_alloc, /*mamba=*/nullptr, /*mamba_chunk_size=*/0);
+    HybridPrefixCacheTestPeer::RegisterPagedCacheGroup(hybrid, std::move(history_owner));
+    HybridPrefixCacheTestPeer::RegisterPagedCacheGroup(hybrid, std::move(swa_owner));
+    HybridPrefixCacheTestPeer::EnablePagedCacheAdjunct(hybrid, {"fh"}, std::unordered_map<std::string, std::int32_t>{});
+
+    HybridPrefixCacheTestPeer::AcquireForRequest(hybrid, "r", /*first_raw_position_of_op=*/0,
+                                                 /*target_raw_tokens_exclusive=*/0);
+
+    auto simulated_free = hybrid.InitialSimulatedFree();
+    ASSERT_EQ(simulated_free.at("swa"), 11);
+    ASSERT_TRUE(hybrid
+                    .Apply(
+                        cache::admit::PrefillChunk{
+                            .request_id = "r",
+                            .device_pages_needed = 0,
+                            .first_raw_position_of_op = 64,
+                            .target_raw_tokens_exclusive = 68,
+                        },
+                        simulated_free)
+                    .admitted);
+    EXPECT_NO_THROW(HybridPrefixCacheTestPeer::AcquireForRequest(hybrid, "r", /*first_raw_position_of_op=*/64,
+                                                                 /*target_raw_tokens_exclusive=*/68));
+}
+
 TEST_F(PagedCacheTerminalMixedSchedulerTest, MixedPrefillDecodePagedTablesCoverScheduledTokens) {
     std::vector<std::string> decode_ids;
     for (int i = 0; i < 5; ++i) {
