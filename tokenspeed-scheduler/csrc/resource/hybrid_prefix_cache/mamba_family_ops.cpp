@@ -252,16 +252,17 @@ void HybridPrefixCache::PublishFinishMambaState(const std::vector<std::span<cons
     const std::int32_t checkpoint_pos = had_checkpoint ? local_mamba_allocator->CheckpointPosition() : -1;
     MatchResult post_match = kv_prefix_cache_.Match(full_paged_tokens);
     TreeNode* terminal = post_match.device.last_node;
-    if (terminal == nullptr || terminal->HasMamba()) {
+    if (terminal == nullptr || terminal->IsRoot()) {
         if (PerfDebugEnabled()) {
             spdlog::info(
-                "{} PublishFinishMambaState skipped terminal_depth={} terminal_has_mamba={} full_pages={} "
+                "{} PublishFinishMambaState skipped terminal_depth={} terminal_is_root={} full_pages={} "
                 "had_checkpoint={} checkpoint_pos={} had_working={}",
-                kPerfDebugTag, NodeDepthTokens(terminal), terminal != nullptr && terminal->HasMamba(),
+                kPerfDebugTag, NodeDepthTokens(terminal), terminal != nullptr && terminal->IsRoot(),
                 full_paged_tokens.size(), had_checkpoint, checkpoint_pos, had_working);
         }
         return;
     }
+    const bool replaced_existing = terminal->HasMamba();
 
     std::unique_ptr<MambaSlot> slot_to_publish;
     if (local_mamba_allocator->HasCheckpoint()) {
@@ -275,9 +276,9 @@ void HybridPrefixCache::PublishFinishMambaState(const std::vector<std::span<cons
     if (PerfDebugEnabled()) {
         spdlog::info(
             "{} PublishFinishMambaState published terminal_depth={} full_pages={} from_checkpoint={} "
-            "checkpoint_pos={} had_working={}",
+            "checkpoint_pos={} had_working={} replaced_existing={}",
             kPerfDebugTag, NodeDepthTokens(terminal), full_paged_tokens.size(), had_checkpoint, checkpoint_pos,
-            had_working);
+            had_working, replaced_existing);
     }
 }
 
@@ -337,9 +338,14 @@ void HybridPrefixCache::augmentMatch(MatchResult& match) const {
     if (root == nullptr) return;
 
     if (mamba_host_allocator_ == nullptr) {
+        TreeNode* kv_terminal = match.device.last_node;
+        if (kv_terminal == nullptr || kv_terminal->IsRoot()) {
+            return;
+        }
+
         const std::int32_t page_size = match.device.page_size;
         const std::int32_t kv_depth = match.device.DepthInPage();
-        TreeNode* mamba_node = FindLastMambaNode(match.device.last_node);
+        TreeNode* mamba_node = FindLastMambaNode(kv_terminal);
         if (mamba_node == nullptr) {
             const std::int32_t aligned_seqlen = AlignMambaCacheSeqlen(kv_depth * page_size);
             if (aligned_seqlen > 0) {
