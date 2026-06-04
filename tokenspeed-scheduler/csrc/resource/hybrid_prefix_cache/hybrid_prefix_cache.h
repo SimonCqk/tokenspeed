@@ -157,6 +157,8 @@ public:
 private:
     friend class HybridPrefixCacheTestPeer;
 
+    static bool PerfDebugEnabled();
+
     struct DecodeFromRetractedRecovery {
         bool ok{true};
         TreeNode* protected_source_node{nullptr};

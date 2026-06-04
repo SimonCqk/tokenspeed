@@ -22,12 +22,14 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -56,11 +58,34 @@
 #include "utils.h"
 
 namespace tokenspeed {
+namespace {
+
+constexpr std::string_view kSchedulerPerfDebugTag = "[SchedulerPerfDebug]";
+
+bool EnvFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') return false;
+    const std::string_view flag{value};
+    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+bool SchedulerPerfDebugEnabled() {
+    static const bool enabled = EnvFlagEnabled("TS_HYBRID_CACHE_PERF_DEBUG");
+    return enabled;
+}
+
+}  // namespace
 
 std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFirstChunk(
     Request* request, std::int32_t remaining, std::int32_t decode_input_tokens, bool disable_l2_cache,
     std::map<std::string, std::int32_t>& simulated_free) {
-    if (req_pool_allocator_.AvailableSlots() == 0) return {};
+    if (req_pool_allocator_.AvailableSlots() == 0) {
+        if (SchedulerPerfDebugEnabled()) {
+            spdlog::info("{} schedulePrefillFirst denied=req_pool request={} state={}", kSchedulerPerfDebugTag,
+                         request->Id(), request->StateName());
+        }
+        return {};
+    }
     RecoveryPlan recovery_plan = hybrid_prefix_cache_.MatchPrefix(request->GetFullPagedTokens(true));
     MatchResult match_result = recovery_plan.compat_match;
     std::int32_t loadback_tokens = 0;
@@ -96,7 +121,29 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
         },
         simulated_free);
     if (!admission.admitted) {
+        if (SchedulerPerfDebugEnabled()) {
+            spdlog::info(
+                "{} schedulePrefillFirst denied=admission request={} state={} remaining={} prefill={} first={} "
+                "target={} "
+                "tokens_this_round={} device_pages_needed={} device_matched={} host_matched={} loadback_tokens={} "
+                "disable_l2={} paged_prefix={} mamba_cow={} mamba_host={}",
+                kSchedulerPerfDebugTag, request->Id(), request->StateName(), remaining, request->PrefillSize(),
+                first_pos, target, tokens_this_round, device_pages_needed, device_matched, host_matched,
+                loadback_tokens, disable_l2_cache, match_result.paged_cache.prefix_len_tokens,
+                match_result.mamba_cow_src_index, match_result.mamba_host_src_index);
+        }
         return {};
+    }
+    if (SchedulerPerfDebugEnabled()) {
+        spdlog::info(
+            "{} schedulePrefillFirst admitted request={} state={} remaining={} prefill={} first={} target={} "
+            "tokens_this_round={} device_pages_needed={} device_matched={} host_matched={} loadback_nodes={} "
+            "loadback_tokens={} cache_transfers={} disable_l2={} paged_prefix={} mamba_cow={} mamba_host={}",
+            kSchedulerPerfDebugTag, request->Id(), request->StateName(), remaining, request->PrefillSize(), first_pos,
+            target, tokens_this_round, device_pages_needed, device_matched, host_matched, loadback_diff.size(),
+            loadback_tokens, admission.cache_transfer_pairs.size(), disable_l2_cache,
+            match_result.paged_cache.prefix_len_tokens, match_result.mamba_cow_src_index,
+            match_result.mamba_host_src_index);
     }
 
     return fsm::SchedulePrefillFirstChunkEvent{
@@ -126,7 +173,22 @@ std::optional<fsm::SchedulePrefillEvent> Scheduler::schedulePrefill(
                  },
                  simulated_free)
              .admitted) {
+        if (SchedulerPerfDebugEnabled()) {
+            spdlog::info(
+                "{} schedulePrefill denied=admission request={} state={} remaining={} unscheduled={} first={} "
+                "target={} "
+                "tokens_this_round={} pages_needed={}",
+                kSchedulerPerfDebugTag, request->Id(), request->StateName(), remaining, unscheduled, first_pos, target,
+                tokens_this_round, pages_needed);
+        }
         return {};
+    }
+    if (SchedulerPerfDebugEnabled()) {
+        spdlog::info(
+            "{} schedulePrefill admitted request={} state={} remaining={} unscheduled={} first={} target={} "
+            "tokens_this_round={} pages_needed={}",
+            kSchedulerPerfDebugTag, request->Id(), request->StateName(), remaining, unscheduled, first_pos, target,
+            tokens_this_round, pages_needed);
     }
 
     return fsm::SchedulePrefillEvent{tokens_this_round, reserve_num_tokens_in_next_schedule_event,
@@ -152,7 +214,23 @@ std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(Request* reque
                  },
                  simulated_free)
              .admitted) {
+        if (SchedulerPerfDebugEnabled()) {
+            spdlog::info(
+                "{} scheduleDecode denied=admission request={} state={} tail_available={} reserve={} extra_tokens={} "
+                "pages_needed={} first={} target={} refresh_local_cache={}",
+                kSchedulerPerfDebugTag, request->Id(), request->StateName(), tail_available,
+                request->GetReserveNumTokensInNextScheduleEvent(), extra_tokens, pages_needed, first_pos, target,
+                request->Is<fsm::PrefillDone>());
+        }
         return {};
+    }
+    if (SchedulerPerfDebugEnabled()) {
+        spdlog::info(
+            "{} scheduleDecode admitted request={} state={} tail_available={} reserve={} extra_tokens={} "
+            "pages_needed={} first={} target={} refresh_local_cache={}",
+            kSchedulerPerfDebugTag, request->Id(), request->StateName(), tail_available,
+            request->GetReserveNumTokensInNextScheduleEvent(), extra_tokens, pages_needed, first_pos, target,
+            request->Is<fsm::PrefillDone>());
     }
 
     return fsm::ScheduleDecodeEvent{config_.decode_input_tokens, hybrid_prefix_cache_};
@@ -160,19 +238,35 @@ std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(Request* reque
 
 std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFromRetracted(
     Request* request, std::map<std::string, std::int32_t>& simulated_free) {
-    if (req_pool_allocator_.AvailableSlots() == 0) return {};
+    if (req_pool_allocator_.AvailableSlots() == 0) {
+        if (SchedulerPerfDebugEnabled()) {
+            spdlog::info("{} scheduleDecodeRetracted denied=req_pool request={} state={}", kSchedulerPerfDebugTag,
+                         request->Id(), request->StateName());
+        }
+        return {};
+    }
 
     RecoveryPlan recovery_plan =
         hybrid_prefix_cache_.MatchPrefix(request->GetFullPagedTokens(true), MatchIntent::StateRecovery);
     MatchResult match_result = recovery_plan.compat_match;
     std::vector<TreeNode*> loadback_diff = match_result.NodesWithout<ResourceType::Device>();
+    TreeNode* protected_recovery_node = recovery_plan.protected_recovery_node;
     if (!recovery_plan.recovery_state_available) {
         spdlog::warn("[Scheduler] Retracted request {} lost required cache recovery state, aborting request",
                      request->Id());
+        if (SchedulerPerfDebugEnabled()) {
+            spdlog::info(
+                "{} scheduleDecodeRetracted denied=recovery_unavailable request={} state={} match_device_pages={} "
+                "match_host_pages={} paged_prefix={} protected_depth={}",
+                kSchedulerPerfDebugTag, request->Id(), request->StateName(), match_result.device.DepthInPage(),
+                match_result.host.DepthInPage(), match_result.paged_cache.prefix_len_tokens,
+                protected_recovery_node == nullptr
+                    ? -1
+                    : static_cast<std::int32_t>(protected_recovery_node->DepthInTokens()));
+        }
         request->Apply(fsm::AbortEvent{});
         return {};
     }
-    TreeNode* protected_recovery_node = recovery_plan.protected_recovery_node;
 
     const std::int32_t device_matched2 = match_result.device.DepthInPage();
     const std::int32_t host_matched2 = match_result.host.DepthInPage();
@@ -196,7 +290,28 @@ std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFr
         },
         simulated_free);
     if (!admission.admitted) {
+        if (SchedulerPerfDebugEnabled()) {
+            spdlog::info(
+                "{} scheduleDecodeRetracted denied=admission request={} state={} target={} device_pages_needed={} "
+                "device_matched={} host_matched={} loadback_nodes={} paged_prefix={} protected_depth={} transfers={}",
+                kSchedulerPerfDebugTag, request->Id(), request->StateName(), target, device_pages_needed,
+                device_matched2, host_matched2, loadback_diff.size(), match_result.paged_cache.prefix_len_tokens,
+                protected_recovery_node == nullptr
+                    ? -1
+                    : static_cast<std::int32_t>(protected_recovery_node->DepthInTokens()),
+                admission.cache_transfer_pairs.size());
+        }
         return {};
+    }
+    if (SchedulerPerfDebugEnabled()) {
+        spdlog::info(
+            "{} scheduleDecodeRetracted admitted request={} state={} target={} device_pages_needed={} "
+            "device_matched={} host_matched={} loadback_nodes={} paged_prefix={} protected_depth={} transfers={}",
+            kSchedulerPerfDebugTag, request->Id(), request->StateName(), target, device_pages_needed, device_matched2,
+            host_matched2, loadback_diff.size(), match_result.paged_cache.prefix_len_tokens,
+            protected_recovery_node == nullptr ? -1
+                                               : static_cast<std::int32_t>(protected_recovery_node->DepthInTokens()),
+            admission.cache_transfer_pairs.size());
     }
 
     return fsm::ScheduleDecodeFromRetractedEvent{config_.decode_input_tokens,
@@ -244,7 +359,21 @@ std::optional<fsm::ScheduleRetractEvent> Scheduler::scheduleRetract(Request* req
                  },
                  simulated_free)
              .admitted) {
+        if (SchedulerPerfDebugEnabled()) {
+            spdlog::info(
+                "{} scheduleRetract denied=admission request={} state={} full_pages={} total_available={} "
+                "device_matched={} host_matched={} host_pages_needed={}",
+                kSchedulerPerfDebugTag, request->Id(), request->StateName(), full_paged_tokens.size(), total_available,
+                device_matched3, host_matched3, host_pages_needed);
+        }
         return {};
+    }
+    if (SchedulerPerfDebugEnabled()) {
+        spdlog::info(
+            "{} scheduleRetract admitted request={} state={} full_pages={} total_available={} device_matched={} "
+            "host_matched={} host_pages_needed={}",
+            kSchedulerPerfDebugTag, request->Id(), request->StateName(), full_paged_tokens.size(), total_available,
+            device_matched3, host_matched3, host_pages_needed);
     }
     return fsm::ScheduleRetractEvent{match_result, hybrid_prefix_cache_};
 }
@@ -445,6 +574,33 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
 
 std::tuple<std::vector<ForwardOperation>, std::variant<std::vector<LoadBackOperation>, std::vector<WriteBackOperation>>>
 Scheduler::newForwardOperation(std::vector<Request*> candidates) {
+    if (SchedulerPerfDebugEnabled()) {
+        std::int32_t submitted = 0;
+        std::int32_t prefill = 0;
+        std::int32_t prefill_done = 0;
+        std::int32_t decoding = 0;
+        std::int32_t retracted = 0;
+        for (const Request* req : candidates) {
+            if (req->Is<fsm::Submitted>() || req->Is<fsm::PrefetchDone>()) {
+                ++submitted;
+            } else if (req->Is<fsm::Prefilling>()) {
+                ++prefill;
+            } else if (req->Is<fsm::PrefillDone>()) {
+                ++prefill_done;
+            } else if (req->Is<fsm::Decoding>()) {
+                ++decoding;
+            } else if (req->Is<fsm::Retracted>()) {
+                ++retracted;
+            }
+        }
+        spdlog::info(
+            "{} newForward start candidates={} submitted={} prefill={} prefill_done={} decoding={} retracted={} "
+            "max_tokens={} max_batch={} mixed_pd={} role={}",
+            kSchedulerPerfDebugTag, candidates.size(), submitted, prefill, prefill_done, decoding, retracted,
+            config_.max_scheduled_tokens, config_.max_batch_size, config_.enable_mixed_prefill_decode,
+            static_cast<int>(config_.role));
+    }
+
     auto priority = [&](const Request* req) -> int {
         if (req->Is<fsm::Prefilling>()) return 1;
         if (req->Is<fsm::Submitted>()) return 2;
@@ -545,10 +701,18 @@ Scheduler::newForwardOperation(std::vector<Request*> candidates) {
             if (auto op = newRetractOperation(victim)) {
                 wb_ops.push_back(std::move(*op));
             }
+            if (SchedulerPerfDebugEnabled()) {
+                spdlog::info("{} newForward fallback_retract victim={} writeback_ops={} token_budget_remaining={}",
+                             kSchedulerPerfDebugTag, victim->Id(), wb_ops.size(), token_budget);
+            }
             return {std::vector<ForwardOperation>{}, std::move(wb_ops)};
         }
     }
 
+    if (SchedulerPerfDebugEnabled()) {
+        spdlog::info("{} newForward done ops={} loadback_ops={} token_budget_remaining={} pushed_prefill={}",
+                     kSchedulerPerfDebugTag, ops.size(), loadback_ops.size(), token_budget, pushed_prefill);
+    }
     return {std::move(ops), std::move(loadback_ops)};
 }
 

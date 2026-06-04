@@ -34,11 +34,14 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace tokenspeed {
 namespace {
+
+constexpr std::string_view kPerfDebugTag = "[HybridCachePerfDebug]";
 
 std::int32_t AlignMambaCacheSeqlenImpl(std::int32_t seqlen, std::int32_t chunk_size) {
     if (chunk_size <= 0) return seqlen;
@@ -59,11 +62,20 @@ TreeNode* FindLastMambaHostNodeImpl(TreeNode* from) {
     return nullptr;
 }
 
+std::int32_t NodeDepthTokens(const TreeNode* node) {
+    return node == nullptr ? -1 : static_cast<std::int32_t>(node->DepthInTokens());
+}
+
 }  // namespace
 
 HybridPrefixCache::DecodeFromRetractedRecovery HybridPrefixCache::PrepareDecodeFromRetractedRecovery(
     MatchResult& match_result) const {
-    if (!HasMambaAdjunct()) return {};
+    if (!HasMambaAdjunct()) {
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} MambaRecovery disabled", kPerfDebugTag);
+        }
+        return {};
+    }
 
     match_result.mamba_cow_src_index = -1;
     match_result.mamba_host_src_index = -1;
@@ -79,15 +91,34 @@ HybridPrefixCache::DecodeFromRetractedRecovery HybridPrefixCache::PrepareDecodeF
     }
     if (mamba_recovery_node != nullptr) {
         match_result.mamba_cow_src_index = mamba_recovery_node->MambaSlotIndex();
+        if (PerfDebugEnabled()) {
+            spdlog::info(
+                "{} MambaRecovery source=device_or_host_resident device_match_depth={} host_match_depth={} "
+                "source_depth={} cow_src={} host_src=-1",
+                kPerfDebugTag, NodeDepthTokens(match_result.device.last_node),
+                NodeDepthTokens(match_result.host.last_node), NodeDepthTokens(mamba_recovery_node),
+                match_result.mamba_cow_src_index);
+        }
         return {.protected_source_node = mamba_recovery_node};
     }
 
     TreeNode* mamba_l2_recovery_node = FindLastMambaHostNode(match_result.host.last_node);
     if (mamba_l2_recovery_node == nullptr) {
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} MambaRecovery unavailable device_match_depth={} host_match_depth={}", kPerfDebugTag,
+                         NodeDepthTokens(match_result.device.last_node), NodeDepthTokens(match_result.host.last_node));
+        }
         return {.ok = false};
     }
     match_result.mamba_host_src_index = mamba_l2_recovery_node->MambaHostSlotIndex();
     match_result.mamba_cow_src_index = -1;
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} MambaRecovery source=l2_host_only device_match_depth={} host_match_depth={} source_depth={} "
+            "cow_src=-1 host_src={}",
+            kPerfDebugTag, NodeDepthTokens(match_result.device.last_node), NodeDepthTokens(match_result.host.last_node),
+            NodeDepthTokens(mamba_l2_recovery_node), match_result.mamba_host_src_index);
+    }
     return {.protected_source_node = mamba_l2_recovery_node};
 }
 
@@ -128,6 +159,16 @@ cache::state::CreateRequestLocalCache::Result HybridPrefixCache::Apply(
     }
     result.local_cache =
         std::make_unique<RequestLocalCacheState>(std::move(local_kv_allocator), std::move(adjunct_state));
+    if (PerfDebugEnabled()) {
+        const LocalMambaAllocator* local_mamba = result.local_cache->AdjunctState();
+        spdlog::info(
+            "{} CreateRequestLocalCache initial_tokens={} acquire_tokens={} require_adjunct={} checkpoint_pos={} "
+            "local_pages={} has_mamba_working={} has_mamba_checkpoint={}",
+            kPerfDebugTag, op.initial_tokens, op.acquire_tokens, op.require_adjunct_state,
+            op.checkpoint_raw_position.value_or(-1), result.local_cache->LocalKVPages().size(),
+            local_mamba != nullptr && local_mamba->HasWorking(),
+            local_mamba != nullptr && local_mamba->HasCheckpoint());
+    }
     return result;
 }
 
@@ -142,9 +183,27 @@ cache::state::AcquireRequestLocalCache::Result HybridPrefixCache::Apply(
                 "HybridPrefixCache::Apply(AcquireRequestLocalCache): failed to allocate adjunct state");
         }
         op.local_cache.SetAdjunctState(std::move(adjunct_state));
+        if (PerfDebugEnabled()) {
+            const LocalMambaAllocator* local_mamba = op.local_cache.AdjunctState();
+            spdlog::info(
+                "{} AcquireRequestLocalCache tokens={} replace_adjunct=1 require_adjunct={} checkpoint_pos={} "
+                "local_pages={} has_mamba_working={} has_mamba_checkpoint={}",
+                kPerfDebugTag, op.tokens, op.require_adjunct_state, op.checkpoint_raw_position.value_or(-1),
+                op.local_cache.LocalKVPages().size(), local_mamba != nullptr && local_mamba->HasWorking(),
+                local_mamba != nullptr && local_mamba->HasCheckpoint());
+        }
         return {};
     }
     RefreshRequestLocalStateCheckpoint(op.local_cache, op.checkpoint_raw_position);
+    if (PerfDebugEnabled()) {
+        const LocalMambaAllocator* local_mamba = op.local_cache.AdjunctState();
+        spdlog::info(
+            "{} AcquireRequestLocalCache tokens={} replace_adjunct=0 checkpoint_pos={} local_pages={} "
+            "has_mamba_working={} has_mamba_checkpoint={}",
+            kPerfDebugTag, op.tokens, op.checkpoint_raw_position.value_or(-1), op.local_cache.LocalKVPages().size(),
+            local_mamba != nullptr && local_mamba->HasWorking(),
+            local_mamba != nullptr && local_mamba->HasCheckpoint());
+    }
     return {};
 }
 
@@ -156,6 +215,10 @@ void HybridPrefixCache::RefreshRequestLocalStateCheckpoint(RequestLocalCacheStat
     (void)allocator->DetachCheckpoint();
     if (!allocator->AllocateCheckpoint(*checkpoint_raw_position)) {
         throw std::logic_error("HybridPrefixCache::RefreshRequestLocalStateCheckpoint: failed to allocate checkpoint");
+    }
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} RefreshRequestLocalStateCheckpoint checkpoint_pos={} checkpoint_idx={}", kPerfDebugTag,
+                     *checkpoint_raw_position, allocator->CheckpointIndex());
     }
 }
 
@@ -176,11 +239,29 @@ void HybridPrefixCache::PublishFinishMambaState(const std::vector<std::span<cons
     LocalMambaAllocator* local_mamba_allocator = local_cache.AdjunctState();
     if (!HasMambaAdjunct() || local_mamba_allocator == nullptr ||
         (!local_mamba_allocator->HasCheckpoint() && !local_mamba_allocator->HasWorking())) {
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} PublishFinishMambaState skipped enabled={} has_local={} has_checkpoint={} has_working={}",
+                         kPerfDebugTag, HasMambaAdjunct(), local_mamba_allocator != nullptr,
+                         local_mamba_allocator != nullptr && local_mamba_allocator->HasCheckpoint(),
+                         local_mamba_allocator != nullptr && local_mamba_allocator->HasWorking());
+        }
         return;
     }
+    const bool had_checkpoint = local_mamba_allocator->HasCheckpoint();
+    const bool had_working = local_mamba_allocator->HasWorking();
+    const std::int32_t checkpoint_pos = had_checkpoint ? local_mamba_allocator->CheckpointPosition() : -1;
     MatchResult post_match = kv_prefix_cache_.Match(full_paged_tokens);
     TreeNode* terminal = post_match.device.last_node;
-    if (terminal == nullptr || terminal->HasMamba()) return;
+    if (terminal == nullptr || terminal->HasMamba()) {
+        if (PerfDebugEnabled()) {
+            spdlog::info(
+                "{} PublishFinishMambaState skipped terminal_depth={} terminal_has_mamba={} full_pages={} "
+                "had_checkpoint={} checkpoint_pos={} had_working={}",
+                kPerfDebugTag, NodeDepthTokens(terminal), terminal != nullptr && terminal->HasMamba(),
+                full_paged_tokens.size(), had_checkpoint, checkpoint_pos, had_working);
+        }
+        return;
+    }
 
     std::unique_ptr<MambaSlot> slot_to_publish;
     if (local_mamba_allocator->HasCheckpoint()) {
@@ -191,6 +272,13 @@ void HybridPrefixCache::PublishFinishMambaState(const std::vector<std::span<cons
     }
     if (slot_to_publish == nullptr) return;
     InsertMamba(terminal, std::move(slot_to_publish));
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} PublishFinishMambaState published terminal_depth={} full_pages={} from_checkpoint={} "
+            "checkpoint_pos={} had_working={}",
+            kPerfDebugTag, NodeDepthTokens(terminal), full_paged_tokens.size(), had_checkpoint, checkpoint_pos,
+            had_working);
+    }
 }
 
 void HybridPrefixCache::PublishRetractMambaState(TreeNode* terminal, RequestLocalCacheState& local_cache) {
@@ -201,7 +289,11 @@ void HybridPrefixCache::PublishRetractMambaState(TreeNode* terminal, RequestLoca
     if (!had_request_local_mamba) return;
 
     if (HasMambaAdjunct()) {
-        publishRequestMambaState(terminal, local_mamba_allocator);
+        const bool published = publishRequestMambaState(terminal, local_mamba_allocator);
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} PublishRetractMambaState terminal_depth={} published={}", kPerfDebugTag,
+                         NodeDepthTokens(terminal), published);
+        }
     }
 
     // Once retracted, any recoverable Mamba state is tree-owned and therefore
@@ -232,7 +324,14 @@ bool HybridPrefixCache::publishRequestMambaState(TreeNode* terminal, LocalMambaA
 }
 
 void HybridPrefixCache::augmentMatch(MatchResult& match) const {
-    if (mamba_allocator_ == nullptr) return;
+    if (mamba_allocator_ == nullptr) {
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} MambaAugment disabled", kPerfDebugTag);
+        }
+        return;
+    }
+    const std::int32_t input_device_depth = NodeDepthTokens(match.device.last_node);
+    const std::int32_t input_host_depth = NodeDepthTokens(match.host.last_node);
     TreeNode* root = match.device.last_node;
     while (root != nullptr && !root->IsRoot()) root = root->Parent();
     if (root == nullptr) return;
@@ -248,6 +347,12 @@ void HybridPrefixCache::augmentMatch(MatchResult& match) const {
             }
             match.device.last_node = root;
             match.host.last_node = root;
+            if (PerfDebugEnabled()) {
+                spdlog::info(
+                    "{} MambaAugment l2=0 no_device_mamba input_device_depth={} input_host_depth={} "
+                    "kv_depth_pages={} branch_seqlen={} output_depth=0",
+                    kPerfDebugTag, input_device_depth, input_host_depth, kv_depth, match.mamba_branching_seqlen);
+            }
             return;
         }
 
@@ -261,6 +366,13 @@ void HybridPrefixCache::augmentMatch(MatchResult& match) const {
         }
         match.device.last_node = mamba_node;
         match.host.last_node = mamba_node;
+        if (PerfDebugEnabled()) {
+            spdlog::info(
+                "{} MambaAugment l2=0 device_mamba input_device_depth={} input_host_depth={} kv_depth_pages={} "
+                "mamba_depth_pages={} cow_src={} branch_seqlen={} output_depth={}",
+                kPerfDebugTag, input_device_depth, input_host_depth, kv_depth, mamba_depth, match.mamba_cow_src_index,
+                match.mamba_branching_seqlen, NodeDepthTokens(match.device.last_node));
+        }
         return;
     }
 
@@ -301,6 +413,15 @@ void HybridPrefixCache::augmentMatch(MatchResult& match) const {
             match.mamba_branching_seqlen = aligned_seqlen;
         }
     }
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} MambaAugment l2=1 input_device_depth={} input_host_depth={} kv_depth_pages={} "
+            "device_mamba_depth_pages={} host_mamba_depth_pages={} prefer_host={} cow_src={} host_src={} "
+            "branch_seqlen={} output_device_depth={} output_host_depth={}",
+            kPerfDebugTag, input_device_depth, input_host_depth, kv_depth, device_mamba_depth, host_mamba_depth,
+            prefer_host_mamba, match.mamba_cow_src_index, match.mamba_host_src_index, match.mamba_branching_seqlen,
+            NodeDepthTokens(match.device.last_node), NodeDepthTokens(match.host.last_node));
+    }
 }
 
 std::int32_t HybridPrefixCache::AlignMambaCacheSeqlen(std::int32_t seqlen) const {
@@ -317,12 +438,26 @@ TreeNode* HybridPrefixCache::FindLastMambaHostNode(TreeNode* from) const {
 
 bool HybridPrefixCache::EnsureMambaCapacityByEvict(std::int32_t num_slots, TreeNode* protected_node) {
     if (mamba_allocator_ == nullptr) return num_slots <= 0;
-    return mamba_eviction_manager_.EnsureCapacity(num_slots, protected_node);
+    const std::int32_t before = mamba_allocator_->AvailableSlots();
+    const bool ok = mamba_eviction_manager_.EnsureCapacity(num_slots, protected_node);
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} EnsureMambaCapacity required={} before={} after={} ok={} protected_depth={}", kPerfDebugTag,
+                     num_slots, before, mamba_allocator_->AvailableSlots(), ok, NodeDepthTokens(protected_node));
+    }
+    return ok;
 }
 
 bool HybridPrefixCache::EnsureMambaHostCapacityByEvict(std::int32_t num_slots, TreeNode* protected_node) {
     if (mamba_host_allocator_ == nullptr) return num_slots <= 0;
-    if (mamba_host_allocator_->AvailableSlots() >= num_slots) return true;
+    const std::int32_t before = mamba_host_allocator_->AvailableSlots();
+    if (mamba_host_allocator_->AvailableSlots() >= num_slots) {
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} EnsureMambaHostCapacity required={} before={} after={} evicted=0 ok=1 protected_depth={}",
+                         kPerfDebugTag, num_slots, before, mamba_host_allocator_->AvailableSlots(),
+                         NodeDepthTokens(protected_node));
+        }
+        return true;
+    }
 
     std::vector<TreeNode*> candidates;
     candidates.reserve(mamba_host_nodes_.size());
@@ -334,16 +469,26 @@ bool HybridPrefixCache::EnsureMambaHostCapacityByEvict(std::int32_t num_slots, T
     std::sort(candidates.begin(), candidates.end(),
               [](const TreeNode* lhs, const TreeNode* rhs) { return lhs->Time() < rhs->Time(); });
 
+    std::int32_t evicted = 0;
     for (TreeNode* node : candidates) {
         if (mamba_host_allocator_->AvailableSlots() >= num_slots) break;
         node->DetachMambaHost();
         mamba_host_nodes_.erase(node);
+        ++evicted;
     }
     if (mamba_host_allocator_->AvailableSlots() < num_slots) {
         spdlog::warn("[HybridPrefixCache] mamba host capacity exhausted required={} after_evict_available={}",
                      num_slots, mamba_host_allocator_->AvailableSlots());
     }
-    return mamba_host_allocator_->AvailableSlots() >= num_slots;
+    const bool ok = mamba_host_allocator_->AvailableSlots() >= num_slots;
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} EnsureMambaHostCapacity required={} before={} after={} candidates={} evicted={} ok={} "
+            "protected_depth={}",
+            kPerfDebugTag, num_slots, before, mamba_host_allocator_->AvailableSlots(), candidates.size(), evicted, ok,
+            NodeDepthTokens(protected_node));
+    }
+    return ok;
 }
 
 std::vector<TransferPair> HybridPrefixCache::PrepareMambaHostWriteBack(const std::vector<TreeNode*>& nodes) {
@@ -369,6 +514,10 @@ std::vector<TransferPair> HybridPrefixCache::PrepareMambaHostWriteBack(const std
         pending_mamba_host_writebacks_.emplace(node, std::make_unique<MambaSlot>(std::move(*slot)));
         transfers.push_back(TransferPair{CacheKind::kMamba, device_idx, host_idx});
     }
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} PrepareMambaHostWriteBack input_nodes={} needed={} transfers={} pending={}", kPerfDebugTag,
+                     nodes.size(), needed, transfers.size(), pending_mamba_host_writebacks_.size());
+    }
     return transfers;
 }
 
@@ -386,6 +535,10 @@ std::vector<TransferPair> HybridPrefixCache::PrepareMambaDeviceLoadBack(const st
         mamba_eviction_manager_.TrackNode(node);
         transfers.push_back(TransferPair{CacheKind::kMamba, host_idx, device_idx});
     }
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} PrepareMambaDeviceLoadBack input_nodes={} transfers={} device_available_after={}",
+                     kPerfDebugTag, nodes.size(), transfers.size(), mamba_allocator_->AvailableSlots());
+    }
     return transfers;
 }
 
@@ -398,8 +551,13 @@ void HybridPrefixCache::InsertMamba(TreeNode* terminal_node, std::unique_ptr<Mam
     if (page_size <= 0 || terminal_node->DepthInTokens() % static_cast<std::size_t>(page_size) != 0) {
         throw std::logic_error("HybridPrefixCache::InsertMamba: terminal node is not block-aligned");
     }
+    const std::int32_t slot_index = slot->Index();
     terminal_node->AttachMamba(std::move(slot));
     mamba_eviction_manager_.TrackNode(terminal_node);
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} InsertMamba terminal_depth={} slot={}", kPerfDebugTag, NodeDepthTokens(terminal_node),
+                     slot_index);
+    }
 }
 
 }  // namespace tokenspeed

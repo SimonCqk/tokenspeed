@@ -45,6 +45,32 @@
 namespace tokenspeed {
 namespace {
 
+constexpr std::string_view kPerfDebugTag = "[HybridCachePerfDebug]";
+
+std::int32_t NodeDepthTokens(const TreeNode* node) {
+    return node == nullptr ? -1 : static_cast<std::int32_t>(node->DepthInTokens());
+}
+
+const char* PagedCacheFamilyName(PagedCacheGroupFamily family) {
+    switch (family) {
+        case PagedCacheGroupFamily::History:
+            return "history";
+        case PagedCacheGroupFamily::State:
+            return "state";
+    }
+    return "unknown";
+}
+
+const char* PagedCacheRetentionName(PagedCacheGroupConfig::Retention retention) {
+    switch (retention) {
+        case PagedCacheGroupConfig::Retention::FullHistory:
+            return "full_history";
+        case PagedCacheGroupConfig::Retention::SlidingWindow:
+            return "sliding_window";
+    }
+    return "unknown";
+}
+
 TreeNode* RootOf(TreeNode* from) {
     TreeNode* root = from;
     while (root != nullptr && !root->IsRoot()) root = root->Parent();
@@ -353,6 +379,12 @@ void HybridPrefixCache::ConfigurePagedCacheAdjunct(std::span<const PagedCacheGro
     }
 
     EnablePagedCacheAdjunct(std::move(required), std::move(sliding_window_per_group));
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} ConfigurePagedCacheAdjunct groups={} required={} history_groups={} state_groups={} align={}",
+                     kPerfDebugTag, group_configs.size(), required_groups.has_value() ? required_groups->size() : 0,
+                     paged_cache_history_groups_.size(), paged_cache_state_groups_.size(),
+                     paged_cache_history_alignment_tokens_);
+    }
 }
 
 void HybridPrefixCache::EnablePagedCacheAdjunct(std::vector<std::string> required_groups,
@@ -452,21 +484,58 @@ void HybridPrefixCache::EnablePagedCacheAdjunct(std::vector<std::string> require
     paged_cache_continuation_state_group_set_ = std::unordered_set<std::string>(
         paged_cache_continuation_state_groups_.begin(), paged_cache_continuation_state_groups_.end());
     EnsureKvEvictionCallbacksInstalled();
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} EnablePagedCacheAdjunct required_groups={} history_groups={} state_groups={} "
+            "continuation_state_groups={} "
+            "history_alignment={} state_policy={} callbacks_installed={}",
+            kPerfDebugTag, paged_cache_required_groups_.size(), paged_cache_history_groups_.size(),
+            paged_cache_state_groups_.size(), paged_cache_continuation_state_groups_.size(),
+            paged_cache_history_alignment_tokens_, static_cast<int>(paged_cache_state_policy_),
+            has_kv_eviction_callbacks_);
+    }
 }
 
 void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
-    if (!HasPagedCacheAdjunct()) return;
-    if (match.device.last_node == nullptr) return;
+    if (!HasPagedCacheAdjunct()) {
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} PagedAugment disabled", kPerfDebugTag);
+        }
+        return;
+    }
+    if (match.device.last_node == nullptr) {
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} PagedAugment skipped null_device_node", kPerfDebugTag);
+        }
+        return;
+    }
 
     const std::int32_t align = paged_cache_history_alignment_tokens_;
+    const std::int32_t input_device_depth = NodeDepthTokens(match.device.last_node);
+    const std::int32_t input_host_depth = NodeDepthTokens(match.host.last_node);
 
-    auto cap_to_root = [&]() {
+    auto cap_to_root = [&](std::string_view reason) {
         match.device.last_node = RootOf(match.device.last_node);
         match.host.last_node = RootOf(match.host.last_node);
         match.paged_cache = MatchResult::PagedCache{};
+        if (PerfDebugEnabled()) {
+            spdlog::info(
+                "{} PagedAugment cap_to_root reason={} input_device_depth={} input_host_depth={} align={} "
+                "history_groups={} state_groups={} snapshot_nodes={}",
+                kPerfDebugTag, reason, input_device_depth, input_host_depth, align, paged_cache_history_groups_.size(),
+                paged_cache_state_groups_.size(), paged_cache_snapshot_nodes_.size());
+        }
     };
 
     std::vector<TreeNode*> path = CollectAncestorPathRootToLeaf(match.device.last_node);
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} PagedAugment start input_device_depth={} input_host_depth={} path_nodes={} align={} history_groups={} "
+            "state_groups={} continuation_state_groups={} policy={}",
+            kPerfDebugTag, input_device_depth, input_host_depth, path.size(), align, paged_cache_history_groups_.size(),
+            paged_cache_state_groups_.size(), paged_cache_continuation_state_groups_.size(),
+            static_cast<int>(paged_cache_state_policy_));
+    }
 
     // Phase A: history chain. Walk root->leaf, advance only on contiguous
     // History-family completeness at every k*align boundary.
@@ -485,7 +554,7 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
         expected_depth += align;
     }
     if (deepest_history == nullptr) {
-        cap_to_root();
+        cap_to_root("missing_contiguous_history");
         return;
     }
 
@@ -528,6 +597,13 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
                 match.paged_cache = std::move(terminal_hit);
                 match.device.last_node = deepest_history;
                 match.host.last_node = CapNodeToDepth(match.host.last_node, history_hit);
+                if (PerfDebugEnabled()) {
+                    spdlog::info(
+                        "{} PagedAugment continuation_hit history_hit={} output_device_depth={} output_host_depth={} "
+                        "groups={}",
+                        kPerfDebugTag, history_hit, NodeDepthTokens(match.device.last_node),
+                        NodeDepthTokens(match.host.last_node), match.paged_cache.per_group_page_ids.size());
+                }
                 return;
             }
         }
@@ -536,7 +612,7 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
     const bool has_transport_only_state =
         paged_cache_continuation_state_group_set_.size() != paged_cache_state_group_set_.size();
     if (has_transport_only_state) {
-        cap_to_root();
+        cap_to_root("transport_only_state_without_terminal_continuation");
         return;
     }
 
@@ -575,7 +651,7 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
         }
     }
     if (usable_node == nullptr) {
-        cap_to_root();
+        cap_to_root("missing_state_window");
         return;
     }
 
@@ -613,6 +689,13 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match) const {
 
     match.paged_cache.restore_kind = MatchResult::PagedCache::RestoreKind::kSnapshotComplete;
     match.paged_cache.replay_start_tokens = 0;
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} PagedAugment snapshot_hit history_hit={} usable={} segments_needed={} output_device_depth={} "
+            "output_host_depth={} groups={}",
+            kPerfDebugTag, history_hit, usable, segments_needed, NodeDepthTokens(match.device.last_node),
+            NodeDepthTokens(match.host.last_node), match.paged_cache.per_group_page_ids.size());
+    }
 }
 
 std::map<std::string, std::int32_t> HybridPrefixCache::InitialSimulatedFree() const {
@@ -632,12 +715,14 @@ void HybridPrefixCache::AcquireForRequest(std::string_view request_id, std::int3
     for (const auto& [group_id, allocator] : paged_cache_allocators_) {
         auto it = tables.find(group_id);
         const bool fresh_table = (it == tables.end());
+        std::int32_t imported_pages = 0;
         if (fresh_table) {
             it = tables.emplace(group_id, PagedCacheGroupTable(allocator.get())).first;
             // Import borrowed-prefix BEFORE ReleaseSkipped/Acquire on a fresh table.
             if (has_hit) {
                 auto pid_it = paged_cache_hit.per_group_page_ids.find(group_id);
                 if (pid_it != paged_cache_hit.per_group_page_ids.end() && !pid_it->second.empty()) {
+                    imported_pages = static_cast<std::int32_t>(pid_it->second.size());
                     std::int32_t base_logical_page = 0;
                     auto base_it = paged_cache_hit.per_group_base_logical_page.find(group_id);
                     if (base_it != paged_cache_hit.per_group_base_logical_page.end()) {
@@ -650,11 +735,23 @@ void HybridPrefixCache::AcquireForRequest(std::string_view request_id, std::int3
             }
         }
         const auto& cfg = allocator->Config();
+        const std::int32_t before_size = it->second.Size();
+        const std::int32_t before_base = it->second.BaseLogicalPage();
+        std::int32_t released_pages = 0;
         if (cfg.retention == PagedCacheGroupConfig::Retention::SlidingWindow && cfg.sliding_window_tokens.has_value()) {
             const std::int32_t lower = std::max(0, first_raw_position_of_op - *cfg.sliding_window_tokens + 1);
-            it->second.ReleaseSkipped(lower);
+            released_pages = static_cast<std::int32_t>(it->second.ReleaseSkipped(lower).size());
         }
         it->second.Acquire(target_raw_tokens_exclusive);
+        if (PerfDebugEnabled()) {
+            spdlog::info(
+                "{} AcquirePagedCache request={} group={} fresh={} imported_pages={} first={} target={} before_size={} "
+                "after_size={} before_base={} after_base={} released_owned={} owned={} borrowed={} raw_cursor={}",
+                kPerfDebugTag, request_id, group_id, fresh_table, imported_pages, first_raw_position_of_op,
+                target_raw_tokens_exclusive, before_size, it->second.Size(), before_base, it->second.BaseLogicalPage(),
+                released_pages, it->second.OwnedPagesCount(), it->second.BorrowedPagesCount(),
+                it->second.RawTokenCursor());
+        }
     }
 }
 
@@ -665,10 +762,18 @@ void HybridPrefixCache::FinishRequest(const std::string& request_id) {
 void HybridPrefixCache::ReleaseRequest(const std::string& request_id) {
     auto it = request_paged_cache_tables_.find(request_id);
     if (it != request_paged_cache_tables_.end()) {
+        std::int32_t groups = 0;
+        std::int32_t pages = 0;
         for (auto& [_, table] : it->second) {
+            ++groups;
+            pages += table.Size();
             table.ReleaseAll();
         }
         request_paged_cache_tables_.erase(it);
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} ReleasePagedCacheRequest request={} groups={} pages={}", kPerfDebugTag, request_id, groups,
+                         pages);
+        }
     }
     DemoteIdleMambaDeviceCopiesPresentOnHost();
 }
@@ -824,6 +929,17 @@ HybridPrefixCache::PagedCacheGroupAdmission HybridPrefixCache::checkPagedCacheGr
         if (shortfall > 0) {
             result.ok = false;
         }
+        if (PerfDebugEnabled()) {
+            spdlog::info(
+                "{} PagedAdmissionGroup request={} group={} family={} retention={} target={} table_exists={} "
+                "has_hit={} borrowed_hit_pages={} borrowed_base={} current_size={} owned={} borrowed={} "
+                "released_base={} committed_prefix={} raw_cursor={} required_pages={} absolute_have={} "
+                "new_pages={} free={} releasable_owned={} shortfall={}",
+                kPerfDebugTag, request_id, gid, PagedCacheFamilyName(cfg.family),
+                PagedCacheRetentionName(cfg.retention), target_raw_tokens_exclusive, table_exists, has_hit,
+                borrowed_count, borrowed_base, current_size, owned_in_table, borrowed_in_table, already_released,
+                committed_prefix, raw_cursor, required, absolute_have, new_pages, free, releasable_owned, shortfall);
+        }
     }
     return result;
 }
@@ -871,22 +987,43 @@ bool HybridPrefixCache::admitPagedCacheChunk(std::string_view request_id, std::i
                                              const MatchResult::PagedCache& paged_cache_hit,
                                              const PagedCacheAdmissionContext& context) {
     if (paged_cache_allocators_.empty()) return true;
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} PagedAdmission start request={} first={} target={} fresh_view={} hit_prefix={} hit_history={} "
+            "hit_kind={} groups={} snapshot_nodes={}",
+            kPerfDebugTag, request_id, first_raw_position_of_op, target_raw_tokens_exclusive, context.fresh_table_view,
+            paged_cache_hit.prefix_len_tokens, paged_cache_hit.history_hit_tokens,
+            static_cast<int>(paged_cache_hit.restore_kind), paged_cache_allocators_.size(),
+            paged_cache_snapshot_nodes_.size());
+    }
     PagedCacheGroupAdmission admission = checkPagedCacheGroupAdmission(
         request_id, first_raw_position_of_op, target_raw_tokens_exclusive, simulated_free, paged_cache_hit, context);
     const std::size_t prune_budget = paged_cache_snapshot_nodes_.size();
+    std::size_t pruned_count = 0;
     for (std::size_t pruned = 0; !admission.ok && pruned < prune_budget; ++pruned) {
         AdmissionFailureKind kind = ClassifyAdmissionFailure(admission);
         if (kind == AdmissionFailureKind::kNone) break;
         if (!tryPrunePagedCacheSnapshot(kind)) break;
+        ++pruned_count;
         refreshPagedCacheSimulatedFree(simulated_free);
         admission = checkPagedCacheGroupAdmission(request_id, first_raw_position_of_op, target_raw_tokens_exclusive,
                                                   simulated_free, paged_cache_hit, context);
     }
-    if (!admission.ok) return false;
+    if (!admission.ok) {
+        if (PerfDebugEnabled()) {
+            spdlog::info("{} PagedAdmission denied request={} pruned={} prune_budget={} snapshot_nodes={}",
+                         kPerfDebugTag, request_id, pruned_count, prune_budget, paged_cache_snapshot_nodes_.size());
+        }
+        return false;
+    }
     for (const auto& [gid, credit] : context.owned_release_credit) {
         simulated_free[gid] += credit;
     }
     applyPagedCacheGroupAdmissionDebit(simulated_free, admission);
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} PagedAdmission admitted request={} pruned={} groups={} snapshot_nodes={}", kPerfDebugTag,
+                     request_id, pruned_count, admission.new_pages_needed.size(), paged_cache_snapshot_nodes_.size());
+    }
     return true;
 }
 
@@ -915,6 +1052,19 @@ bool HybridPrefixCache::DetachStateSnapshotFromNode(TreeNode* node) {
 bool HybridPrefixCache::tryPrunePagedCacheSnapshot(AdmissionFailureKind kind) {
     if (!HasPagedCacheAdjunct()) return false;
     if (kind == AdmissionFailureKind::kNone) return false;
+    auto kind_name = [](AdmissionFailureKind failure_kind) {
+        switch (failure_kind) {
+            case AdmissionFailureKind::kNone:
+                return "none";
+            case AdmissionFailureKind::kHistoryStarved:
+                return "history";
+            case AdmissionFailureKind::kStateStarved:
+                return "state";
+            case AdmissionFailureKind::kBothStarved:
+                return "both";
+        }
+        return "unknown";
+    };
 
     auto is_pinned = [](TreeNode* node) {
         for (TreeNode* cur = node; cur != nullptr && !cur->IsRoot(); cur = cur->Parent()) {
@@ -937,6 +1087,10 @@ bool HybridPrefixCache::tryPrunePagedCacheSnapshot(AdmissionFailureKind kind) {
         if (a->Time() != b->Time()) return a->Time() < b->Time();
         return a->DepthInTokens() > b->DepthInTokens();
     });
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} PagedPrune start kind={} snapshot_nodes={} candidates={}", kPerfDebugTag, kind_name(kind),
+                     paged_cache_snapshot_nodes_.size(), candidates.size());
+    }
 
     auto try_state_only = [&]() {
         for (TreeNode* node : candidates) {
@@ -984,10 +1138,32 @@ bool HybridPrefixCache::tryPrunePagedCacheSnapshot(AdmissionFailureKind kind) {
     // full. The outer admit loop will re-classify if state still needs more.
     switch (kind) {
         case AdmissionFailureKind::kStateStarved:
-            return try_state_only();
+            if (const bool ok = try_state_only(); ok) {
+                if (PerfDebugEnabled()) {
+                    spdlog::info("{} PagedPrune result=state_only_ok remaining_snapshots={}", kPerfDebugTag,
+                                 paged_cache_snapshot_nodes_.size());
+                }
+                return true;
+            }
+            if (PerfDebugEnabled()) {
+                spdlog::info("{} PagedPrune result=state_only_failed remaining_snapshots={}", kPerfDebugTag,
+                             paged_cache_snapshot_nodes_.size());
+            }
+            return false;
         case AdmissionFailureKind::kHistoryStarved:
         case AdmissionFailureKind::kBothStarved:
-            return try_full();
+            if (const bool ok = try_full(); ok) {
+                if (PerfDebugEnabled()) {
+                    spdlog::info("{} PagedPrune result=full_ok remaining_snapshots={}", kPerfDebugTag,
+                                 paged_cache_snapshot_nodes_.size());
+                }
+                return true;
+            }
+            if (PerfDebugEnabled()) {
+                spdlog::info("{} PagedPrune result=full_failed remaining_snapshots={}", kPerfDebugTag,
+                             paged_cache_snapshot_nodes_.size());
+            }
+            return false;
         case AdmissionFailureKind::kNone:
             return false;
     }
@@ -1013,12 +1189,18 @@ bool HybridPrefixCache::AdmitChunkFromRetracted(std::string_view request_id, std
             context.owned_release_credit[gid] = table.OwnedPagesCount();
         }
     }
+    if (PerfDebugEnabled()) {
+        spdlog::info("{} PagedAdmissionRetracted credit_groups={} request={} target={}", kPerfDebugTag,
+                     context.owned_release_credit.size(), request_id, target_raw_tokens_exclusive);
+    }
     return admitPagedCacheChunk(request_id, 0, target_raw_tokens_exclusive, simulated_free, paged_cache_hit, context);
 }
 
 void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* terminal) {
     if (!HasPagedCacheAdjunct()) return;
     if (terminal == nullptr) return;
+    std::int32_t committed_snapshots = 0;
+    std::int32_t adopted_snapshots = 0;
 
     auto tables_it = request_paged_cache_tables_.find(request_id);
     if (tables_it == request_paged_cache_tables_.end()) return;
@@ -1054,6 +1236,7 @@ void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* ter
             }
             RefreshPagedCacheSnapshotCompleteness(*existing);
             last_committed = target;
+            ++adopted_snapshots;
             continue;
         }
 
@@ -1127,9 +1310,17 @@ void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* ter
                 "node; invariant violated");
 
         last_committed = target;
+        ++committed_snapshots;
     }
 
-    (void)commitTerminalContinuationSnapshot(tables, terminal, chunk_depth);
+    const bool committed_terminal_continuation = commitTerminalContinuationSnapshot(tables, terminal, chunk_depth);
+    if (PerfDebugEnabled()) {
+        spdlog::info(
+            "{} CommitPagedChunk request={} terminal_depth={} lcm={} committed_snapshots={} adopted_snapshots={} "
+            "terminal_continuation={} snapshot_nodes={}",
+            kPerfDebugTag, request_id, chunk_depth, lcm, committed_snapshots, adopted_snapshots,
+            committed_terminal_continuation, paged_cache_snapshot_nodes_.size());
+    }
 }
 
 }  // namespace tokenspeed

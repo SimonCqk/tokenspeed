@@ -31,6 +31,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -155,6 +156,18 @@ bool ValidateDeviceMemoryDiagnostics(const std::vector<RequestLocalKVPagesSnapsh
     return ok;
 }
 
+bool EnvFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') return false;
+    const std::string_view flag{value};
+    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+bool SchedulerPerfDebugEnabled() {
+    static const bool enabled = EnvFlagEnabled("TS_HYBRID_CACHE_PERF_DEBUG");
+    return enabled;
+}
+
 }  // namespace
 
 Scheduler::Scheduler(SchedulerConfig config)
@@ -176,6 +189,18 @@ Scheduler::Scheduler(SchedulerConfig config)
 
     if (config_.enable_kv_cache_events) {
         hybrid_prefix_cache_.SetKvEventSink([this](KvCacheEvent event) { kv_events_.push_back(std::move(event)); });
+    }
+    if (SchedulerPerfDebugEnabled()) {
+        spdlog::info(
+            "[SchedulerPerfDebug] init role={} page_size={} max_batch={} max_tokens={} device_pages={} host_pages={} "
+            "disable_l2={} l3_storage={} prefix_cache_disabled={} mixed_pd={} mamba={} mamba_pool={} "
+            "mamba_chunk={} mamba_l2={} mamba_l2_host_slots={} paged_groups={} prefix_adjunct_required={}",
+            static_cast<int>(config_.role), config_.page_size, config_.max_batch_size, config_.max_scheduled_tokens,
+            config_.device_allocator.total_pages, config_.host_allocator.total_pages, config_.disable_l2_cache,
+            config_.enable_l3_storage, config_.disable_prefix_cache, config_.enable_mixed_prefill_decode,
+            config_.enable_mamba, config_.mamba_pool_total_chunks, config_.mamba_cache_chunk_size,
+            config_.enable_mamba_l2, config_.mamba_l2_host_slots, config_.paged_cache_groups.size(),
+            config_.prefix_cache_adjunct.has_value() ? config_.prefix_cache_adjunct->required_groups.size() : 0);
     }
     std::optional<std::span<const std::string>> required_paged_cache_groups;
     if (config_.prefix_cache_adjunct.has_value()) {
