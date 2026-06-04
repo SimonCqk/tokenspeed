@@ -203,6 +203,7 @@ std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(Request* reque
 
     const std::int32_t first_pos = request->TokenSize();
     const std::int32_t target = first_pos + config_.decode_input_tokens;
+    const bool refresh_local_cache = request->Is<fsm::PrefillDone>();
     if (!hybrid_prefix_cache_
              .Apply(
                  cache::admit::Decode{
@@ -210,7 +211,7 @@ std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(Request* reque
                      .device_pages_needed = pages_needed,
                      .first_raw_position_of_op = first_pos,
                      .target_raw_tokens_exclusive = target,
-                     .refresh_local_cache_state = request->Is<fsm::PrefillDone>(),
+                     .refresh_local_cache_state = refresh_local_cache,
                  },
                  simulated_free)
              .admitted) {
@@ -224,13 +225,13 @@ std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(Request* reque
         }
         return {};
     }
-    if (SchedulerPerfDebugEnabled()) {
+    if (SchedulerPerfDebugEnabled() && (pages_needed > 0 || refresh_local_cache)) {
         spdlog::info(
             "{} scheduleDecode admitted request={} state={} tail_available={} reserve={} extra_tokens={} "
             "pages_needed={} first={} target={} refresh_local_cache={}",
             kSchedulerPerfDebugTag, request->Id(), request->StateName(), tail_available,
             request->GetReserveNumTokensInNextScheduleEvent(), extra_tokens, pages_needed, first_pos, target,
-            request->Is<fsm::PrefillDone>());
+            refresh_local_cache);
     }
 
     return fsm::ScheduleDecodeEvent{config_.decode_input_tokens, hybrid_prefix_cache_};
@@ -575,8 +576,8 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
 std::tuple<std::vector<ForwardOperation>, std::variant<std::vector<LoadBackOperation>, std::vector<WriteBackOperation>>>
 Scheduler::newForwardOperation(std::vector<Request*> candidates) {
     const bool perf_debug = SchedulerPerfDebugEnabled();
-    const bool log_schedule_summary = perf_debug && !candidates.empty();
-    if (log_schedule_summary) {
+    bool log_schedule_summary = false;
+    if (perf_debug && !candidates.empty()) {
         std::int32_t submitted = 0;
         std::int32_t prefill = 0;
         std::int32_t prefill_done = 0;
@@ -595,12 +596,15 @@ Scheduler::newForwardOperation(std::vector<Request*> candidates) {
                 ++retracted;
             }
         }
-        spdlog::info(
-            "{} newForward start candidates={} submitted={} prefill={} prefill_done={} decoding={} retracted={} "
-            "max_tokens={} max_batch={} mixed_pd={} role={}",
-            kSchedulerPerfDebugTag, candidates.size(), submitted, prefill, prefill_done, decoding, retracted,
-            config_.max_scheduled_tokens, config_.max_batch_size, config_.enable_mixed_prefill_decode,
-            static_cast<int>(config_.role));
+        log_schedule_summary = submitted > 0 || prefill > 0 || prefill_done > 0 || retracted > 0;
+        if (log_schedule_summary) {
+            spdlog::info(
+                "{} newForward start candidates={} submitted={} prefill={} prefill_done={} decoding={} retracted={} "
+                "max_tokens={} max_batch={} mixed_pd={} role={}",
+                kSchedulerPerfDebugTag, candidates.size(), submitted, prefill, prefill_done, decoding, retracted,
+                config_.max_scheduled_tokens, config_.max_batch_size, config_.enable_mixed_prefill_decode,
+                static_cast<int>(config_.role));
+        }
     }
 
     auto priority = [&](const Request* req) -> int {
@@ -711,7 +715,7 @@ Scheduler::newForwardOperation(std::vector<Request*> candidates) {
         }
     }
 
-    if (perf_debug && (log_schedule_summary || !ops.empty() || !loadback_ops.empty())) {
+    if (perf_debug && (log_schedule_summary || !loadback_ops.empty())) {
         spdlog::info("{} newForward done ops={} loadback_ops={} token_budget_remaining={} pushed_prefill={}",
                      kSchedulerPerfDebugTag, ops.size(), loadback_ops.size(), token_budget, pushed_prefill);
     }

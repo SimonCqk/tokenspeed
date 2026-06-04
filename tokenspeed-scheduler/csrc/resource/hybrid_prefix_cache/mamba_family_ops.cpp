@@ -195,7 +195,7 @@ cache::state::AcquireRequestLocalCache::Result HybridPrefixCache::Apply(
         return {};
     }
     RefreshRequestLocalStateCheckpoint(op.local_cache, op.checkpoint_raw_position);
-    if (PerfDebugEnabled()) {
+    if (PerfDebugEnabled() && op.checkpoint_raw_position.has_value()) {
         const LocalMambaAllocator* local_mamba = op.local_cache.AdjunctState();
         spdlog::info(
             "{} AcquireRequestLocalCache tokens={} replace_adjunct=0 checkpoint_pos={} local_pages={} "

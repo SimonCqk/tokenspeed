@@ -711,15 +711,9 @@ cache::worker::CommitDecodeAfterPrefillMetadata::Result HybridPrefixCache::Apply
 }
 
 cache::worker::CommitDecodeMetadata::Result HybridPrefixCache::Apply(const cache::worker::CommitDecodeMetadata& op) {
-    const auto start = std::chrono::steady_clock::now();
     PopulateMambaRequestLocalCompatibilityFields(op.op_base, op.local_cache);
     acquireAndPopulateOp(op.op_base, op.first_raw_position_of_op, op.target_raw_tokens_exclusive,
                          MatchResult::PagedCache{});
-    if (PerfDebugEnabled()) {
-        spdlog::info("{} WorkerCommitDecode request={} first={} target={} op_pages={} elapsed_us={}", kPerfDebugTag,
-                     op.op_base.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive,
-                     op.op_base.occupied_pages.size(), ElapsedUs(start));
-    }
     return {};
 }
 
@@ -865,7 +859,7 @@ cache::admit::Decode::Result HybridPrefixCache::Apply(const cache::admit::Decode
     }
     result.admitted =
         AdmitChunk(op.request_id, op.first_raw_position_of_op, op.target_raw_tokens_exclusive, simulated_free);
-    if (PerfDebugEnabled()) {
+    if (PerfDebugEnabled() && (!result.admitted || op.device_pages_needed > 0 || op.refresh_local_cache_state)) {
         spdlog::info(
             "{} AdmitDecode request={} admitted={} device_pages_needed={} first={} target={} refresh_local_cache={} "
             "elapsed_us={}",
