@@ -127,17 +127,13 @@ RecoveryPlan HybridPrefixCache::MatchPrefix(const std::vector<std::span<const st
 RecoveryPlan HybridPrefixCache::BuildRecoveryPlan(MatchResult raw_match, MatchIntent intent) const {
     RecoveryPlan plan{};
     if (intent == MatchIntent::StateRecovery) {
-        MatchResult raw_recovery_match = raw_match;
         plan.compat_match = std::move(raw_match);
         augmentMatch(plan.compat_match);
         augmentMatchPagedCache(plan.compat_match);
 
-        MatchResult& recovery_match = HasPagedCacheAdjunct() ? plan.compat_match : raw_recovery_match;
-        const DecodeFromRetractedRecovery recovery = PrepareDecodeFromRetractedRecovery(recovery_match);
+        const DecodeFromRetractedRecovery recovery = PrepareDecodeFromRetractedRecovery(plan.compat_match);
         plan.recovery_state_available = recovery.ok;
         plan.protected_recovery_node = recovery.protected_source_node;
-        plan.compat_match.mamba_cow_src_index = recovery_match.mamba_cow_src_index;
-        plan.compat_match.mamba_host_src_index = recovery_match.mamba_host_src_index;
         return plan;
     }
 
@@ -244,6 +240,8 @@ cache::publish::FinishedRequest::Result HybridPrefixCache::Apply(const cache::pu
         OwnedPages alloc_pages = op.local_cache.TakeFirstKVPages(alloc_count);
         kv_prefix_cache_.Insert<ResourceType::Device>(op.full_paged_tokens, prefix_pages, std::move(alloc_pages),
                                                       op.page_hashes);
+    }
+    if (alloc_count >= 0 && HasMambaAdjunct()) {
         PublishFinishMambaState(op.full_paged_tokens, op.local_cache);
     }
 

@@ -180,7 +180,7 @@ void HybridPrefixCache::PublishFinishMambaState(const std::vector<std::span<cons
     }
     MatchResult post_match = kv_prefix_cache_.Match(full_paged_tokens);
     TreeNode* terminal = post_match.device.last_node;
-    if (terminal == nullptr || terminal->HasMamba()) return;
+    if (terminal == nullptr || terminal->IsRoot()) return;
 
     std::unique_ptr<MambaSlot> slot_to_publish;
     if (local_mamba_allocator->HasCheckpoint()) {
@@ -238,9 +238,14 @@ void HybridPrefixCache::augmentMatch(MatchResult& match) const {
     if (root == nullptr) return;
 
     if (mamba_host_allocator_ == nullptr) {
+        TreeNode* kv_terminal = match.device.last_node;
+        if (kv_terminal == nullptr || kv_terminal->IsRoot()) {
+            return;
+        }
+
         const std::int32_t page_size = match.device.page_size;
         const std::int32_t kv_depth = match.device.DepthInPage();
-        TreeNode* mamba_node = FindLastMambaNode(match.device.last_node);
+        TreeNode* mamba_node = FindLastMambaNode(kv_terminal);
         if (mamba_node == nullptr) {
             const std::int32_t aligned_seqlen = AlignMambaCacheSeqlen(kv_depth * page_size);
             if (aligned_seqlen > 0) {

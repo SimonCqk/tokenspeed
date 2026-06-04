@@ -206,9 +206,9 @@ private:
     // Callback from KV prefix-cache eviction.
     void OnKVEvict(TreeNode* node);
     void OnKVHostEvict(TreeNode* node);
-    // Publish request-local Mamba state for finish after the caller has inserted
-    // new terminal KV pages. The caller owns the "new KV pages were inserted"
-    // gate so finish publication remains coupled to successful KV insertion.
+    // Publish request-local Mamba state for finish onto the matched terminal KV
+    // node. Finish may have no new KV pages to insert; the request-local state
+    // is still the latest state for that terminal prefix.
     void PublishFinishMambaState(const std::vector<std::span<const std::int32_t>>& full_paged_tokens,
                                  RequestLocalCacheState& local_cache);
 

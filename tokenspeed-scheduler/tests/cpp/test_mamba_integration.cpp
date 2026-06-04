@@ -114,6 +114,96 @@ TEST_F(MambaIntegrationTest, PrefixSharingWithMamba) {
     PlanOnce();
 }
 
+class MambaHostOnlyKVReuseTest : public SchedulerTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        auto cfg = SchedulerTestSuite::MakeConfig();
+        cfg.enable_mamba = true;
+        cfg.mamba_pool_total_chunks = 16;
+        cfg.decode_input_tokens = 0;
+        cfg.device_allocator.total_pages = 5;
+        cfg.host_allocator.total_pages = 32;
+        cfg.enable_l3_storage = false;
+        return cfg;
+    }
+
+    void SetupHostOnlyPrefix() {
+        Submit(MakeRequestSpec("seed", /*num_pages=*/2, /*start=*/1));
+        PlanOnce();
+        SendForwardDone("seed", {42});
+        PlanOnce();
+        SendFinish("seed");
+        auto writeback_plan = PlanOnce();
+        const FlatWriteBackOperation* wb = GetWriteBack(writeback_plan);
+        ASSERT_NE(wb, nullptr);
+        ASSERT_FALSE(wb->op_ids.empty());
+        SendWriteBackDone(wb->op_ids[0]);
+        PlanOnce();
+
+        Submit(MakeRequestSpec("fill", /*num_pages=*/3, /*start=*/100));
+        PlanOnce();
+        SendForwardDone("fill", {200});
+        PlanOnce();
+        SendFinish("fill");
+        auto fill_writeback_plan = PlanOnce();
+        if (const FlatWriteBackOperation* fill_wb = GetWriteBack(fill_writeback_plan)) {
+            if (!fill_wb->op_ids.empty()) {
+                SendWriteBackDone(fill_wb->op_ids[0]);
+            }
+        }
+        PlanOnce();
+    }
+
+    static const FlatForwardOperation* GetForward(const ExecutionPlan& plan) {
+        for (const auto& op : plan.Operations()) {
+            if (auto* fwd = std::get_if<FlatForwardOperation>(&op)) return fwd;
+        }
+        return nullptr;
+    }
+
+    static const FlatLoadBackOperation* GetLoadBack(const ExecutionPlan& plan) {
+        for (const auto& op : plan.Operations()) {
+            if (auto* cop = std::get_if<CacheOperation>(&op)) {
+                if (auto* lb = std::get_if<FlatLoadBackOperation>(cop)) return lb;
+            }
+        }
+        return nullptr;
+    }
+
+    static const FlatWriteBackOperation* GetWriteBack(const ExecutionPlan& plan) {
+        for (const auto& op : plan.Operations()) {
+            if (auto* cop = std::get_if<CacheOperation>(&op)) {
+                if (auto* wb = std::get_if<FlatWriteBackOperation>(cop)) return wb;
+            }
+        }
+        return nullptr;
+    }
+
+    static std::int32_t FindRequestIndex(const FlatForwardOperation* fwd, const std::string& id) {
+        if (fwd == nullptr) return -1;
+        for (std::size_t i = 0; i < fwd->request_ids.size(); ++i) {
+            if (fwd->request_ids[i] == id) return static_cast<std::int32_t>(i);
+        }
+        return -1;
+    }
+};
+
+TEST_F(MambaHostOnlyKVReuseTest, L2DisabledHostOnlyKVHitStillReducesPrefillInput) {
+    SetupHostOnlyPrefix();
+
+    Submit(MakeRequestSpec("probe", /*num_pages=*/2, /*start=*/1));
+    auto plan = PlanOnce();
+
+    const FlatForwardOperation* fwd = GetForward(plan);
+    ASSERT_NE(fwd, nullptr);
+    const std::int32_t idx = FindRequestIndex(fwd, "probe");
+    ASSERT_GE(idx, 0);
+    EXPECT_EQ(fwd->input_lengths[idx], 2);
+    ASSERT_LT(static_cast<std::size_t>(idx), fwd->extend_prefix_lens.size());
+    EXPECT_EQ(fwd->extend_prefix_lens[idx], PageSize());
+    EXPECT_NE(GetLoadBack(plan), nullptr);
+}
+
 class MambaDecodeCapacityTest : public SchedulerTestSuite {
 protected:
     SchedulerConfig MakeConfig() override {
