@@ -574,7 +574,9 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
 
 std::tuple<std::vector<ForwardOperation>, std::variant<std::vector<LoadBackOperation>, std::vector<WriteBackOperation>>>
 Scheduler::newForwardOperation(std::vector<Request*> candidates) {
-    if (SchedulerPerfDebugEnabled()) {
+    const bool perf_debug = SchedulerPerfDebugEnabled();
+    const bool log_schedule_summary = perf_debug && !candidates.empty();
+    if (log_schedule_summary) {
         std::int32_t submitted = 0;
         std::int32_t prefill = 0;
         std::int32_t prefill_done = 0;
@@ -701,7 +703,7 @@ Scheduler::newForwardOperation(std::vector<Request*> candidates) {
             if (auto op = newRetractOperation(victim)) {
                 wb_ops.push_back(std::move(*op));
             }
-            if (SchedulerPerfDebugEnabled()) {
+            if (perf_debug) {
                 spdlog::info("{} newForward fallback_retract victim={} writeback_ops={} token_budget_remaining={}",
                              kSchedulerPerfDebugTag, victim->Id(), wb_ops.size(), token_budget);
             }
@@ -709,7 +711,7 @@ Scheduler::newForwardOperation(std::vector<Request*> candidates) {
         }
     }
 
-    if (SchedulerPerfDebugEnabled()) {
+    if (perf_debug && (log_schedule_summary || !ops.empty() || !loadback_ops.empty())) {
         spdlog::info("{} newForward done ops={} loadback_ops={} token_budget_remaining={} pushed_prefill={}",
                      kSchedulerPerfDebugTag, ops.size(), loadback_ops.size(), token_budget, pushed_prefill);
     }
