@@ -999,6 +999,19 @@ void HybridPrefixCache::ReleaseRequest(const std::string& request_id) {
     DemoteIdleMambaDeviceCopiesPresentOnHost();
 }
 
+void HybridPrefixCache::RewindRequest(const std::string& request_id, std::int32_t accepted_raw_tokens) {
+    if (accepted_raw_tokens < 0) {
+        throw std::invalid_argument("HybridPrefixCache::RewindRequest: accepted_raw_tokens must be >= 0");
+    }
+    auto it = request_paged_cache_tables_.find(request_id);
+    if (it == request_paged_cache_tables_.end()) {
+        return;
+    }
+    for (auto& [_, table] : it->second) {
+        table.RewindTail(accepted_raw_tokens);
+    }
+}
+
 void HybridPrefixCache::PopulateOp(ForwardOperationBase& op_base) const {
     if (paged_cache_allocators_.empty()) return;
     auto req_it = request_paged_cache_tables_.find(op_base.request_id);

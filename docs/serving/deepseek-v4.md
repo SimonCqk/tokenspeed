@@ -98,7 +98,8 @@ passing `--enable-prefix-caching` explicitly is useful in validation scripts. Th
 scheduler imports the matched prefix into request-local tables before target
 verify and draft forward, while full-width speculative target/draft writes remain
 request-local scratch. Only accepted full pages are published after the scheduler
-observes accepted tokens.
+observes accepted tokens, and request-local paged-cache tails beyond the accepted
+raw-token coverage are rewound before the next fixed-width acquire.
 
 Keep this path on the non-overlap scheduler. The runtime disables overlap
 scheduling when speculative decoding and paged-cache groups are both active, and
