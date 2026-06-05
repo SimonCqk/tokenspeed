@@ -63,7 +63,6 @@ speculative flags. For `num_steps > 1`, keep the main V4 launch flags and add:
 ```bash
 --speculative-algorithm MTP \
 --speculative-num-steps 3 \
---enable-prefix-caching \
 --enable-metrics
 ```
 
@@ -92,14 +91,11 @@ the draft-extend/prefill metadata and refresh `decode_swa_indices`/`decode_swa_l
 after each accepted-prefix advance; otherwise later draft steps can read stale or
 out-of-range SWA rows.
 
-Scheduler prefix caching is supported for the phase-1 V4 MTP path when the V4
-paged-cache adjunct groups are active. Prefix caching is enabled by default, but
-passing `--enable-prefix-caching` explicitly is useful in validation scripts. The
-scheduler imports the matched prefix into request-local tables before target
-verify and draft forward, while full-width speculative target/draft writes remain
-request-local scratch. Only accepted full pages are published after the scheduler
-observes accepted tokens, and request-local paged-cache tails beyond the accepted
-raw-token coverage are rewound before the next fixed-width acquire.
+Scheduler prefix caching is supported for the phase-1 V4 MTP path and is enabled
+by default. No extra flag is needed for normal serving; use
+`--no-enable-prefix-caching` only for ablation or debugging. During MTP decode,
+TokenSpeed reuses previously accepted prefix state while keeping unaccepted draft
+tokens out of the reusable prefix cache.
 
 Keep this path on the non-overlap scheduler. The runtime disables overlap
 scheduling when speculative decoding and paged-cache groups are both active, and
@@ -122,7 +118,7 @@ speculative reserve width.
 
 With `--enable-metrics`, check the run summary under `--outputs-dir` for
 `Decoded Tok/Iter` and speculative accept-rate fields when comparing prefix-cache
-on/off validation runs.
+default runs against `--no-enable-prefix-caching` ablations.
 
 ## Hardware / dependency requirements
 

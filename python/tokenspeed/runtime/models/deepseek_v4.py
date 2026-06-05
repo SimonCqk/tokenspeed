@@ -1961,15 +1961,21 @@ def _deepseek_v4_swa_slot_mapping(
 ) -> torch.Tensor:
     if positions.numel() == 0:
         return out_cache_loc
-    metadata = ctx.attn_backend.forward_metadata
+    metadata = _deepseek_v4_forward_metadata(ctx)
     if metadata is None:
         raise RuntimeError("DeepSeek V4 attention requires forward metadata")
     cache_metadata = metadata.cache
     if cache_metadata.swa_block_table is None:
         return out_cache_loc
+    token_to_req_indices = metadata.token_to_req_indices[: positions.numel()]
+    if token_to_req_indices.numel() != positions.numel() and (
+        token_to_req_indices.numel() <= 0
+        or positions.numel() % token_to_req_indices.numel() != 0
+    ):
+        return out_cache_loc
     return _group_slot_mapping_from_raw(
         positions,
-        metadata.token_to_req_indices[: positions.numel()],
+        token_to_req_indices,
         cache_metadata.swa_block_table,
         ctx.token_to_kv_pool.swa_block_size,
         base_offsets=cache_metadata.swa_base_logical_page,
