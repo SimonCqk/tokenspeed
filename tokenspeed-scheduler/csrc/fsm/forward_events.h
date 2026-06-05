@@ -338,13 +338,15 @@ public:
         const std::int32_t chunk_begin = accepted_token_size - static_cast<std::int32_t>(result_tokens_.size());
         auto full_paged_tokens = state.GetFullPagedTokens(/*except_last=*/true);
         std::vector<std::int32_t> prefix_pages = DevicePagesFromRoot(state.GetDeviceNode());
+        const std::int32_t new_page_count =
+            static_cast<std::int32_t>(full_paged_tokens.size()) - static_cast<std::int32_t>(prefix_pages.size());
 
         auto local_kv_allocator = std::move(state).TakeLocalKVAllocator();
         auto local_mamba_allocator = std::move(state).TakeLocalMambaAllocator();
         auto device_node_ref = std::move(state).TakeDeviceNodeRef();
         auto host_node_ref = std::move(state).TakeHostNodeRef();
 
-        if (static_cast<std::int32_t>(full_paged_tokens.size()) > static_cast<std::int32_t>(prefix_pages.size())) {
+        if (new_page_count > 0 && local_kv_allocator->PageCount() >= new_page_count) {
             InsertHybridCache(hybrid_prefix_cache_, full_paged_tokens, device_node_ref, local_kv_allocator.get(),
                               local_mamba_allocator.get(), chunk_begin,
                               static_cast<std::int32_t>(result_tokens_.size()), page_size, &prefix_pages);

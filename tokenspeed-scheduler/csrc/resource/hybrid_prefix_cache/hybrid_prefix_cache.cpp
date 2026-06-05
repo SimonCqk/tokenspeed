@@ -1369,21 +1369,6 @@ void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* ter
         TreeNode* attach_node = kv_prefix_cache_.GetRadixTree().SplitAt(terminal, target);
         if (attach_node == nullptr) break;
 
-        if (attach_node->HasPagedCacheSnapshot()) {
-            PagedCacheSnapshot* existing = attach_node->GetPagedCacheSnapshotMut();
-            const bool adopted = existing != nullptr && adoptExistingPagedCacheSnapshot(*existing, tables, target);
-            if (!adopted) {
-                spdlog::warn(
-                    "[HybridPrefixCache] CommitChunk: existing snapshot adoption failed for request {} at target "
-                    "depth {}; leaving existing snapshot intact",
-                    request_id, target);
-                break;
-            }
-            RefreshPagedCacheSnapshotCompleteness(*existing);
-            last_committed = target;
-            continue;
-        }
-
         bool preflight_ok = true;
         for (const auto& gid : required_groups) {
             auto t_it = tables.find(gid);
@@ -1413,6 +1398,21 @@ void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* ter
                 preflight_ok = false;
                 break;
             }
+            auto group_alloc_it = paged_cache_allocators_.find(gid);
+            if (group_alloc_it == paged_cache_allocators_.end() || group_alloc_it->second == nullptr) {
+                preflight_ok = false;
+                break;
+            }
+            const auto& cfg = group_alloc_it->second->Config();
+            if (cfg.family == PagedCacheGroupFamily::History) {
+                const std::int32_t committed_page = table.CommittedPrefixLenTokens() / raw_per_page;
+                const std::int32_t owned_base_page = table.BaseLogicalPage() + table.BorrowedPagesCount();
+                const std::int32_t pages_to_commit = (target - table.CommittedPrefixLenTokens()) / raw_per_page;
+                if (owned_base_page != committed_page || pages_to_commit > table.OwnedPagesCount()) {
+                    preflight_ok = false;
+                    break;
+                }
+            }
         }
         if (!preflight_ok) {
             spdlog::warn(
@@ -1420,6 +1420,21 @@ void HybridPrefixCache::CommitChunk(const std::string& request_id, TreeNode* ter
                 "depth {}; leaving prior commits intact",
                 request_id, target);
             break;
+        }
+
+        if (attach_node->HasPagedCacheSnapshot()) {
+            PagedCacheSnapshot* existing = attach_node->GetPagedCacheSnapshotMut();
+            const bool adopted = existing != nullptr && adoptExistingPagedCacheSnapshot(*existing, tables, target);
+            if (!adopted) {
+                spdlog::warn(
+                    "[HybridPrefixCache] CommitChunk: existing snapshot adoption failed for request {} at target "
+                    "depth {}; leaving existing snapshot intact",
+                    request_id, target);
+                break;
+            }
+            RefreshPagedCacheSnapshotCompleteness(*existing);
+            last_committed = target;
+            continue;
         }
 
         auto snapshot = std::make_unique<PagedCacheSnapshot>();
