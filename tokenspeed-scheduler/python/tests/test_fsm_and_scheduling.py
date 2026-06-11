@@ -479,16 +479,19 @@ class TestPrefillInputIds:
         plan1 = s.next_execution_plan()
         assert plan1.forward[0].input_lengths == [8]
         assert plan1.forward[0].extend_prefix_lens == [0]
+        assert plan1.forward[0].prefix_reuse_lens == [0]
         assert plan1.forward[0].input_ids == tokens[0:8]
 
         plan2 = s.next_execution_plan()
         assert plan2.forward[0].input_lengths == [8]
         assert plan2.forward[0].extend_prefix_lens == [8]
+        assert plan2.forward[0].prefix_reuse_lens == [0]
         assert plan2.forward[0].input_ids == tokens[8:16]
 
         plan3 = s.next_execution_plan()
         assert plan3.forward[0].input_lengths == [4]
         assert plan3.forward[0].extend_prefix_lens == [16]
+        assert plan3.forward[0].prefix_reuse_lens == [0]
         assert plan3.forward[0].input_ids == tokens[16:20]
 
 

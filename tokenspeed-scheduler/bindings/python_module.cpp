@@ -321,6 +321,7 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
     flat_fwd_op.def_ro("input_ids", &tokenspeed::FlatForwardOperation::input_ids)
         .def_ro("shifted_input_ids", &tokenspeed::FlatForwardOperation::shifted_input_ids)
         .def_ro("extend_prefix_lens", &tokenspeed::FlatForwardOperation::extend_prefix_lens)
+        .def_ro("prefix_reuse_lens", &tokenspeed::FlatForwardOperation::prefix_reuse_lens)
         .def_prop_ro(
             "prefill_lengths",
             [](const tokenspeed::FlatForwardOperation& op) -> const std::vector<std::int32_t>& {

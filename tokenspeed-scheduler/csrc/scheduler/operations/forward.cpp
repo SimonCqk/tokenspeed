@@ -148,8 +148,7 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
         return {};
     }
 
-    const std::int32_t first_pos =
-        disable_l2_cache ? request->PrefillSize() - unscheduled : matched_prefix_len_tokens;
+    const std::int32_t first_pos = disable_l2_cache ? request->PrefillSize() - unscheduled : matched_prefix_len_tokens;
     const std::int32_t target = first_pos + tokens_this_round;
     const MatchResult::PagedCache empty_paged_hit{};
     const MatchResult::PagedCache& paged_hit_for_admission =
@@ -481,6 +480,7 @@ static PrefillOperation applyPrefillEvent(Request* request, Event event) {
 PrefillOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::SchedulePrefillFirstChunkEvent event) {
     auto match = event.GetMatchResult();
     auto op = applyPrefillEvent(request, std::move(event));
+    op.prefix_reuse_len = op.extend_prefix_len;
     // Mamba fields only when adjunct is active.
     if (hybrid_prefix_cache_ && hybrid_prefix_cache_->HasMambaAdjunct()) {
         op.mamba_cow_src_idx = match.mamba_cow_src_index;

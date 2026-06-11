@@ -164,6 +164,7 @@ TEST_F(LoadBackTestSuite, LoadBack_PrefillInputLengthReduced) {
     // (inserted at FinishEvent time with 5 tokens → 2 full pages), but only 1 matches.
     // unscheduled = PrefillSize(4) - max(0,1)*2 = 2, so input_length = 2.
     EXPECT_EQ(fwd->input_lengths[idx], 2) << "host hit covers 1 of 2 pages; 2 tokens remain";
+    EXPECT_EQ(fwd->prefix_reuse_lens[idx], 1 * PageSize()) << "host hit should count as prefix reuse";
 }
 
 TEST_F(LoadBackTestSuite, LoadBack_DuplicatePagesDeduped) {

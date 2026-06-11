@@ -68,11 +68,13 @@ TEST_F(ChunkedPrefillTestSuite, ExtendPrefixLen_GrowsPerChunk) {
     auto* fwd1 = GetForwardOp(plan1);
     ASSERT_NE(fwd1, nullptr);
     EXPECT_EQ(fwd1->extend_prefix_lens[0], 0);
+    EXPECT_EQ(fwd1->prefix_reuse_lens[0], 0);
 
     auto plan2 = PlanOnce();
     auto* fwd2 = GetForwardOp(plan2);
     ASSERT_NE(fwd2, nullptr);
     EXPECT_EQ(fwd2->extend_prefix_lens[0], 4);
+    EXPECT_EQ(fwd2->prefix_reuse_lens[0], 0);
 }
 
 TEST_F(ChunkedPrefillTestSuite, PrefillFirst_ContinuesPrefillBeforeNewSubmitted) {

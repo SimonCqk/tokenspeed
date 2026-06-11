@@ -6,6 +6,11 @@ This document designs host-side CPU L2 offload for DeepSeek V4 KV cache.
 It is intentionally scoped to L2 host memory. L3 storage, cross-node cache
 transport, and new third-party runtime dependencies are out of scope.
 
+For iterative performance work after the first implementation, read
+[`deepseek-v4-l2-kv-offload-perf-logbook.md`](./deepseek-v4-l2-kv-offload-perf-logbook.md)
+first. It records explored directions, negative results, and the current
+root-cause evidence so agents do not repeat stale hypotheses.
+
 ## Goals
 
 1. Support DeepSeek V4 when KVStore is enabled internally

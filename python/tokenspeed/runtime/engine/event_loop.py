@@ -128,6 +128,8 @@ class DpForwardMetadata:
     global_num_tokens: list[int]
     global_batch_size: list[int]
     global_forward_mode: list[int]
+    global_prefill_tokens: list[int]
+    global_cached_prefill_tokens: list[int]
     all_decode_or_idle: bool
     need_idle_forward: bool
 
@@ -234,8 +236,10 @@ class EventLoop:
             self.world_cpu_group = pg_manager.get_process_group(
                 "gloo", mapping.world_group
             )
-            self._dp_local_info = torch.zeros(1, 3, dtype=torch.int32)
-            self._dp_global_info = torch.zeros(mapping.world_size, 3, dtype=torch.int32)
+            self._dp_local_info = torch.zeros(1, 5, dtype=torch.int32)
+            self._dp_global_info = torch.zeros(mapping.world_size, 5, dtype=torch.int32)
+        self._deferred_execution_plan = None
+        self._deferred_forward_op = None
         if not server_args.enable_kvstore:
             logger.warning(
                 "KVStore L2 cache will not be used during normal execution, but it will still be used when retraction happens."
@@ -871,6 +875,122 @@ class EventLoop:
     # Shared step helpers
     # ------------------------------------------------------------------
 
+    def _next_execution_plan_for_step(self):
+        if self._deferred_execution_plan is not None:
+            execution_plan = self._deferred_execution_plan
+            forward_op = self._deferred_forward_op
+            self._deferred_execution_plan = None
+            self._deferred_forward_op = None
+            return execution_plan, forward_op, True
+
+        execution_plan = self.scheduler.next_execution_plan()
+        self._publish_scheduler_kv_events()
+        self._submit_cache_ops(execution_plan)
+
+        forward_op = self._get_forward_op(execution_plan)
+        self._flush_mamba_retract_states(forward_op)
+        return execution_plan, forward_op, False
+
+    def _defer_forward_op(self, execution_plan, forward_op) -> None:
+        if self._deferred_execution_plan is not None:
+            raise RuntimeError("DeepSeek V4 DP scheduling already has a deferred op")
+        self._deferred_execution_plan = execution_plan
+        self._deferred_forward_op = forward_op
+
+    @staticmethod
+    def _prefill_token_stats(forward_op) -> tuple[int, int]:
+        if forward_op is None:
+            return 0, 0
+        num_extends = forward_op.num_extends()
+        if num_extends <= 0:
+            return 0, 0
+        prefill_tokens = sum(forward_op.input_lengths[:num_extends])
+        prefix_reuse_lens = getattr(
+            forward_op,
+            "prefix_reuse_lens",
+            forward_op.extend_prefix_lens,
+        )
+        cached_prefill_tokens = sum(prefix_reuse_lens[:num_extends])
+        return int(prefill_tokens), int(cached_prefill_tokens)
+
+    def _prefix_reuse_dp_large_prefill_threshold(self) -> int:
+        return max(1, int(self.server_args.chunked_prefill_size or 1))
+
+    def _has_prefix_reuse_dp_mismatch(self, dp_metadata: DpForwardMetadata) -> bool:
+        if not self.server_args.enable_kvstore:
+            return False
+        threshold = self._prefix_reuse_dp_large_prefill_threshold()
+        has_cached_short = any(
+            cached > 0 and 0 < prefill < threshold
+            for prefill, cached in zip(
+                dp_metadata.global_prefill_tokens,
+                dp_metadata.global_cached_prefill_tokens,
+            )
+        )
+        has_uncached_full = any(
+            cached == 0 and prefill >= threshold
+            for prefill, cached in zip(
+                dp_metadata.global_prefill_tokens,
+                dp_metadata.global_cached_prefill_tokens,
+            )
+        )
+        return has_cached_short and has_uncached_full
+
+    def _should_defer_for_prefix_reuse_dp(
+        self,
+        forward_op,
+        dp_metadata: DpForwardMetadata,
+        *,
+        allow_defer: bool,
+    ) -> bool:
+        if not allow_defer or not self._has_prefix_reuse_dp_mismatch(dp_metadata):
+            return False
+        if forward_op is None:
+            return False
+        num_extends = forward_op.num_extends()
+        # Do not delay decode rows hidden in mixed batches.
+        if num_extends <= 0 or num_extends != len(forward_op.request_ids):
+            return False
+        local_prefill, local_cached = self._prefill_token_stats(forward_op)
+        return (
+            local_cached == 0
+            and local_prefill >= self._prefix_reuse_dp_large_prefill_threshold()
+        )
+
+    def _maybe_resync_for_prefix_reuse_dp(
+        self,
+        execution_plan,
+        forward_op,
+        dp_metadata: DpForwardMetadata,
+        *,
+        allow_defer: bool,
+    ) -> tuple[object | None, DpForwardMetadata, bool]:
+        if not self._has_prefix_reuse_dp_mismatch(dp_metadata):
+            return forward_op, dp_metadata, False
+
+        defer_local = self._should_defer_for_prefix_reuse_dp(
+            forward_op,
+            dp_metadata,
+            allow_defer=allow_defer,
+        )
+        final_forward_op = None if defer_local else forward_op
+        final_metadata = self._dp_sync_and_check(final_forward_op)
+        if defer_local:
+            self._defer_forward_op(execution_plan, forward_op)
+            logger.debug(
+                "[Scheduler][dp_prefix_reuse] defer uncached prefill "
+                "global_rank=%s dp_rank=%s local_prefill_tokens=%s "
+                "local_cached_prefill_tokens=%s global_prefill_tokens=%s "
+                "global_cached_prefill_tokens=%s request_ids=%s",
+                self.global_rank,
+                self.dp_rank,
+                *self._prefill_token_stats(forward_op),
+                dp_metadata.global_prefill_tokens,
+                dp_metadata.global_cached_prefill_tokens,
+                list(forward_op.request_ids),
+            )
+        return final_forward_op, final_metadata, defer_local
+
     def _reap_or_keep_buffered_spec(self, spec) -> bool:
         """Resolve a buffered spec on resume; return True if it should be admitted.
 
@@ -1158,6 +1278,9 @@ class EventLoop:
         self._dp_local_info[0, 0] = num_tokens
         self._dp_local_info[0, 1] = batch_size
         self._dp_local_info[0, 2] = int(forward_mode)
+        prefill_tokens, cached_prefill_tokens = self._prefill_token_stats(forward_op)
+        self._dp_local_info[0, 3] = prefill_tokens
+        self._dp_local_info[0, 4] = cached_prefill_tokens
         sync_tic = time.perf_counter()
         dist.all_gather_into_tensor(
             self._dp_global_info,
@@ -1168,6 +1291,8 @@ class EventLoop:
         global_num_tokens = self._dp_global_info[:, 0].tolist()
         global_batch_size = self._dp_global_info[:, 1].tolist()
         global_forward_mode = self._dp_global_info[:, 2].tolist()
+        global_prefill_tokens = self._dp_global_info[:, 3].tolist()
+        global_cached_prefill_tokens = self._dp_global_info[:, 4].tolist()
         any_rank_has_work = max(global_num_tokens) > 0
         need_idle_forward = num_tokens == 0 and any_rank_has_work
         all_decode_or_idle = all(
@@ -1184,7 +1309,8 @@ class EventLoop:
                 "[Scheduler][forward][dp_sync] elapsed_ms=%.3f "
                 "global_rank=%s dp_rank=%s local_tokens=%s local_batch=%s "
                 "local_mode=%s global_num_tokens=%s global_batch_size=%s "
-                "global_forward_mode=%s need_idle_forward=%s "
+                "global_forward_mode=%s global_prefill_tokens=%s "
+                "global_cached_prefill_tokens=%s need_idle_forward=%s "
                 "all_decode_or_idle=%s",
                 sync_elapsed_ms,
                 self.global_rank,
@@ -1195,6 +1321,8 @@ class EventLoop:
                 global_num_tokens,
                 global_batch_size,
                 global_forward_mode,
+                global_prefill_tokens,
+                global_cached_prefill_tokens,
                 need_idle_forward,
                 all_decode_or_idle,
             )
@@ -1202,6 +1330,8 @@ class EventLoop:
             global_num_tokens=global_num_tokens,
             global_batch_size=global_batch_size,
             global_forward_mode=global_forward_mode,
+            global_prefill_tokens=global_prefill_tokens,
+            global_cached_prefill_tokens=global_cached_prefill_tokens,
             all_decode_or_idle=all_decode_or_idle,
             need_idle_forward=need_idle_forward,
         )
@@ -1267,12 +1397,9 @@ class EventLoop:
             if self._pause.forward_blocked:
                 self._paused_idle_step()
                 continue
-            execution_plan = self.scheduler.next_execution_plan()
-            self._publish_scheduler_kv_events()
-            self._submit_cache_ops(execution_plan)
-
-            forward_op = self._get_forward_op(execution_plan)
-            self._flush_mamba_retract_states(forward_op)
+            execution_plan, forward_op, used_deferred_op = (
+                self._next_execution_plan_for_step()
+            )
 
             stats = self._get_scheduler_stats()
             num_iter_tokens = (
@@ -1283,6 +1410,14 @@ class EventLoop:
             dp_metadata = None
             if self.has_dp:
                 dp_metadata = self._dp_sync_and_check(forward_op)
+                forward_op, dp_metadata, _ = self._maybe_resync_for_prefix_reuse_dp(
+                    execution_plan,
+                    forward_op,
+                    dp_metadata,
+                    allow_defer=not used_deferred_op,
+                )
+                if forward_op is None:
+                    num_iter_tokens = 0
                 if dp_metadata.need_idle_forward:
                     self.model_executor.execute_idle_forward(
                         dp_metadata.global_num_tokens,
@@ -1391,13 +1526,9 @@ class EventLoop:
                 prev_results = None
                 prev_forward_op = None
                 continue
-            execution_plan = self.scheduler.next_execution_plan()
-            self._publish_scheduler_kv_events()
-
-            self._submit_cache_ops(execution_plan)
-
-            forward_op = self._get_forward_op(execution_plan)
-            self._flush_mamba_retract_states(forward_op)
+            execution_plan, forward_op, used_deferred_op = (
+                self._next_execution_plan_for_step()
+            )
 
             stats = self._get_scheduler_stats()
             num_iter_tokens = (
@@ -1418,6 +1549,16 @@ class EventLoop:
             dp_metadata = None
             if self.has_dp:
                 dp_metadata = self._dp_sync_and_check(forward_op)
+                forward_op, dp_metadata, _ = self._maybe_resync_for_prefix_reuse_dp(
+                    execution_plan,
+                    forward_op,
+                    dp_metadata,
+                    allow_defer=not used_deferred_op,
+                )
+                if forward_op is None:
+                    sampling_params_list = None
+                    grammar_inputs = None
+                    num_iter_tokens = 0
                 if dp_metadata.need_idle_forward:
                     if prev_results is not None:
                         request_changes = self._commit_forward_results(
