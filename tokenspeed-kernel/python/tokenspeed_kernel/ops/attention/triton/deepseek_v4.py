@@ -932,6 +932,7 @@ def deepseek_v4_fused_sparse_compress_cache_insert(
 
 @triton.jit
 def _deepseek_v4_fused_csa_indexer_mxfp4_cache_kernel(
+    token_indices_ptr,
     state_cache_ptr,
     state_cache_stride0,
     state_cache_stride1,
@@ -961,9 +962,16 @@ def _deepseek_v4_fused_csa_indexer_mxfp4_cache_kernel(
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
     HADAMARD_SCALE: tl.constexpr,
+    USE_COMPACT: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    row_idx = tl.program_id(0)
     quant_block_idx = tl.program_id(1)
+    if USE_COMPACT:
+        token_idx = tl.load(token_indices_ptr + row_idx)
+        if token_idx < 0:
+            return
+    else:
+        token_idx = row_idx
 
     state_slot = tl.load(slot_mapping_ptr + token_idx)
     if state_slot < 0:
@@ -1091,6 +1099,7 @@ def deepseek_v4_fused_csa_indexer_mxfp4_cache_insert(
     kv_cache_block_size: int,
     compress_ratio: int,
     block_table_base_offsets: torch.Tensor | None = None,
+    compact_rows: int | None = None,
 ) -> None:
     num_actual = min(
         compressor_slot_mapping.numel(),
@@ -1099,9 +1108,42 @@ def deepseek_v4_fused_csa_indexer_mxfp4_cache_insert(
     )
     if num_actual == 0:
         return
+    use_compact = (
+        compact_rows is not None
+        and int(compact_rows) >= 0
+        and int(compact_rows) < num_actual
+        and not torch.cuda.is_current_stream_capturing()
+    )
+    if use_compact:
+        max_rows = int(compact_rows)
+        if max_rows == 0:
+            return
+        token_indices = torch.empty(
+            (max_rows,),
+            device=positions.device,
+            dtype=torch.int32,
+        )
+        token_indices.fill_(-1)
+        compact_count = torch.empty((1,), device=positions.device, dtype=torch.int32)
+        compact_count.zero_()
+        _deepseek_v4_compact_hca_boundary_tokens_kernel[(num_actual,)](
+            positions[:num_actual],
+            compressor_slot_mapping[:num_actual],
+            kv_slot_mapping[:num_actual],
+            token_indices,
+            compact_count,
+            COMPRESS_RATIO=compress_ratio,
+            MAX_ROWS=max_rows,
+            num_warps=4,
+        )
+        grid = max_rows
+    else:
+        token_indices = None
+        grid = num_actual
     _deepseek_v4_fused_csa_indexer_mxfp4_cache_kernel[
-        (num_actual, DEEPSEEK_V4_INDEXER_MXFP4_SCALE_DIM)
+        (grid, DEEPSEEK_V4_INDEXER_MXFP4_SCALE_DIM)
     ](
+        token_indices,
         state_cache,
         state_cache.stride(0),
         state_cache.stride(1),
@@ -1135,6 +1177,7 @@ def deepseek_v4_fused_csa_indexer_mxfp4_cache_insert(
         SCALE_DIM=DEEPSEEK_V4_INDEXER_MXFP4_SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache_2d.stride(0),
         HADAMARD_SCALE=DEEPSEEK_V4_INDEXER_DIM**-0.5,
+        USE_COMPACT=use_compact,
         num_warps=4,
     )
 

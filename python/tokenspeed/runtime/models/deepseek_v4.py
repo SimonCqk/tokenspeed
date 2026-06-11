@@ -277,7 +277,7 @@ def _deepseek_v4_prefill_boundary_rows(
     return max(0, rows)
 
 
-def _deepseek_v4_hca_compact_row_bound(
+def _deepseek_v4_compressed_cache_compact_row_bound(
     prefill_rows: int | None,
     decode_tokens: int,
     include_decode_tokens: bool,
@@ -286,11 +286,35 @@ def _deepseek_v4_hca_compact_row_bound(
         return None
     compact_rows = prefill_rows
     if include_decode_tokens:
-        # Decode tokens may contain at most one HCA boundary row each. Use this
-        # as a compact-buffer upper bound; the kernel still filters exact
-        # boundary positions before materializing rows.
+        # Decode tokens may contain at most one compressed boundary row each.
+        # Use this as a compact-buffer upper bound; the kernel still filters
+        # exact boundary positions before materializing rows.
         compact_rows += max(0, int(decode_tokens))
     return compact_rows
+
+
+def _deepseek_v4_hca_compact_row_bound(
+    prefill_rows: int | None,
+    decode_tokens: int,
+    include_decode_tokens: bool,
+) -> int | None:
+    return _deepseek_v4_compressed_cache_compact_row_bound(
+        prefill_rows,
+        decode_tokens,
+        include_decode_tokens,
+    )
+
+
+def _deepseek_v4_csa_compact_row_bound(
+    prefill_rows: int | None,
+    decode_tokens: int,
+    include_decode_tokens: bool,
+) -> int | None:
+    return _deepseek_v4_compressed_cache_compact_row_bound(
+        prefill_rows,
+        decode_tokens,
+        include_decode_tokens,
+    )
 
 
 def _deepseek_v4_forward_metadata(ctx: ForwardContext):
@@ -2987,6 +3011,8 @@ class DeepseekV4Compressor(nn.Module):
         )
         hca_boundary_rows: int | None = None
         hca_compact_rows: int | None = None
+        csa_boundary_rows: int | None = None
+        csa_compact_rows: int | None = None
         if write_compressed_cache and self.compress_ratio == 128 and not self.overlap:
             hca_boundary_rows = _deepseek_v4_prefill_boundary_rows(
                 metadata,
@@ -2994,6 +3020,21 @@ class DeepseekV4Compressor(nn.Module):
             )
             hca_compact_rows = _deepseek_v4_hca_compact_row_bound(
                 hca_boundary_rows,
+                decode_tokens,
+                ctx.forward_mode is not None and ctx.forward_mode.is_mixed(),
+            )
+        elif (
+            write_compressed_cache
+            and self.compress_ratio == 4
+            and self.overlap
+            and not get_is_capture_mode()
+        ):
+            csa_boundary_rows = _deepseek_v4_prefill_boundary_rows(
+                metadata,
+                self.compress_ratio,
+            )
+            csa_compact_rows = _deepseek_v4_csa_compact_row_bound(
+                csa_boundary_rows,
                 decode_tokens,
                 ctx.forward_mode is not None and ctx.forward_mode.is_mixed(),
             )
@@ -3100,7 +3141,8 @@ class DeepseekV4Compressor(nn.Module):
                         "[DeepSeekV4][slow_compressor] layer=%s ratio=%s "
                         "write_compressed_cache=%s total_ms=%.3f phase_wall_ms=%s "
                         "phase_cuda_ms=%s pending_cuda_events=%s input_tokens=%s "
-                        "decode_tokens=%s hca_boundary_rows=%s compact_rows=%s "
+                        "decode_tokens=%s hca_boundary_rows=%s "
+                        "csa_boundary_rows=%s compact_rows=%s "
                         "state_slot_cache_hit=%s compressed_slot_cache_hit=%s",
                         layer_index,
                         self.compress_ratio,
@@ -3112,6 +3154,7 @@ class DeepseekV4Compressor(nn.Module):
                         positions.numel(),
                         decode_tokens,
                         hca_boundary_rows,
+                        csa_boundary_rows,
                         None,
                         state_slot_cache_hit,
                         None,
@@ -3174,7 +3217,9 @@ class DeepseekV4Compressor(nn.Module):
         tic = _deepseek_v4_phase_start(timing_enabled)
         cuda_pair = _deepseek_v4_cuda_event_start(timing_enabled, positions.device)
         with nvtx_range(f"{profile_prefix}_cache_insert"):
-            compact_rows = hca_compact_rows
+            compact_rows = (
+                hca_compact_rows if self.compress_ratio == 128 else csa_compact_rows
+            )
             if self.compress_ratio == 128:
                 deepseek_v4_hca_compress_kv_cache_insert(
                     state_cache=state_cache,
@@ -3232,7 +3277,8 @@ class DeepseekV4Compressor(nn.Module):
                     "[DeepSeekV4][slow_compressor] layer=%s ratio=%s "
                     "write_compressed_cache=%s total_ms=%.3f phase_wall_ms=%s "
                     "phase_cuda_ms=%s pending_cuda_events=%s input_tokens=%s "
-                    "decode_tokens=%s hca_boundary_rows=%s compact_rows=%s "
+                    "decode_tokens=%s hca_boundary_rows=%s "
+                    "csa_boundary_rows=%s compact_rows=%s "
                     "state_slot_cache_hit=%s compressed_slot_cache_hit=%s "
                     "use_decode_cache=%s",
                     layer_index,
@@ -3245,6 +3291,7 @@ class DeepseekV4Compressor(nn.Module):
                     positions.numel(),
                     decode_tokens,
                     hca_boundary_rows,
+                    csa_boundary_rows,
                     compact_rows,
                     state_slot_cache_hit,
                     compressed_slot_cache_hit,
@@ -3619,6 +3666,23 @@ class DeepseekV4Indexer(nn.Module):
         timing_enabled = _deepseek_v4_timing_enabled(ctx)
         total_tic = _deepseek_v4_phase_start(timing_enabled)
         phase_wall_ms: dict[str, float] = {}
+        num_prefill_tokens, num_decode_tokens = _deepseek_v4_indexer_token_split(
+            ctx.forward_mode,
+            metadata,
+            positions.numel(),
+        )
+        csa_boundary_rows: int | None = None
+        csa_compact_rows: int | None = None
+        if self.compress_ratio == 4 and not get_is_capture_mode():
+            csa_boundary_rows = _deepseek_v4_prefill_boundary_rows(
+                metadata,
+                self.compress_ratio,
+            )
+            csa_compact_rows = _deepseek_v4_csa_compact_row_bound(
+                csa_boundary_rows,
+                num_decode_tokens,
+                ctx.forward_mode is not None and ctx.forward_mode.is_mixed(),
+            )
         idx_hit = (
             compressor_slot_cache.get("indexer_state")
             if compressor_slot_cache is not None
@@ -3739,6 +3803,7 @@ class DeepseekV4Indexer(nn.Module):
                 kv_cache_block_size=indexer_block_size,
                 use_fp4_cache=self.use_fp4_cache,
                 compress_ratio=self.compress_ratio,
+                compact_rows=csa_compact_rows,
             )
         _deepseek_v4_phase_done(phase_wall_ms, "indexer_cache_insert", tic)
         tic = _deepseek_v4_phase_start(timing_enabled)
@@ -3760,7 +3825,8 @@ class DeepseekV4Indexer(nn.Module):
                 logger.debug(
                     "[DeepSeekV4][slow_indexer_forward] layer=%s total_ms=%.3f "
                     "phase_wall_ms=%s input_tokens=%s num_extends=%s "
-                    "compress_ratio=%s use_fp4_cache=%s",
+                    "compress_ratio=%s use_fp4_cache=%s num_prefill_tokens=%s "
+                    "num_decode_tokens=%s csa_boundary_rows=%s compact_rows=%s",
                     layer_index,
                     total_ms,
                     phase_wall_ms,
@@ -3768,6 +3834,10 @@ class DeepseekV4Indexer(nn.Module):
                     ctx.num_extends,
                     self.compress_ratio,
                     self.use_fp4_cache,
+                    num_prefill_tokens,
+                    num_decode_tokens,
+                    csa_boundary_rows,
+                    csa_compact_rows,
                 )
         return topk
 
@@ -4108,9 +4178,11 @@ class DeepseekV4Attention(nn.Module):
                     is_valid_token=is_valid_token,
                 )
 
-        def run_compressor() -> None:
+        def run_compressor(slot_cache: dict | None = None) -> None:
             if self.compressor is None:
                 return
+            if slot_cache is None:
+                slot_cache = compressor_slot_cache
             with nvtx_range(f"{profile_prefix}_compressor"):
                 self.compressor(
                     hidden_states=hidden_states,
@@ -4119,14 +4191,19 @@ class DeepseekV4Attention(nn.Module):
                     out_cache_loc=out_cache_loc,
                     layer_index=self.cache_layer_index,
                     cos_sin_cache=cos_sin_cache,
-                    compressor_slot_cache=compressor_slot_cache,
+                    compressor_slot_cache=slot_cache,
                     kv_score=compressor_kv_score,
                 )
+
+        forward_mode = ctx.forward_mode
+        if forward_mode is None:
+            raise RuntimeError("DeepSeek V4 attention requires forward mode")
 
         # --- Phase 2: state-update + cache-write overlap ---
         # With GEMMs already done, the remaining work per stream is lightweight
         # state updates and paged cache writes — safe to overlap.
         topk_indices = None
+        use_csa_update_overlap = False
         if self.indexer is not None:
             assert self.compressor is not None
             tic = _deepseek_v4_phase_start(timing_enabled)
@@ -4147,9 +4224,16 @@ class DeepseekV4Attention(nn.Module):
 
             tic = _deepseek_v4_phase_start(timing_enabled)
             cuda_pair = _deepseek_v4_cuda_event_start(timing_enabled, positions.device)
-            with self.stream_fork.scope(
-                enable=self.stream_fork.aux_stream is not None
-            ) as fork:
+            overlap_csa_updates = forward_mode.is_extend_or_mixed()
+            use_aux_stream = self.stream_fork.aux_stream is not None
+            use_csa_update_overlap = use_aux_stream and overlap_csa_updates
+            with self.stream_fork.scope(enable=use_aux_stream) as fork:
+                if use_csa_update_overlap:
+                    inner_tic = _deepseek_v4_phase_start(timing_enabled)
+                    with fork.branch():
+                        run_compressor({})
+                    _deepseek_v4_phase_done(phase_wall_ms, "compressor", inner_tic)
+
                 inner_tic = _deepseek_v4_phase_start(timing_enabled)
                 with nvtx_range(f"{profile_prefix}_indexer"):
                     topk_indices = self.indexer(
@@ -4164,13 +4248,16 @@ class DeepseekV4Attention(nn.Module):
                         indexer_compressor_kv_score=indexer_compressor_kv_score,
                     )
                 _deepseek_v4_phase_done(phase_wall_ms, "indexer", inner_tic)
+
                 inner_tic = _deepseek_v4_phase_start(timing_enabled)
                 with fork.branch():
                     insert_swa_cache()
                 _deepseek_v4_phase_done(phase_wall_ms, "insert_swa_cache", inner_tic)
-                inner_tic = _deepseek_v4_phase_start(timing_enabled)
-                run_compressor()
-                _deepseek_v4_phase_done(phase_wall_ms, "compressor", inner_tic)
+
+                if not use_csa_update_overlap:
+                    inner_tic = _deepseek_v4_phase_start(timing_enabled)
+                    run_compressor()
+                    _deepseek_v4_phase_done(phase_wall_ms, "compressor", inner_tic)
             _deepseek_v4_cuda_event_done(
                 cuda_events,
                 "indexer_stream_scope",
@@ -4202,9 +4289,6 @@ class DeepseekV4Attention(nn.Module):
             tic = _deepseek_v4_phase_start(timing_enabled)
             insert_swa_cache()
             _deepseek_v4_phase_done(phase_wall_ms, "insert_swa_cache", tic)
-        forward_mode = ctx.forward_mode
-        if forward_mode is None:
-            raise RuntimeError("DeepSeek V4 attention requires forward mode")
         if forward_mode.is_mixed():
             tic = _deepseek_v4_phase_start(timing_enabled)
             with nvtx_range(f"{profile_prefix}_mixed_backend"):
@@ -4282,7 +4366,8 @@ class DeepseekV4Attention(nn.Module):
                     "[DeepSeekV4][slow_attn] layer=%s cache_layer=%s kind=%s "
                     "total_ms=%.3f phase_wall_ms=%s input_tokens=%s "
                     "num_prefill_tokens=%s num_decode_tokens=%s num_extends=%s "
-                    "forward_mode=%s phase_cuda_ms=%s pending_cuda_events=%s",
+                    "forward_mode=%s csa_update_overlap=%s phase_cuda_ms=%s "
+                    "pending_cuda_events=%s",
                     self.layer_index,
                     self.cache_layer_index,
                     self.attention_kind,
@@ -4293,6 +4378,7 @@ class DeepseekV4Attention(nn.Module):
                     metadata.decode_token_count(),
                     ctx.num_extends,
                     forward_mode,
+                    use_csa_update_overlap,
                     phase_cuda_ms,
                     pending_cuda_events,
                 )

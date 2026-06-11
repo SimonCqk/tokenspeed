@@ -744,6 +744,7 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             device=device,
             dtype=torch.uint8,
         )
+        compact_cache = torch.zeros_like(cache)
 
         deepseek_v4_csa_compress_kv_cache_insert(
             state_cache=state_cache,
@@ -760,6 +761,23 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             kv_cache_block_size=kv_cache_block_size,
             compress_ratio=compress_ratio,
         )
+        deepseek_v4_csa_compress_kv_cache_insert(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            compressor_slot_mapping=state_slots,
+            block_table=block_table,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_cache_2d=compact_cache,
+            kv_slot_mapping=kv_slots,
+            kv_cache_block_size=kv_cache_block_size,
+            compress_ratio=compress_ratio,
+            compact_rows=2,
+        )
+        torch.testing.assert_close(compact_cache.cpu(), cache.cpu(), atol=0, rtol=0)
 
         flat_cache = cache.view(-1)
         for slot, position in ((0, compress_ratio - 1), (1, num_tokens - 1)):
@@ -1128,6 +1146,7 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
         cache_fp4 = torch.zeros(
             1, kv_cache_block_size * 68, device=device, dtype=torch.uint8
         )
+        compact_cache_fp4 = torch.zeros_like(cache_fp4)
 
         deepseek_v4_csa_indexer_cache_insert(
             state_cache=state_cache,
@@ -1144,6 +1163,26 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             kv_cache_block_size=kv_cache_block_size,
             use_fp4_cache=True,
             compress_ratio=compress_ratio,
+        )
+        deepseek_v4_csa_indexer_cache_insert(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            compressor_slot_mapping=state_slots,
+            block_table=block_table,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_cache_2d=compact_cache_fp4,
+            kv_slot_mapping=kv_slots,
+            kv_cache_block_size=kv_cache_block_size,
+            use_fp4_cache=True,
+            compress_ratio=compress_ratio,
+            compact_rows=2,
+        )
+        torch.testing.assert_close(
+            compact_cache_fp4.cpu(), cache_fp4.cpu(), atol=0, rtol=0
         )
 
         for slot, position in ((0, compress_ratio - 1), (1, num_tokens - 1)):

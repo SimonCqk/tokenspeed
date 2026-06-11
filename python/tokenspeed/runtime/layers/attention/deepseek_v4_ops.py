@@ -966,7 +966,6 @@ def deepseek_v4_csa_compress_kv_cache_insert(
         raise ValueError(
             f"CSA cache insert requires compress_ratio=4, got {compress_ratio}"
         )
-    del compact_rows
     if state_cache.dim() != 3:
         raise ValueError(f"state_cache must be 3D, got {tuple(state_cache.shape)}")
     state_width = state_cache.shape[-1] // 2
@@ -1015,6 +1014,7 @@ def deepseek_v4_csa_compress_kv_cache_insert(
         compress_ratio=compress_ratio,
         overlap=True,
         block_table_base_offsets=block_table_base_offsets,
+        compact_rows=compact_rows,
     )
 
 
@@ -1034,6 +1034,7 @@ def deepseek_v4_csa_indexer_cache_insert(
     use_fp4_cache: bool,
     compress_ratio: int = 4,
     block_table_base_offsets: torch.Tensor | None = None,
+    compact_rows: int | None = None,
 ) -> None:
     """Compress CSA indexer state and insert FP8/MXFP4 indexer cache rows."""
 
@@ -1074,6 +1075,7 @@ def deepseek_v4_csa_indexer_cache_insert(
             kv_cache_block_size=kv_cache_block_size,
             compress_ratio=compress_ratio,
             block_table_base_offsets=block_table_base_offsets,
+            compact_rows=compact_rows,
         )
         return
 

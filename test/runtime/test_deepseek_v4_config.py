@@ -86,6 +86,7 @@ from tokenspeed.runtime.models.deepseek_v4 import (
     DeepseekV4MLP,
     DeepseekV4MoE,
     DeepseekV4MoEGate,
+    _deepseek_v4_csa_compact_row_bound,
     _deepseek_v4_forward_metadata,
     _deepseek_v4_fused_select_experts,
     _deepseek_v4_hca_compact_row_bound,
@@ -334,6 +335,32 @@ class TestDeepseekV4Config(unittest.TestCase):
         )
         self.assertEqual(
             _deepseek_v4_hca_compact_row_bound(
+                prefill_rows=None,
+                decode_tokens=1,
+                include_decode_tokens=True,
+            ),
+            None,
+        )
+
+    def test_deepseek_v4_csa_compact_row_bound_includes_mixed_decode_tokens(self):
+        self.assertEqual(
+            _deepseek_v4_csa_compact_row_bound(
+                prefill_rows=8,
+                decode_tokens=0,
+                include_decode_tokens=False,
+            ),
+            8,
+        )
+        self.assertEqual(
+            _deepseek_v4_csa_compact_row_bound(
+                prefill_rows=8,
+                decode_tokens=3,
+                include_decode_tokens=True,
+            ),
+            11,
+        )
+        self.assertEqual(
+            _deepseek_v4_csa_compact_row_bound(
                 prefill_rows=None,
                 decode_tokens=1,
                 include_decode_tokens=True,
