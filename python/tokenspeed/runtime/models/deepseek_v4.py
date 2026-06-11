@@ -4178,11 +4178,9 @@ class DeepseekV4Attention(nn.Module):
                     is_valid_token=is_valid_token,
                 )
 
-        def run_compressor(slot_cache: dict | None = None) -> None:
+        def run_compressor() -> None:
             if self.compressor is None:
                 return
-            if slot_cache is None:
-                slot_cache = compressor_slot_cache
             with nvtx_range(f"{profile_prefix}_compressor"):
                 self.compressor(
                     hidden_states=hidden_states,
@@ -4191,7 +4189,7 @@ class DeepseekV4Attention(nn.Module):
                     out_cache_loc=out_cache_loc,
                     layer_index=self.cache_layer_index,
                     cos_sin_cache=cos_sin_cache,
-                    compressor_slot_cache=slot_cache,
+                    compressor_slot_cache=compressor_slot_cache,
                     kv_score=compressor_kv_score,
                 )
 
@@ -4199,11 +4197,8 @@ class DeepseekV4Attention(nn.Module):
         if forward_mode is None:
             raise RuntimeError("DeepSeek V4 attention requires forward mode")
 
-        # --- Phase 2: state-update + cache-write overlap ---
-        # With GEMMs already done, the remaining work per stream is lightweight
-        # state updates and paged cache writes — safe to overlap.
+        # --- Phase 2: state update + cache write ---
         topk_indices = None
-        use_csa_update_overlap = False
         if self.indexer is not None:
             assert self.compressor is not None
             tic = _deepseek_v4_phase_start(timing_enabled)
@@ -4224,16 +4219,8 @@ class DeepseekV4Attention(nn.Module):
 
             tic = _deepseek_v4_phase_start(timing_enabled)
             cuda_pair = _deepseek_v4_cuda_event_start(timing_enabled, positions.device)
-            overlap_csa_updates = forward_mode.is_extend_or_mixed()
             use_aux_stream = self.stream_fork.aux_stream is not None
-            use_csa_update_overlap = use_aux_stream and overlap_csa_updates
             with self.stream_fork.scope(enable=use_aux_stream) as fork:
-                if use_csa_update_overlap:
-                    inner_tic = _deepseek_v4_phase_start(timing_enabled)
-                    with fork.branch():
-                        run_compressor({})
-                    _deepseek_v4_phase_done(phase_wall_ms, "compressor", inner_tic)
-
                 inner_tic = _deepseek_v4_phase_start(timing_enabled)
                 with nvtx_range(f"{profile_prefix}_indexer"):
                     topk_indices = self.indexer(
@@ -4254,10 +4241,9 @@ class DeepseekV4Attention(nn.Module):
                     insert_swa_cache()
                 _deepseek_v4_phase_done(phase_wall_ms, "insert_swa_cache", inner_tic)
 
-                if not use_csa_update_overlap:
-                    inner_tic = _deepseek_v4_phase_start(timing_enabled)
-                    run_compressor()
-                    _deepseek_v4_phase_done(phase_wall_ms, "compressor", inner_tic)
+                inner_tic = _deepseek_v4_phase_start(timing_enabled)
+                run_compressor()
+                _deepseek_v4_phase_done(phase_wall_ms, "compressor", inner_tic)
             _deepseek_v4_cuda_event_done(
                 cuda_events,
                 "indexer_stream_scope",
@@ -4366,8 +4352,7 @@ class DeepseekV4Attention(nn.Module):
                     "[DeepSeekV4][slow_attn] layer=%s cache_layer=%s kind=%s "
                     "total_ms=%.3f phase_wall_ms=%s input_tokens=%s "
                     "num_prefill_tokens=%s num_decode_tokens=%s num_extends=%s "
-                    "forward_mode=%s csa_update_overlap=%s phase_cuda_ms=%s "
-                    "pending_cuda_events=%s",
+                    "forward_mode=%s phase_cuda_ms=%s pending_cuda_events=%s",
                     self.layer_index,
                     self.cache_layer_index,
                     self.attention_kind,
@@ -4378,7 +4363,6 @@ class DeepseekV4Attention(nn.Module):
                     metadata.decode_token_count(),
                     ctx.num_extends,
                     forward_mode,
-                    use_csa_update_overlap,
                     phase_cuda_ms,
                     pending_cuda_events,
                 )
