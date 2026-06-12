@@ -235,6 +235,40 @@ Expected validation markers:
 - Host-hit turns should reach first decode earlier; aggregate TPS may improve
   only if the saved TTFT outweighs the extra separated DP step.
 
+Follow-up evidence from the 2026-06-11 10:57 engine log:
+
+- The heuristic fired, but only twice in the sampled log. This means most
+  host-hit steps were not in the exact "cached short prefill plus uncached full
+  prefill" shape that the first heuristic handles.
+- When it fired, it successfully removed the uncached full prefill from the
+  cached-prefill step. Example: `[8192, 5315, 0, 0]` with cached
+  `[0, 55296, 0, 0]` became a cached-only layer-2 forward with
+  `global_num_tokens=[0, 5315, 0, 0]`.
+- The deferred uncached prefill replayed immediately on the next step and was
+  co-scheduled with the cached request's first decode, e.g.
+  `global_num_tokens=[8192, 1, 0, 0]`. This still delays visible first-token
+  progress behind the 8192-token prefill and explains why this heuristic can
+  improve local cached prefill isolation without moving end-to-end TPS much.
+- Rejected follow-up: holding the deferred full prefill for one or two more
+  iterations is not a general scheduler optimization. It is tied to one observed
+  request ordering and can create extra idle global steps that hurt aggregate
+  throughput. Do not implement replay-hold heuristics in the event loop. If this
+  direction continues, the fix should be a general scheduler work-class policy
+  or admission policy that makes prefix-reuse work and large uncached prefill
+  naturally schedulable without constructing and replaying already-built ops.
+
+The same log also gives a clearer layer-2 CSA breakdown:
+
+- Layer 2 CSA still dominates: 37 `slow_attn` samples, p50 about 610 ms, max
+  about 1.22 s.
+- New `slow_indexer_forward` details show outliers where `indexer_cache_insert`
+  accounts for about 500 ms while `indexer_sparse_custom_op` is only several
+  milliseconds. This is a different suspect from the outer `insert_swa_cache`,
+  which remains sub-ms in the same samples.
+- Because these timings are wall-clock phase timings around async CUDA work,
+  validate whether `indexer_cache_insert` is true kernel time or backlog
+  attribution before implementing a larger fused/compact kernel change.
+
 ### 1. Layer 2 CSA Cached-Prefill Fixed Cost
 
 Primary target. The path to inspect is:
