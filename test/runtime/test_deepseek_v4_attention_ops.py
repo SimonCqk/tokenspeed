@@ -36,6 +36,7 @@ from tokenspeed.runtime.layers.attention.deepseek_v4_ops import (
     deepseek_v4_decode_swa_indices_and_lens,
     deepseek_v4_dequantize_and_gather_k_cache,
     deepseek_v4_hca_compress_kv_cache_insert,
+    deepseek_v4_paged_compressed_slot_mapping,
     deepseek_v4_prepare_indexer_q_mxfp4,
     dequantize_deepseek_v4_fp8_ds_mla_cache,
     fused_qnorm_rope_kv_insert,
@@ -596,6 +597,8 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             device=device,
             dtype=torch.uint8,
         )
+        compact_cache = torch.zeros_like(cache)
+        direct_compact_cache = torch.zeros_like(cache)
 
         deepseek_v4_hca_compress_kv_cache_insert(
             state_cache=state_cache,
@@ -611,6 +614,39 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             kv_slot_mapping=kv_slots,
             kv_cache_block_size=kv_cache_block_size,
             compress_ratio=compress_ratio,
+        )
+        deepseek_v4_hca_compress_kv_cache_insert(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            compressor_slot_mapping=state_slots,
+            block_table=block_table,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_cache_2d=compact_cache,
+            kv_slot_mapping=kv_slots,
+            kv_cache_block_size=kv_cache_block_size,
+            compress_ratio=compress_ratio,
+            compact_rows=1,
+        )
+        deepseek_v4_hca_compress_kv_cache_insert(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            compressor_slot_mapping=state_slots,
+            block_table=block_table,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_cache_2d=direct_compact_cache,
+            kv_slot_mapping=None,
+            kv_cache_block_size=kv_cache_block_size,
+            compress_ratio=compress_ratio,
+            kv_block_table=block_table,
+            compact_rows=1,
         )
 
         weights = torch.softmax(score.float() + ape, dim=0)
@@ -628,31 +664,32 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             .view(torch.uint8)
         )
 
-        flat_cache = cache.view(-1)
-        scale_base = kv_cache_block_size * SWA_TOKEN_STRIDE
-        for qblock in range(7):
-            start = qblock * 64
-            expected_bytes, expected_scale = _fp8_bytes_and_scale(
-                quant_input[start : start + 64]
-            )
+        for tested_cache in (cache, compact_cache, direct_compact_cache):
+            flat_cache = tested_cache.view(-1)
+            scale_base = kv_cache_block_size * SWA_TOKEN_STRIDE
+            for qblock in range(7):
+                start = qblock * 64
+                expected_bytes, expected_scale = _fp8_bytes_and_scale(
+                    quant_input[start : start + 64]
+                )
+                torch.testing.assert_close(
+                    flat_cache[start : start + 64].cpu(),
+                    expected_bytes.cpu(),
+                    atol=0,
+                    rtol=0,
+                )
+                self.assertEqual(int(flat_cache[scale_base + qblock]), expected_scale)
+            self.assertEqual(int(flat_cache[scale_base + 7]), 0)
             torch.testing.assert_close(
-                flat_cache[start : start + 64].cpu(),
-                expected_bytes.cpu(),
+                flat_cache[NOPE_DIM:SWA_TOKEN_STRIDE].cpu(),
+                expected_rope.cpu(),
                 atol=0,
                 rtol=0,
             )
-            self.assertEqual(int(flat_cache[scale_base + qblock]), expected_scale)
-        self.assertEqual(int(flat_cache[scale_base + 7]), 0)
-        torch.testing.assert_close(
-            flat_cache[NOPE_DIM:SWA_TOKEN_STRIDE].cpu(),
-            expected_rope.cpu(),
-            atol=0,
-            rtol=0,
-        )
-        self.assertEqual(
-            int(flat_cache[SWA_TOKEN_STRIDE : 2 * SWA_TOKEN_STRIDE].sum()),
-            0,
-        )
+            self.assertEqual(
+                int(flat_cache[SWA_TOKEN_STRIDE : 2 * SWA_TOKEN_STRIDE].sum()),
+                0,
+            )
 
     def test_csa_compressor_state_insert_matches_reference(self):
         torch.manual_seed(5678)
@@ -707,6 +744,7 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             device=device,
             dtype=torch.uint8,
         )
+        compact_cache = torch.zeros_like(cache)
 
         deepseek_v4_csa_compress_kv_cache_insert(
             state_cache=state_cache,
@@ -723,6 +761,23 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             kv_cache_block_size=kv_cache_block_size,
             compress_ratio=compress_ratio,
         )
+        deepseek_v4_csa_compress_kv_cache_insert(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            compressor_slot_mapping=state_slots,
+            block_table=block_table,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_cache_2d=compact_cache,
+            kv_slot_mapping=kv_slots,
+            kv_cache_block_size=kv_cache_block_size,
+            compress_ratio=compress_ratio,
+            compact_rows=2,
+        )
+        torch.testing.assert_close(compact_cache.cpu(), cache.cpu(), atol=0, rtol=0)
 
         flat_cache = cache.view(-1)
         for slot, position in ((0, compress_ratio - 1), (1, num_tokens - 1)):
@@ -1091,6 +1146,7 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
         cache_fp4 = torch.zeros(
             1, kv_cache_block_size * 68, device=device, dtype=torch.uint8
         )
+        compact_cache_fp4 = torch.zeros_like(cache_fp4)
 
         deepseek_v4_csa_indexer_cache_insert(
             state_cache=state_cache,
@@ -1107,6 +1163,26 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             kv_cache_block_size=kv_cache_block_size,
             use_fp4_cache=True,
             compress_ratio=compress_ratio,
+        )
+        deepseek_v4_csa_indexer_cache_insert(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            compressor_slot_mapping=state_slots,
+            block_table=block_table,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_cache_2d=compact_cache_fp4,
+            kv_slot_mapping=kv_slots,
+            kv_cache_block_size=kv_cache_block_size,
+            use_fp4_cache=True,
+            compress_ratio=compress_ratio,
+            compact_rows=2,
+        )
+        torch.testing.assert_close(
+            compact_cache_fp4.cpu(), cache_fp4.cpu(), atol=0, rtol=0
         )
 
         for slot, position in ((0, compress_ratio - 1), (1, num_tokens - 1)):
@@ -1663,6 +1739,57 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
             )
         )
         self.assertTrue(torch.equal(out[5:].cpu(), torch.full((3,), -1)))
+
+    def test_paged_compressed_slot_mapping_matches_reference(self):
+        device = torch.device("cuda")
+        positions = torch.tensor(
+            [3, 4, 7, 8, 11, 15, 16],
+            device=device,
+            dtype=torch.int64,
+        )
+        req_indices = torch.tensor(
+            [0, 0, 0, 1, 1, 1, 1],
+            device=device,
+            dtype=torch.int32,
+        )
+        block_table = torch.tensor(
+            [
+                [10, 11, -1],
+                [20, 21, 22],
+            ],
+            device=device,
+            dtype=torch.int32,
+        )
+        base_offsets = torch.tensor([0, 1], device=device, dtype=torch.int32)
+
+        actual = deepseek_v4_paged_compressed_slot_mapping(
+            positions=positions,
+            token_to_req_indices=req_indices,
+            block_table=block_table,
+            block_size=2,
+            compress_ratio=4,
+            base_offsets=base_offsets,
+        )
+        torch.cuda.synchronize()
+
+        expected = []
+        for pos, req in zip(positions.cpu().tolist(), req_indices.cpu().tolist()):
+            if (pos + 1) % 4 != 0:
+                expected.append(-1)
+                continue
+            compressed_pos = pos // 4
+            page = compressed_pos // 2 - int(base_offsets.cpu()[req])
+            offset = compressed_pos % 2
+            if page < 0 or page >= block_table.shape[1]:
+                expected.append(-1)
+                continue
+            page_id = int(block_table.cpu()[req, page])
+            expected.append(page_id * 2 + offset if page_id >= 0 else -1)
+
+        torch.testing.assert_close(
+            actual.cpu(),
+            torch.tensor(expected, dtype=torch.int64),
+        )
 
     def test_sparse_prefill_dequantize_and_gather_matches_reference(self):
         torch.manual_seed(9234)
