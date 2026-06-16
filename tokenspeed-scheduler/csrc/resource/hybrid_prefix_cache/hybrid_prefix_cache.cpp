@@ -115,6 +115,34 @@ MatchResult HybridPrefixCache::Match(const std::vector<std::span<const std::int3
     return match;
 }
 
+PrefixMatchEstimate HybridPrefixCache::EstimateMatchedPages(const token_vec_t& token_ids, MatchIntent intent) const {
+    PrefixMatchEstimate estimate = kv_prefix_cache_.EstimateMatchedPages(token_ids, intent);
+    if (estimate.device_node == nullptr || estimate.host_node == nullptr) {
+        return estimate;
+    }
+
+    MatchResult match{
+        .device = {.last_node = estimate.device_node, .page_size = kv_prefix_cache_.PageSize()},
+        .host = {.last_node = estimate.host_node, .page_size = kv_prefix_cache_.PageSize()},
+    };
+    augmentMatch(match);
+    augmentMatchPagedCache(match);
+    const bool device_node_changed = match.device.last_node != estimate.device_node;
+    const bool host_node_changed = match.host.last_node != estimate.host_node;
+    estimate.device_node = match.device.last_node;
+    estimate.host_node = match.host.last_node;
+    estimate.device_pages =
+        device_node_changed ? match.device.DepthInPage() : std::max(estimate.device_pages, match.device.DepthInPage());
+    estimate.host_pages =
+        host_node_changed ? match.host.DepthInPage() : std::max(estimate.host_pages, match.host.DepthInPage());
+    return estimate;
+}
+
+PrefixMatchEstimate HybridPrefixCache::EstimateMatchedPages(
+    const std::vector<std::span<const std::int32_t>>& token_pages, MatchIntent intent) const {
+    return EstimateMatchedPages(FlattenPages(token_pages, 0, token_pages.size()), intent);
+}
+
 void HybridPrefixCache::augmentMatch(MatchResult& match) const {
     if (mamba_allocator_ == nullptr) return;
     TreeNode* root = match.device.last_node;

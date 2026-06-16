@@ -56,7 +56,15 @@ public:
     void SubmitRequests(const std::vector<RequestSpec>& request_specs);
     std::vector<std::string> CalcRollingHash(const std::vector<std::int32_t>& input_tokens, bool apply_match = false);
 
-    ExecutionPlan NextExecutionPlan();
+    // Return a CPU-only summary of the next forward candidates without
+    // committing FSM events, allocating resources, or running cache admission.
+    // Used by DP mixed-batch admission to choose a decode-pressure prefill
+    // quantum before committing scheduler state.
+    ForwardWorkloadSummary PeekNextForwardWorkload();
+    // Generate the next plan. When mixed_prefill_token_budget >= 0, all prefill
+    // candidates in this iteration share that token budget; -1 preserves the
+    // default scheduler behavior.
+    ExecutionPlan NextExecutionPlan(std::int32_t mixed_prefill_token_budget = -1);
 
     void Advance(const ExecutionEvent& event);
     std::vector<KvCacheEvent> DrainKvEvents();
@@ -81,7 +89,9 @@ private:
     // Second element is LoadBackOperation list (normal path) or WriteBackOperation list (retract triggered).
     std::tuple<std::vector<ForwardOperation>,
                std::variant<std::vector<LoadBackOperation>, std::vector<WriteBackOperation>>>
-    newForwardOperation(std::vector<Request*> candidates);
+    newForwardOperation(std::vector<Request*> candidates, std::int32_t mixed_prefill_token_budget);
+    ForwardWorkloadSummary peekNextForwardWorkload(std::vector<Request*> candidates);
+    bool hasPendingPrefillWork(Request* request);
     std::vector<WriteBackOperation> newWriteBackOperation(
         std::unordered_map<std::string, std::unique_ptr<Request>>& requests);
     std::optional<WriteBackOperation> newRetractOperation(Request* retract_request);

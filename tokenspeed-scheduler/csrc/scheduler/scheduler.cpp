@@ -305,7 +305,19 @@ std::vector<WriteBackOperation> Scheduler::newWriteBackOperation(
     return ops;
 }
 
-ExecutionPlan Scheduler::NextExecutionPlan() {
+ForwardWorkloadSummary Scheduler::PeekNextForwardWorkload() {
+    std::vector<Request*> candidates;
+    for (auto& [id, req] : requests_) {
+        if (req->Is<fsm::Draining>() || req->Is<fsm::Prefetching>() || req->Is<fsm::Retracting>() ||
+            req->Is<fsm::WritingBack>() || req->Is<fsm::Finished>()) {
+            continue;
+        }
+        candidates.push_back(req.get());
+    }
+    return peekNextForwardWorkload(std::move(candidates));
+}
+
+ExecutionPlan Scheduler::NextExecutionPlan(std::int32_t mixed_prefill_token_budget) {
     ExecutionPlan plan;
 
     std::vector<WriteBackOperation> write_back_ops;
@@ -328,7 +340,7 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
         }
     }
 
-    auto [fwd_ops, cache_ops] = newForwardOperation(candidates);
+    auto [fwd_ops, cache_ops] = newForwardOperation(candidates, mixed_prefill_token_budget);
     plan.With(FlatForwardOperation{std::move(fwd_ops)});
 
     // Merge retract write-backs (if any) into the Draining write-back list, then emit once.

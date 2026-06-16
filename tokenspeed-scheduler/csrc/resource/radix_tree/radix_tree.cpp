@@ -61,6 +61,63 @@ std::size_t calcMatchedPages(TreeNode* node, token_slice remaining_tokens, std::
 
 RadixTree::RadixTree(std::int32_t page_size) : page_size_{page_size}, root_{std::make_unique<TreeNode>()} {}
 
+PrefixMatchEstimate RadixTree::EstimateMatchedPages(token_slice aligned_tokens) const {
+    TreeNode* current = root_.get();
+    PrefixMatchEstimate estimate{
+        .device_node = current,
+        .host_node = current,
+        .device_pages = 0,
+        .host_pages = 0,
+    };
+
+    bool device_alive = true;
+    bool host_alive = true;
+    token_vec_t walk_key_cache;
+    walk_key_cache.reserve(page_size_);
+
+    while (aligned_tokens.size() >= static_cast<std::size_t>(page_size_)) {
+        walk_key_cache.assign(aligned_tokens.begin(), aligned_tokens.begin() + page_size_);
+        TreeNode* child = FindChild(current, walk_key_cache);
+        if (child == nullptr) {
+            break;
+        }
+        const std::int32_t matched_num_pages = calcMatchedPages(child, aligned_tokens, page_size_);
+        if (matched_num_pages == 0) {
+            break;
+        }
+
+        const std::int32_t matched_depth = current->DepthInPage(page_size_) + matched_num_pages;
+        if (device_alive) {
+            if (child->OnDevice()) {
+                estimate.device_pages = matched_depth;
+                if (matched_num_pages == static_cast<std::int32_t>(child->Tokens().size() / page_size_)) {
+                    estimate.device_node = child;
+                }
+            } else {
+                device_alive = false;
+            }
+        }
+        if (host_alive) {
+            if (child->OnHost()) {
+                estimate.host_pages = matched_depth;
+                if (matched_num_pages == static_cast<std::int32_t>(child->Tokens().size() / page_size_)) {
+                    estimate.host_node = child;
+                }
+            } else {
+                host_alive = false;
+            }
+        }
+
+        if (matched_num_pages != static_cast<std::int32_t>(child->Tokens().size() / page_size_)) {
+            break;
+        }
+        current = child;
+        aligned_tokens = aligned_tokens.subspan(matched_num_pages * page_size_);
+    }
+
+    return estimate;
+}
+
 SplitResult RadixTree::splitChild(TreeNode* parent, const token_vec_t& child_key, std::size_t prefix_pages) {
     std::unique_ptr<TreeNode> old_node = parent->RemoveChild(child_key);
     TreeNode* suffix_node = old_node.get();

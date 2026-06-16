@@ -87,6 +87,17 @@ struct MatchResult {
     } paged_cache;
 };
 
+struct PrefixMatchEstimate {
+    // Matched prefix depth estimate for scheduler admission. This is allowed
+    // to point at the deepest complete existing node while device_pages /
+    // host_pages may include an additional partial-node page match. Callers
+    // must not treat it as an owning lock or a committed MatchResult.
+    TreeNode* device_node{nullptr};
+    TreeNode* host_node{nullptr};
+    std::int32_t device_pages{0};
+    std::int32_t host_pages{0};
+};
+
 struct InsertResult {
     TreeNode* last_node;
     std::int32_t inserted_num_pages;

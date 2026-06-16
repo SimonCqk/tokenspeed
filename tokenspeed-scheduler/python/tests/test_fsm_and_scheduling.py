@@ -286,8 +286,8 @@ class TestPrefillFirst:
         s = Scheduler(cfg)
 
         submit(s, "r0", list(range(8)))
-        s.next_execution_plan()  # r0 → PrefillDone
-        s.next_execution_plan()  # r0 → Decoding
+        s.next_execution_plan()  # r0 -> PrefillDone
+        s.next_execution_plan()  # r0 -> Decoding
         advance_forward(s, "r0", tokens=[99])
 
         submit(s, "r1", list(range(8)))
@@ -307,8 +307,8 @@ class TestPrefillFirst:
         s = Scheduler(cfg)
 
         submit(s, "r0", list(range(8)))
-        s.next_execution_plan()  # r0 → PrefillDone
-        s.next_execution_plan()  # r0 → Decoding
+        s.next_execution_plan()  # r0 -> PrefillDone
+        s.next_execution_plan()  # r0 -> Decoding
         advance_forward(s, "r0", tokens=[99])
 
         submit(s, "r1", list(range(32)))  # 32 > budget=16
@@ -320,6 +320,82 @@ class TestPrefillFirst:
         assert op.num_extends() == 1
         # r0 decode = 1 token; r1 prefill chunk takes the remaining 15.
         assert op.input_lengths == [15, 1]
+
+    def test_mixed_prefill_token_budget_slices_large_prefill(self):
+        cfg = make_config(max_scheduled_tokens=16, max_batch_size=8)
+        cfg.enable_mixed_prefill_decode = True
+        s = Scheduler(cfg)
+
+        submit(s, "r0", list(range(8)))
+        s.next_execution_plan()  # r0 -> PrefillDone
+        s.next_execution_plan()  # r0 -> Decoding
+        advance_forward(s, "r0", tokens=[99])
+
+        submit(s, "r1", list(range(32)))
+        summary = s.peek_next_forward_workload()
+        assert summary.has_decode
+        assert summary.has_prefill
+        summary = s.peek_next_forward_workload()
+        assert summary.has_decode
+        assert summary.has_prefill
+        assert s.waiting_size() == 1
+
+        plan = s.next_execution_plan(mixed_prefill_token_budget=4)
+        op = plan.forward[0]
+
+        assert op.request_ids == ["r1", "r0"]
+        assert op.num_extends() == 1
+        assert op.input_lengths == [4, 1]
+        assert s.waiting_size() == 0
+        assert s.prefilling_size() == 1
+
+    def test_mixed_prefill_token_budget_allows_long_prefix_tail_prefill(self):
+        cfg = make_config(max_scheduled_tokens=17, max_batch_size=8)
+        cfg.enable_mixed_prefill_decode = True
+        s = Scheduler(cfg)
+
+        submit(s, "r0", list(range(8)))
+        s.next_execution_plan()  # r0 -> PrefillDone
+        s.next_execution_plan()  # r0 -> Decoding
+        advance_forward(s, "r0", tokens=[99])
+
+        submit(s, "r1", list(range(24)))
+        first_plan = s.next_execution_plan()
+        first_op = first_plan.forward[0]
+        assert first_op.request_ids == ["r1", "r0"]
+        assert first_op.input_lengths == [16, 1]
+        advance_forward(s, "r0", tokens=[100])
+
+        summary = s.peek_next_forward_workload()
+        assert summary.has_decode
+        assert summary.has_prefill
+
+        plan = s.next_execution_plan(mixed_prefill_token_budget=15)
+        op = plan.forward[0]
+
+        assert op.request_ids == ["r1", "r0"]
+        assert op.num_extends() == 1
+        assert op.input_lengths == [8, 1]
+
+    def test_mixed_prefill_token_budget_is_shared_across_prefills(self):
+        cfg = make_config(max_scheduled_tokens=32, max_batch_size=8)
+        cfg.enable_mixed_prefill_decode = True
+        s = Scheduler(cfg)
+
+        submit(s, "r0", list(range(8)))
+        s.next_execution_plan()  # r0 -> PrefillDone
+        s.next_execution_plan()  # r0 -> Decoding
+        advance_forward(s, "r0", tokens=[99])
+
+        submit(s, "r1", list(range(4)))
+        submit(s, "r2", list(range(16)))
+
+        plan = s.next_execution_plan(mixed_prefill_token_budget=6)
+        op = plan.forward[0]
+
+        assert op.request_ids == ["r1", "r2", "r0"]
+        assert op.num_extends() == 2
+        assert op.input_lengths == [4, 2, 1]
 
     def test_max_batch_size_limits_scheduled_requests(self):
         """max_batch_size caps the number of requests per plan."""

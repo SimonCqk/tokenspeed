@@ -42,6 +42,9 @@ from tokenspeed.runtime.distributed.process_group_manager import (
 )
 from tokenspeed.runtime.engine.generation_output_processor import OutputProcesser
 from tokenspeed.runtime.engine.memory_occupation import MemoryOccupationController
+from tokenspeed.runtime.engine.mixed_batch_policy import (
+    mixed_prefill_fair_share_quantum,
+)
 from tokenspeed.runtime.engine.pause import PauseController
 from tokenspeed.runtime.engine.request_handler import RequestHandler
 from tokenspeed.runtime.engine.scheduler_utils import (
@@ -252,6 +255,10 @@ class EventLoop:
             )
             self._dp_local_info = torch.zeros(1, 3, dtype=torch.int32)
             self._dp_global_info = torch.zeros(mapping.world_size, 3, dtype=torch.int32)
+            self._dp_pack_local_info = torch.zeros(1, 2, dtype=torch.int32)
+            self._dp_pack_global_info = torch.zeros(
+                mapping.world_size, 2, dtype=torch.int32
+            )
         if not server_args.enable_kvstore:
             logger.warning(
                 "KVStore L2 cache will not be used during normal execution, but it will still be used when retraction happens."
@@ -1209,6 +1216,46 @@ class EventLoop:
             need_idle_forward=need_idle_forward,
         )
 
+    def _mixed_pack_prefill_token_budget(self) -> int:
+        """Return a per-rank prefill token budget for the next plan.
+
+        This is a CPU-only pre-admission guard for DP mixed batch. If any rank
+        has decode work ready, prefill remains schedulable but is limited to a
+        small per-rank quantum for this global step. Cache admission still
+        happens in the C++ scheduler path.
+        """
+        chunked_prefill_size = self.server_args.chunked_prefill_size
+        if (
+            not self.has_dp
+            or not self.server_args.enable_mixed_batch
+            or chunked_prefill_size is None
+            or chunked_prefill_size <= 0
+        ):
+            return -1
+
+        summary = self.scheduler.peek_next_forward_workload()
+        self._dp_pack_local_info[0, 0] = int(summary.has_decode)
+        self._dp_pack_local_info[0, 1] = int(summary.has_prefill)
+        dist.all_gather_into_tensor(
+            self._dp_pack_global_info,
+            self._dp_pack_local_info,
+            group=self.world_cpu_group,
+        )
+
+        global_has_decode = self._dp_pack_global_info[:, 0].tolist()
+        global_has_prefill = self._dp_pack_global_info[:, 1].tolist()
+        any_decode = any(global_has_decode)
+        active_prefill_ranks = max(1, sum(global_has_prefill))
+        return (
+            mixed_prefill_fair_share_quantum(
+                chunked_prefill_size,
+                self.server_args.block_size,
+                active_prefill_ranks,
+            )
+            if any_decode
+            else -1
+        )
+
     def _get_scheduler_stats(self):
         """Query scheduler for page usage and queue depth."""
         available = self.scheduler.available_kv_pages()
@@ -1308,7 +1355,10 @@ class EventLoop:
             if self._pause.forward_blocked:
                 self._paused_idle_step()
                 continue
-            execution_plan = self.scheduler.next_execution_plan()
+            mixed_prefill_token_budget = self._mixed_pack_prefill_token_budget()
+            execution_plan = self.scheduler.next_execution_plan(
+                mixed_prefill_token_budget
+            )
             self._publish_scheduler_kv_events()
             self._submit_cache_ops(execution_plan)
 
@@ -1446,7 +1496,10 @@ class EventLoop:
                 prev_results = None
                 prev_forward_op = None
                 continue
-            execution_plan = self.scheduler.next_execution_plan()
+            mixed_prefill_token_budget = self._mixed_pack_prefill_token_budget()
+            execution_plan = self.scheduler.next_execution_plan(
+                mixed_prefill_token_budget
+            )
             self._publish_scheduler_kv_events()
 
             self._submit_cache_ops(execution_plan)

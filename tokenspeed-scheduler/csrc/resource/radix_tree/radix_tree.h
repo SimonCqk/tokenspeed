@@ -65,6 +65,9 @@ public:
 
     WalkResult WalkDownUtilMismatch(token_slice aligned_tokens, TreeNode::timestamp_t access_time,
                                     TreeNode* start_node = nullptr);
+    // Read-only prefix-depth estimate. Does not Touch(), split nodes, allocate,
+    // or otherwise mutate radix-tree state.
+    PrefixMatchEstimate EstimateMatchedPages(token_slice aligned_tokens) const;
 
     TreeNode* PruneEmptyByNode(TreeNode* node);
 

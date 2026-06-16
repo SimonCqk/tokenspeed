@@ -50,6 +50,12 @@ public:
     MatchResult Match(const token_vec_t& token_ids, MatchIntent intent = MatchIntent::PrefixReuse);
     MatchResult Match(const std::vector<std::span<const std::int32_t>>& token_pages,
                       MatchIntent intent = MatchIntent::PrefixReuse);
+    // Read-only estimate for scheduler admission. Unlike Match(), this does
+    // not update LRU access time, split tree nodes, allocate, or evict.
+    PrefixMatchEstimate EstimateMatchedPages(const token_vec_t& token_ids,
+                                             MatchIntent intent = MatchIntent::PrefixReuse) const;
+    PrefixMatchEstimate EstimateMatchedPages(const std::vector<std::span<const std::int32_t>>& token_pages,
+                                             MatchIntent intent = MatchIntent::PrefixReuse) const;
 
     template <ResourceType RType>
     InsertResult Insert(const token_vec_t& token_ids, const std::vector<std::int32_t>& prefix_pages,

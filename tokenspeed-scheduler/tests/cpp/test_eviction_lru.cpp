@@ -143,6 +143,28 @@ TEST_F(EvictionLRUTest, ExactLRUAfterTouchWhileLocked) {
     EXPECT_EQ(first_evicted_start, 5);  // NEW's tokens start at 5, not OLD's at 1
 }
 
+TEST_F(EvictionLRUTest, EstimateMatchedPagesDoesNotTouchOrSplit) {
+    auto inserted = Insert(2, /*start=*/1);
+    TreeNode* leaf = inserted.last_node;
+    ASSERT_NE(leaf, nullptr);
+    TreeNode* root = leaf->Parent();
+    ASSERT_NE(root, nullptr);
+
+    const auto original_time = leaf->Time();
+    ASSERT_EQ(root->NumChildren(), 1u);
+    ASSERT_EQ(leaf->DepthInPage(kPageSize), 2);
+    ASSERT_EQ(leaf->Tokens().size(), static_cast<std::size_t>(2 * kPageSize));
+
+    auto estimate = cache_->EstimateMatchedPages(MakeAlignedTokens(1, kPageSize, /*start=*/1));
+
+    EXPECT_EQ(estimate.device_pages, 1);
+    EXPECT_EQ(estimate.host_pages, 0);
+    EXPECT_EQ(leaf->Time(), original_time);
+    EXPECT_EQ(root->NumChildren(), 1u);
+    EXPECT_EQ(leaf->DepthInPage(kPageSize), 2);
+    EXPECT_EQ(leaf->Tokens().size(), static_cast<std::size_t>(2 * kPageSize));
+}
+
 // ---------------------------------------------------------------------------
 // EvictablePagesNum reflects unlocked leaf pages
 // ---------------------------------------------------------------------------

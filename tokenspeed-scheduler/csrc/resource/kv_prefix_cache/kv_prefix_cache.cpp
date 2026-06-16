@@ -187,6 +187,26 @@ MatchResult KVPrefixCache::Match(const std::vector<std::span<const std::int32_t>
     return Match(FlattenPages(token_pages, 0, token_pages.size()), intent);
 }
 
+PrefixMatchEstimate KVPrefixCache::EstimateMatchedPages(const token_vec_t& token_ids, MatchIntent intent) const {
+    const std::int32_t page_size = tree_.PageSize();
+    if (token_ids.size() % page_size != 0) {
+        throw std::runtime_error(
+            "KVPrefixCache::EstimateMatchedPages: token count must be divisible by page_size; "
+            "token_count=" +
+            std::to_string(token_ids.size()) + "; page_size=" + std::to_string(page_size));
+    }
+    if (disable_prefix_cache_ && intent == MatchIntent::PrefixReuse) {
+        TreeNode* root = tree_.Root();
+        return PrefixMatchEstimate{.device_node = root, .host_node = root};
+    }
+    return tree_.EstimateMatchedPages(token_ids);
+}
+
+PrefixMatchEstimate KVPrefixCache::EstimateMatchedPages(const std::vector<std::span<const std::int32_t>>& token_pages,
+                                                        MatchIntent intent) const {
+    return EstimateMatchedPages(FlattenPages(token_pages, 0, token_pages.size()), intent);
+}
+
 MatchResult KVPrefixCache::RootMatch() const {
     TreeNode* root = tree_.Root();
     const std::int32_t page_size = tree_.PageSize();

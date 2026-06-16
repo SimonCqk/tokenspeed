@@ -77,7 +77,71 @@ void AddUniqueNode(std::vector<TreeNode*>& nodes, TreeNode* node) {
     }
 }
 
+int ForwardPriority(const Request* req, bool enable_mixed_prefill_decode) {
+    if (req->Is<fsm::Prefilling>()) return 1;
+    if (req->Is<fsm::Submitted>()) return 2;
+    if (req->Is<fsm::Decoding>() || req->Is<fsm::PrefillDone>()) {
+        // Decode-first if mixed-batch is enabled; prefill-first otherwise.
+        return enable_mixed_prefill_decode ? 0 : 3;
+    }
+    if (req->Is<fsm::Retracted>()) return 4;
+    return 9;
+}
+
+void SortForwardCandidates(std::vector<Request*>& candidates, bool enable_mixed_prefill_decode) {
+    // TP-determinism: tie-break on Request::Id() so the relative order within a
+    // priority class is identical across ranks. requests_ is an unordered_map
+    // keyed by string id; libstdc++ randomizes string hashing per process, so
+    // without the tiebreaker each rank visits candidates in a different order
+    // and, when token_budget / page / mamba-slot constraints are tight, picks
+    // a different subset to schedule. That made forward_op None on some ranks
+    // and non-None on others, deadlocking the next NCCL collective.
+    std::sort(candidates.begin(), candidates.end(), [&](const auto& a, const auto& b) {
+        int pa = ForwardPriority(a, enable_mixed_prefill_decode);
+        int pb = ForwardPriority(b, enable_mixed_prefill_decode);
+        return pa != pb ? pa < pb : a->Id() < b->Id();
+    });
+}
+
 }  // namespace
+
+bool Scheduler::hasPendingPrefillWork(Request* request) {
+    if (request->Is<fsm::Prefilling>()) {
+        return request->UnScheduledPrefillSize() > 0;
+    }
+    if (!(request->Is<fsm::Submitted>() || request->Is<fsm::PrefetchDone>())) {
+        return false;
+    }
+
+    PrefixMatchEstimate match_estimate =
+        hybrid_prefix_cache_ ? hybrid_prefix_cache_->EstimateMatchedPages(request->GetFullPagedTokens(true))
+                             : kv_prefix_cache_.EstimateMatchedPages(request->GetFullPagedTokens(true));
+    const std::int32_t device_matched = match_estimate.device_pages;
+    const std::int32_t host_matched = match_estimate.host_pages;
+    const std::int32_t matched_pages =
+        config_.disable_l2_cache ? device_matched : std::max(device_matched, host_matched);
+    const std::int32_t prefix_tokens = matched_pages * config_.page_size;
+    return request->PrefillSize() > prefix_tokens;
+}
+
+ForwardWorkloadSummary Scheduler::peekNextForwardWorkload(std::vector<Request*> candidates) {
+    SortForwardCandidates(candidates, config_.enable_mixed_prefill_decode);
+
+    ForwardWorkloadSummary summary;
+    for (Request* request : candidates) {
+        if ((request->Is<fsm::PrefillDone>() || request->Is<fsm::Decoding>() || request->Is<fsm::Retracted>()) &&
+            config_.role != Role::kP) {
+            summary.has_decode = true;
+        }
+        if ((request->Is<fsm::Prefilling>() && config_.role != Role::kD) || request->Is<fsm::Submitted>() ||
+            request->Is<fsm::PrefetchDone>()) {
+            if (hasPendingPrefillWork(request)) {
+                summary.has_prefill = true;
+            }
+        }
+    }
+    return summary;
+}
 
 std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFirstChunk(
     Request* request, std::int32_t remaining, std::int32_t decode_input_tokens, bool disable_l2_cache,
@@ -567,31 +631,13 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
 }
 
 std::tuple<std::vector<ForwardOperation>, std::variant<std::vector<LoadBackOperation>, std::vector<WriteBackOperation>>>
-Scheduler::newForwardOperation(std::vector<Request*> candidates) {
-    auto priority = [&](const Request* req) -> int {
-        if (req->Is<fsm::Prefilling>()) return 1;
-        if (req->Is<fsm::Submitted>()) return 2;
-        if (req->Is<fsm::Decoding>() || req->Is<fsm::PrefillDone>()) {
-            // Decode-first if mixed-batch is enabled; prefill-first otherwise.
-            return config_.enable_mixed_prefill_decode ? 0 : 3;
-        }
-        if (req->Is<fsm::Retracted>()) return 4;
-        return 9;
-    };
-    // TP-determinism: tie-break on Request::Id() so the relative order within a
-    // priority class is identical across ranks. requests_ is an unordered_map
-    // keyed by string id; libstdc++ randomizes string hashing per process, so
-    // without the tiebreaker each rank visits candidates in a different order
-    // and — when token_budget / page / mamba-slot constraints are tight — picks
-    // a different subset to schedule. That made forward_op None on some ranks
-    // and non-None on others, deadlocking the next NCCL collective.
-    std::sort(candidates.begin(), candidates.end(), [&](const auto& a, const auto& b) {
-        int pa = priority(a), pb = priority(b);
-        return pa != pb ? pa < pb : a->Id() < b->Id();
-    });
+Scheduler::newForwardOperation(std::vector<Request*> candidates, std::int32_t mixed_prefill_token_budget) {
+    SortForwardCandidates(candidates, config_.enable_mixed_prefill_decode);
 
     std::vector<ForwardOperation> ops;
     std::int32_t token_budget = config_.max_scheduled_tokens;
+    std::int32_t prefill_budget_remaining =
+        mixed_prefill_token_budget >= 0 ? mixed_prefill_token_budget : config_.max_scheduled_tokens;
     bool pushed_prefill = false;
     auto push_op = [&](auto op, bool uses_pool_slot = false) {
         if (config_.role != Role::kD) {
@@ -599,8 +645,17 @@ Scheduler::newForwardOperation(std::vector<Request*> candidates) {
         }
         if constexpr (std::is_same_v<std::decay_t<decltype(op)>, PrefillOperation>) {
             pushed_prefill = true;
+            if (mixed_prefill_token_budget >= 0) {
+                prefill_budget_remaining -= op.input_length;
+            }
         }
         ops.push_back(std::move(op));
+    };
+    auto prefill_remaining = [&]() {
+        if (mixed_prefill_token_budget < 0) {
+            return token_budget;
+        }
+        return std::min(token_budget, prefill_budget_remaining);
     };
     std::vector<LoadBackOperation> loadback_ops;
     auto simulated_free =
@@ -609,16 +664,20 @@ Scheduler::newForwardOperation(std::vector<Request*> candidates) {
         if (token_budget <= 0 || config_.max_batch_size == ops.size()) break;
 
         if (request->Is<fsm::Prefilling>() && config_.role != Role::kD) {
+            std::int32_t remaining = prefill_remaining();
+            if (remaining <= 0) continue;
             std::int32_t reserver_num_tokens = config_.role == Role::kP ? 0 : config_.decode_input_tokens;
-            if (auto ev = schedulePrefill(request, token_budget, reserver_num_tokens, simulated_free)) {
+            if (auto ev = schedulePrefill(request, remaining, reserver_num_tokens, simulated_free)) {
                 push_op(applyEventAndGenerateOp(request, *ev));
             }
         } else if (request->Is<fsm::Submitted>() || request->Is<fsm::PrefetchDone>()) {
+            std::int32_t remaining = prefill_remaining();
+            if (remaining <= 0) continue;
             // PrefetchDone: host cache populated; treat same as Submitted for forward scheduling.
             std::int32_t decode_input_tokens = config_.role == Role::kP ? 0 : config_.decode_input_tokens;
 
-            if (auto ev = schedulePrefillFirstChunk(request, token_budget, decode_input_tokens,
-                                                    config_.disable_l2_cache, simulated_free)) {
+            if (auto ev = schedulePrefillFirstChunk(request, remaining, decode_input_tokens, config_.disable_l2_cache,
+                                                    simulated_free)) {
                 std::vector<TreeNode*> loadback_diff = ev->GetLoadbackDiff();
                 std::vector<TreeNode*> mamba_loadback_nodes = ev->GetMambaLoadbackNodes();
                 push_op(applyEventAndGenerateOp(request, std::move(*ev)), true);
