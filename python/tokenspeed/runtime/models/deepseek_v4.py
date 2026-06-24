@@ -2979,13 +2979,11 @@ class DeepseekV4Compressor(nn.Module):
                 )
             )
         else:
-            compressed_key = (
-                "compressed",
-                self.compress_ratio,
-                kv_cache_block_size,
-                use_decode_cache,
+            compressed_hit = (
+                memo.get(("compressed", self.compress_ratio))
+                if memo is not None
+                else None
             )
-            compressed_hit = memo.get(compressed_key) if memo is not None else None
             if compressed_hit is not None:
                 compressed_slots = compressed_hit
             else:
@@ -3003,7 +3001,7 @@ class DeepseekV4Compressor(nn.Module):
                         is_valid_token=valid_token,
                     )
                 if memo is not None:
-                    memo[compressed_key] = compressed_slots
+                    memo[("compressed", self.compress_ratio)] = compressed_slots
         kv_cache_2d = pool.get_compressed_kv_buffer_2d(layer_index)
         with nvtx_range(f"{profile_prefix}_cache_insert"):
             compact_rows = (
@@ -3456,35 +3454,18 @@ class DeepseekV4Indexer(nn.Module):
                 self.compress_ratio,
                 indexer_block_size,
             )
-            use_decode_cache = (
-                ctx.forward_mode is not None and ctx.forward_mode.is_decode()
-            )
-            compressed_key = (
-                "compressed",
+            compressed_slots = cache_metadata.compressed_slot_mapping(
+                positions,
                 self.compress_ratio,
-                indexer_block_size,
-                use_decode_cache,
+                token_to_req_indices=metadata.token_to_req_indices[: positions.numel()],
+                query_start_loc=metadata.query_start_loc,
+                seq_lens=metadata.seq_lens,
+                kv_cache_block_size=indexer_block_size,
+                use_decode_cache=(
+                    ctx.forward_mode is not None and ctx.forward_mode.is_decode()
+                ),
+                is_valid_token=valid_token,
             )
-            compressed_slots = (
-                compressor_slot_cache.get(compressed_key)
-                if compressor_slot_cache is not None
-                else None
-            )
-            if compressed_slots is None:
-                compressed_slots = cache_metadata.compressed_slot_mapping(
-                    positions,
-                    self.compress_ratio,
-                    token_to_req_indices=metadata.token_to_req_indices[
-                        : positions.numel()
-                    ],
-                    query_start_loc=metadata.query_start_loc,
-                    seq_lens=metadata.seq_lens,
-                    kv_cache_block_size=indexer_block_size,
-                    use_decode_cache=use_decode_cache,
-                    is_valid_token=valid_token,
-                )
-                if compressor_slot_cache is not None:
-                    compressor_slot_cache[compressed_key] = compressed_slots
         with nvtx_range("indexer_cache_insert"):
             deepseek_v4_csa_indexer_cache_insert(
                 state_cache=indexer_state,

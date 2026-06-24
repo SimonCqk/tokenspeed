@@ -716,13 +716,14 @@ def deepseek_v4_hca_tiled_compress_cache_insert(
         num_actual = min(num_actual, kv_slot_mapping.numel())
     if num_actual == 0:
         return
+    compact_row_count = None if compact_rows is None else int(compact_rows)
     use_compact = (
-        compact_rows is not None
-        and int(compact_rows) >= 0
-        and int(compact_rows) < num_actual
+        compact_row_count is not None
+        and compact_row_count >= 0
+        and (compact_row_count < num_actual or kv_slot_mapping is None)
     )
     if use_compact:
-        rows = int(compact_rows)
+        rows = min(compact_row_count, num_actual)
         if rows == 0:
             return
         token_indices = torch.empty((rows,), device=positions.device, dtype=torch.int32)
