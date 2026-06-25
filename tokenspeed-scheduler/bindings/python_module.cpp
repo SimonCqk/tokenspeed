@@ -408,7 +408,8 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
         .def("submit_requests",
              nb::overload_cast<const std::vector<tokenspeed::RequestSpec>&>(&tokenspeed::Scheduler::SubmitRequests),
              nb::arg("request_specs"))
-        .def("next_execution_plan", [](tokenspeed::Scheduler& s) { return s.NextExecutionPlan(); })
+        .def("next_execution_plan", &tokenspeed::Scheduler::NextExecutionPlan,
+             nb::arg("mixed_prefill_token_budget") = -1)
         .def("advance", &tokenspeed::Scheduler::Advance, nb::arg("event"))
         .def(
             "drain_kv_events",

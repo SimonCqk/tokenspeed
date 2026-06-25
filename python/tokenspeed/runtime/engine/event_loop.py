@@ -42,6 +42,9 @@ from tokenspeed.runtime.distributed.process_group_manager import (
 )
 from tokenspeed.runtime.engine.generation_output_processor import OutputProcesser
 from tokenspeed.runtime.engine.memory_occupation import MemoryOccupationController
+from tokenspeed.runtime.engine.mixed_batch_policy import (
+    mixed_prefill_fair_share_quantum,
+)
 from tokenspeed.runtime.engine.pause import PauseController
 from tokenspeed.runtime.engine.request_handler import RequestHandler
 from tokenspeed.runtime.engine.scheduler_utils import (
@@ -240,6 +243,7 @@ class EventLoop:
         self.dp_rank = dp_rank
         self.dp_size = mapping.attn.dp_size
         self.has_dp = mapping.has_attn_dp
+        self._last_dp_forward_metadata: DpForwardMetadata | None = None
         if self.has_dp:
             self.world_cpu_group = pg_manager.get_process_group(
                 "gloo", mapping.world_group
@@ -1180,12 +1184,54 @@ class EventLoop:
             )
             for mode in global_forward_mode
         )
-        return DpForwardMetadata(
+        metadata = DpForwardMetadata(
             global_num_tokens=global_num_tokens,
             global_batch_size=global_batch_size,
             global_forward_mode=global_forward_mode,
             all_decode_or_idle=all_decode_or_idle,
             need_idle_forward=need_idle_forward,
+        )
+        self._last_dp_forward_metadata = metadata
+        return metadata
+
+    def _last_dp_step_had_decode_pressure(self) -> bool:
+        metadata = self._last_dp_forward_metadata
+        if metadata is None:
+            return False
+
+        decode_pressure_modes = {
+            int(ForwardMode.DECODE),
+            int(ForwardMode.MIXED),
+            int(ForwardMode.TARGET_VERIFY),
+        }
+        return any(
+            num_tokens > 0 and mode in decode_pressure_modes
+            for num_tokens, mode in zip(
+                metadata.global_num_tokens, metadata.global_forward_mode
+            )
+        )
+
+    def _mixed_pack_prefill_token_budget(self) -> int:
+        """Return a per-rank prefill token budget for the next plan.
+
+        This is a CPU-only pre-admission guard for DP mixed batch. It relies on
+        the previous step's already-gathered DP metadata instead of introducing
+        another collective before scheduler admission.
+        """
+        chunked_prefill_size = self.server_args.chunked_prefill_size
+        if (
+            not self.has_dp
+            or not self.server_args.enable_mixed_batch
+            or chunked_prefill_size is None
+            or chunked_prefill_size <= 0
+            or not self._last_dp_step_had_decode_pressure()
+        ):
+            return -1
+
+        return mixed_prefill_fair_share_quantum(
+            chunked_prefill_size,
+            self.server_args.block_size,
+            self.dp_size,
         )
 
     def _get_scheduler_stats(self):
@@ -1287,7 +1333,10 @@ class EventLoop:
             if self._pause.forward_blocked:
                 self._paused_idle_step()
                 continue
-            execution_plan = self.scheduler.next_execution_plan()
+            mixed_prefill_token_budget = self._mixed_pack_prefill_token_budget()
+            execution_plan = self.scheduler.next_execution_plan(
+                mixed_prefill_token_budget
+            )
             self._publish_scheduler_kv_events()
             self._submit_cache_ops(execution_plan)
 
@@ -1411,7 +1460,10 @@ class EventLoop:
                 prev_results = None
                 prev_forward_op = None
                 continue
-            execution_plan = self.scheduler.next_execution_plan()
+            mixed_prefill_token_budget = self._mixed_pack_prefill_token_budget()
+            execution_plan = self.scheduler.next_execution_plan(
+                mixed_prefill_token_budget
+            )
             self._publish_scheduler_kv_events()
 
             self._submit_cache_ops(execution_plan)
