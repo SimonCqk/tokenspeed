@@ -105,6 +105,44 @@ void SortForwardCandidates(std::vector<Request*>& candidates, bool enable_mixed_
 
 }  // namespace
 
+bool Scheduler::hasPendingPrefillWork(Request* request) {
+    if (request->Is<fsm::Prefilling>()) {
+        return request->UnScheduledPrefillSize() > 0;
+    }
+    if (!(request->Is<fsm::Submitted>() || request->Is<fsm::PrefetchDone>())) {
+        return false;
+    }
+
+    PrefixMatchEstimate match_estimate =
+        hybrid_prefix_cache_ ? hybrid_prefix_cache_->EstimateMatchedPages(request->GetFullPagedTokens(true))
+                             : kv_prefix_cache_.EstimateMatchedPages(request->GetFullPagedTokens(true));
+    const std::int32_t device_matched = match_estimate.device_pages;
+    const std::int32_t host_matched = match_estimate.host_pages;
+    const std::int32_t matched_pages =
+        config_.disable_l2_cache ? device_matched : std::max(device_matched, host_matched);
+    const std::int32_t prefix_tokens = matched_pages * config_.page_size;
+    return request->PrefillSize() > prefix_tokens;
+}
+
+ForwardWorkloadSummary Scheduler::peekNextForwardWorkload(std::vector<Request*> candidates) {
+    SortForwardCandidates(candidates, config_.enable_mixed_prefill_decode);
+
+    ForwardWorkloadSummary summary;
+    for (Request* request : candidates) {
+        if ((request->Is<fsm::PrefillDone>() || request->Is<fsm::Decoding>() || request->Is<fsm::Retracted>()) &&
+            config_.role != Role::kP) {
+            summary.has_decode = true;
+        }
+        if ((request->Is<fsm::Prefilling>() && config_.role != Role::kD) || request->Is<fsm::Submitted>() ||
+            request->Is<fsm::PrefetchDone>()) {
+            if (hasPendingPrefillWork(request)) {
+                summary.has_prefill = true;
+            }
+        }
+    }
+    return summary;
+}
+
 std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFirstChunk(
     Request* request, std::int32_t remaining, std::int32_t decode_input_tokens, bool disable_l2_cache,
     std::map<std::string, std::int32_t>& simulated_free) {

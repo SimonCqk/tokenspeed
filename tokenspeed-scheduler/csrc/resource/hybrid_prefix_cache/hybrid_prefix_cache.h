@@ -54,6 +54,12 @@ public:
     MatchResult Match(const token_vec_t& token_ids, MatchIntent intent = MatchIntent::PrefixReuse);
     MatchResult Match(const std::vector<std::span<const std::int32_t>>& token_pages,
                       MatchIntent intent = MatchIntent::PrefixReuse);
+    // Read-only estimate for scheduler admission. Applies hybrid adjunct
+    // depth rules without committing cache state or mutating the radix tree.
+    PrefixMatchEstimate EstimateMatchedPages(const token_vec_t& token_ids,
+                                             MatchIntent intent = MatchIntent::PrefixReuse) const;
+    PrefixMatchEstimate EstimateMatchedPages(const std::vector<std::span<const std::int32_t>>& token_pages,
+                                             MatchIntent intent = MatchIntent::PrefixReuse) const;
 
     bool EnsureMambaCapacityByEvict(std::int32_t num_slots, TreeNode* protected_node = nullptr);
     void InsertMamba(TreeNode* terminal_node, std::unique_ptr<MambaSlot> slot);

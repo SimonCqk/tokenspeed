@@ -332,6 +332,12 @@ class TestPrefillFirst:
         advance_forward(s, "r0", tokens=[99])
 
         submit(s, "r1", list(range(32)))
+        summary = s.peek_next_forward_workload()
+        assert summary.has_decode
+        assert summary.has_prefill
+        summary = s.peek_next_forward_workload()
+        assert summary.has_decode
+        assert summary.has_prefill
         assert s.waiting_size() == 1
 
         plan = s.next_execution_plan(mixed_prefill_token_budget=4)
@@ -359,6 +365,10 @@ class TestPrefillFirst:
         assert first_op.request_ids == ["r1", "r0"]
         assert first_op.input_lengths == [16, 1]
         advance_forward(s, "r0", tokens=[100])
+
+        summary = s.peek_next_forward_workload()
+        assert summary.has_decode
+        assert summary.has_prefill
 
         plan = s.next_execution_plan(mixed_prefill_token_budget=15)
         op = plan.forward[0]

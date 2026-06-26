@@ -24,12 +24,12 @@ from __future__ import annotations
 def mixed_prefill_fair_share_quantum(
     chunked_prefill_size: int,
     block_size: int,
-    num_budget_shares: int,
+    active_prefill_ranks: int,
 ) -> int:
     """Return the per-rank prefill token budget for a DP mixed forward step.
 
     Under global decode pressure, the DP group should not admit an unbounded
-    prefill chunk on every prefill rank. Instead, DP ranks share one
+    prefill chunk on every prefill rank. Instead, active prefill ranks share one
     normal prefill chunk, so aggregate mixed-prefill work stays comparable to a
     non-mixed prefill step while prefill continues to progress.
     """
@@ -42,7 +42,7 @@ def mixed_prefill_fair_share_quantum(
     if chunked_prefill_size <= block_size:
         return chunked_prefill_size
 
-    num_budget_shares = max(1, int(num_budget_shares))
-    raw_quantum = max(block_size, chunked_prefill_size // num_budget_shares)
+    active_prefill_ranks = max(1, int(active_prefill_ranks))
+    raw_quantum = max(block_size, chunked_prefill_size // active_prefill_ranks)
     aligned_quantum = (raw_quantum // block_size) * block_size
     return max(block_size, min(chunked_prefill_size, aligned_quantum))

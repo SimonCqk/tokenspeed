@@ -217,6 +217,10 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
         .def(nb::init<>())
         .def_rw("required_groups", &tokenspeed::PrefixCacheAdjunctSpec::required_groups);
 
+    nb::class_<tokenspeed::ForwardWorkloadSummary>(m, "ForwardWorkloadSummary")
+        .def_ro("has_decode", &tokenspeed::ForwardWorkloadSummary::has_decode)
+        .def_ro("has_prefill", &tokenspeed::ForwardWorkloadSummary::has_prefill);
+
     scheduler_config.def(nb::init<>())
         .def_rw("page_size", &tokenspeed::SchedulerConfig::page_size)
         .def_rw("max_scheduled_tokens", &tokenspeed::SchedulerConfig::max_scheduled_tokens)
@@ -408,6 +412,7 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
         .def("submit_requests",
              nb::overload_cast<const std::vector<tokenspeed::RequestSpec>&>(&tokenspeed::Scheduler::SubmitRequests),
              nb::arg("request_specs"))
+        .def("peek_next_forward_workload", &tokenspeed::Scheduler::PeekNextForwardWorkload)
         .def("next_execution_plan", &tokenspeed::Scheduler::NextExecutionPlan,
              nb::arg("mixed_prefill_token_budget") = -1)
         .def("advance", &tokenspeed::Scheduler::Advance, nb::arg("event"))

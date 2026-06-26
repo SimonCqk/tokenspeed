@@ -243,13 +243,16 @@ class EventLoop:
         self.dp_rank = dp_rank
         self.dp_size = mapping.attn.dp_size
         self.has_dp = mapping.has_attn_dp
-        self._last_dp_forward_metadata: DpForwardMetadata | None = None
         if self.has_dp:
             self.world_cpu_group = pg_manager.get_process_group(
                 "gloo", mapping.world_group
             )
             self._dp_local_info = torch.zeros(1, 3, dtype=torch.int32)
             self._dp_global_info = torch.zeros(mapping.world_size, 3, dtype=torch.int32)
+            self._dp_pack_local_info = torch.zeros(1, 2, dtype=torch.int32)
+            self._dp_pack_global_info = torch.zeros(
+                mapping.world_size, 2, dtype=torch.int32
+            )
         if not server_args.enable_kvstore:
             logger.warning(
                 "KVStore L2 cache will not be used during normal execution, but it will still be used when retraction happens."
@@ -1184,39 +1187,21 @@ class EventLoop:
             )
             for mode in global_forward_mode
         )
-        metadata = DpForwardMetadata(
+        return DpForwardMetadata(
             global_num_tokens=global_num_tokens,
             global_batch_size=global_batch_size,
             global_forward_mode=global_forward_mode,
             all_decode_or_idle=all_decode_or_idle,
             need_idle_forward=need_idle_forward,
         )
-        self._last_dp_forward_metadata = metadata
-        return metadata
-
-    def _last_dp_step_had_decode_pressure(self) -> bool:
-        metadata = self._last_dp_forward_metadata
-        if metadata is None:
-            return False
-
-        decode_pressure_modes = {
-            int(ForwardMode.DECODE),
-            int(ForwardMode.MIXED),
-            int(ForwardMode.TARGET_VERIFY),
-        }
-        return any(
-            num_tokens > 0 and mode in decode_pressure_modes
-            for num_tokens, mode in zip(
-                metadata.global_num_tokens, metadata.global_forward_mode
-            )
-        )
 
     def _mixed_pack_prefill_token_budget(self) -> int:
         """Return a per-rank prefill token budget for the next plan.
 
-        This is a CPU-only pre-admission guard for DP mixed batch. It relies on
-        the previous step's already-gathered DP metadata instead of introducing
-        another collective before scheduler admission.
+        This is a CPU-only pre-admission guard for DP mixed batch. If any rank
+        has decode work ready, prefill remains schedulable but is limited to a
+        small per-rank quantum for this global step. Cache admission still
+        happens in the C++ scheduler path.
         """
         chunked_prefill_size = self.server_args.chunked_prefill_size
         if (
@@ -1224,14 +1209,30 @@ class EventLoop:
             or not self.server_args.enable_mixed_batch
             or chunked_prefill_size is None
             or chunked_prefill_size <= 0
-            or not self._last_dp_step_had_decode_pressure()
         ):
             return -1
 
-        return mixed_prefill_fair_share_quantum(
-            chunked_prefill_size,
-            self.server_args.block_size,
-            self.dp_size,
+        summary = self.scheduler.peek_next_forward_workload()
+        self._dp_pack_local_info[0, 0] = int(summary.has_decode)
+        self._dp_pack_local_info[0, 1] = int(summary.has_prefill)
+        dist.all_gather_into_tensor(
+            self._dp_pack_global_info,
+            self._dp_pack_local_info,
+            group=self.world_cpu_group,
+        )
+
+        global_has_decode = self._dp_pack_global_info[:, 0].tolist()
+        global_has_prefill = self._dp_pack_global_info[:, 1].tolist()
+        any_decode = any(global_has_decode)
+        active_prefill_ranks = max(1, sum(global_has_prefill))
+        return (
+            mixed_prefill_fair_share_quantum(
+                chunked_prefill_size,
+                self.server_args.block_size,
+                active_prefill_ranks,
+            )
+            if any_decode
+            else -1
         )
 
     def _get_scheduler_stats(self):

@@ -67,6 +67,11 @@ struct SchedulerStats {
     std::int64_t active_requests = 0;
 };
 
+struct ForwardWorkloadSummary {
+    bool has_decode{false};
+    bool has_prefill{false};
+};
+
 // Opt-in spec for the paged-cache prefix-cache adjunct. Unset means paged-cache
 // groups are transport-only (no snapshot chain, no prefix-cache reuse).
 struct PrefixCacheAdjunctSpec {

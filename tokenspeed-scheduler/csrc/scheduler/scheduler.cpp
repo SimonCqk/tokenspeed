@@ -305,6 +305,18 @@ std::vector<WriteBackOperation> Scheduler::newWriteBackOperation(
     return ops;
 }
 
+ForwardWorkloadSummary Scheduler::PeekNextForwardWorkload() {
+    std::vector<Request*> candidates;
+    for (auto& [id, req] : requests_) {
+        if (req->Is<fsm::Draining>() || req->Is<fsm::Prefetching>() || req->Is<fsm::Retracting>() ||
+            req->Is<fsm::WritingBack>() || req->Is<fsm::Finished>()) {
+            continue;
+        }
+        candidates.push_back(req.get());
+    }
+    return peekNextForwardWorkload(std::move(candidates));
+}
+
 ExecutionPlan Scheduler::NextExecutionPlan(std::int32_t mixed_prefill_token_budget) {
     ExecutionPlan plan;
 
