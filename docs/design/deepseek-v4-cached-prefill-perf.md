@@ -70,8 +70,16 @@ without touching prefix-cache state.
 
 ## Related DeepSeek V4 Optimizations
 
-This branch also keeps the DeepSeek V4 cached-prefill improvements that are
-independent of temporary logging:
+The latest `upstream/main` already owns the baseline reuse/cache machinery for
+DeepSeek V4:
+
+- per-step `compressor_slot_cache` reuse for compressor state and compressed KV
+  slot mappings;
+- `decode_compressed_slot_mappings` allocation/reuse and refresh;
+- decode indexer plan and schedule-metadata caches.
+
+This branch keeps only the DeepSeek V4 cached-prefill improvements that are
+not provided by that baseline and are independent of temporary logging:
 
 - CPU metadata sizing for prefill workspaces, avoiding `.item()` GPU syncs in the
   workspace construction path.
@@ -79,6 +87,9 @@ independent of temporary logging:
 - HCA direct slot mapping for pure prefill when the compact row range is known.
 - Paged compressed slot mapping and kernel/API support for compact cache-update
   rows.
+
+The baseline reuse/cache mechanisms above should not be presented as this
+branch's contribution in PR text; this branch only adds fast paths around them.
 
 ## Validation
 

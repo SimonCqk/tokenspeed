@@ -2892,9 +2892,9 @@ class DeepseekV4Compressor(nn.Module):
         if state_cache is None:
             state_cache = pool.get_compressor_state_buffer(layer_index)
         cache_metadata = metadata.cache
-        # State/compressed slot mappings are per-step metadata. Reuse them across
-        # layers when the cache group shape is identical; the indexer-compressor
-        # passes an explicit state_block_table and is excluded from the state memo.
+        # state/compressed slot mappings depend only on (per-step state, ratio), so reuse
+        # them across layers of the same ratio within a step. Attn-compressor path only:
+        # the indexer-compressor passes an explicit state_block_table and is excluded.
         memo = compressor_slot_cache if state_block_table is None else None
         if state_block_table is None:
             state_block_table = cache_metadata.compressor_state_block_tables.get(
@@ -4210,8 +4210,9 @@ class DeepseekV4Model(nn.Module):
             positions,
             out_cache_loc,
         )
-        # Per-step cache slot mappings are identical across layers when their
-        # cache group shape matches; fill lazily and reuse within the step.
+        # Per-(step, ratio) compressor slot mappings are identical across layers of the
+        # same ratio; memoize within the step (filled lazily by the first compressor of
+        # each ratio, reused by the rest).
         compressor_slot_cache: dict = {}
         hc_x_prev = None
         hc_post_prev = None
