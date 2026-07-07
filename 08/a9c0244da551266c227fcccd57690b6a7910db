@@ -1,0 +1,21 @@
+python/tokenspeed/runtime/execution/model_executor.py
+  s_6486291bb56ff3::t_b0e6bec55c43a4 23,1068-1070,1095-1101,1112-1130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "08a9c0244da551266c227fcccd57690b6a7910db",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
