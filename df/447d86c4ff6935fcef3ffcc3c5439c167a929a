@@ -1,0 +1,27 @@
+docs/design/deepseek-v4-l2-kv-offload-perf-logbook.md
+  s_6486291bb56ff3::t_6b6b888464c634 74-262
+python/tokenspeed/runtime/layers/attention/deepseek_v4_ops.py
+  s_6486291bb56ff3::t_f15238b1167c6c 848,911
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_7242a3fa38be85 262,289,291-295,428,430,434,436-450,457-460,475,488
+tokenspeed-scheduler/csrc/resource/allocator/page_allocator.cpp
+  s_6486291bb56ff3::t_4acdb972bed146 45,49-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "df447d86c4ff6935fcef3ffcc3c5439c167a929a",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
