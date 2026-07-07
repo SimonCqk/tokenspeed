@@ -1,0 +1,29 @@
+docs/design/deepseek-v4-l2-kv-offload-perf-logbook.md
+  s_6486291bb56ff3::t_75971178ebc8d5 366-467
+python/tokenspeed/runtime/layers/attention/deepseek_v4_ops.py
+  s_6486291bb56ff3::t_b05274c4e9ce23 46-48,93,919-989
+python/tokenspeed/runtime/models/deepseek_v4.py
+  s_6486291bb56ff3::t_8592a6e4c8767b 102,357,362,382-383,404-407,412-429,435-455,3147-3148,3152,3157,3166,3172-3173,3179-3190,3241-3275,3290-3299,3301-3302,3306-3307,3325-3326,3332-3335
+test/runtime/test_deepseek_v4_attention_ops.py
+  s_6486291bb56ff3::t_46ab5d5733601f 42,56,360-412,761-765,781-785,794,811,835-938
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_155fcca686cf6f 54,494-707
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "a726ac833daae60386c666734af214279bd3dd48",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
