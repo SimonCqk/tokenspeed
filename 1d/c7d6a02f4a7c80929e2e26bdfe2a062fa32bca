@@ -1,0 +1,35 @@
+python/tokenspeed/runtime/configs/paged_cache_spec.py
+  s_6486291bb56ff3::t_8e9e719e7065f3 173-181
+python/tokenspeed/runtime/layers/attention/deepseek_v4_ops.py
+  s_6486291bb56ff3::t_8c3cd6eac9f2fb 46-48,93,919-1030
+python/tokenspeed/runtime/models/deepseek_v4.py
+  s_6486291bb56ff3::t_c73c6b6af5898b 102,155,272-282,287,331-347,3039,3048,3057,3063-3064,3070-3076,3126-3165,3179-3193,3196-3199,3201-3205
+test/runtime/test_deepseek_v4_attention_ops.py
+  s_6486291bb56ff3::t_b2be752bd840af 42,359-404,737-740,743-749,761-770,772-773,776-777,786-790,793,797-799,814,816,840-965
+test/runtime/test_v4_sliding_window_groups_smoke.py
+  s_6486291bb56ff3::t_71cd0144fcbf61 161,170-185,187-193,199-207
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_c3548e2878a3ce 27-30,48-51,62,72-127,322-333,345,569-944,955
+docs/design/deepseek-v4-l2-kv-offload-perf-logbook.md
+  s_6486291bb56ff3::t_dab69d864c8687 1-948
+docs/design/deepseek-v4-l2-kv-offload.md
+  s_6486291bb56ff3::t_e64b80e7b6ca89 1-712
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "1dc7d6a02f4a7c80929e2e26bdfe2a062fa32bca",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
