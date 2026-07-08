@@ -1,0 +1,51 @@
+python/tokenspeed/runtime/layers/attention/deepseek_v4_ops.py
+  s_6486291bb56ff3::t_b05274c4e9ce23 46-48,93,919-1030
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_155fcca686cf6f 55,65-72,503-812
+  s_6486291bb56ff3::t_bd91c9f074a416 44
+python/tokenspeed/runtime/models/deepseek_v4.py
+  s_6486291bb56ff3::t_d5771a60991398 3320-3321
+  s_6486291bb56ff3::t_8592a6e4c8767b 102,155,358-368,373,417-433,3129,3138,3147,3153-3154,3160-3166,3217-3256,3271-3285,3288-3291,3293-3297,3315,3322,3326-3334
+  s_6486291bb56ff3::t_15f8d6979abb87 3325
+  s_6486291bb56ff3::t_2593c2122ab4ca 3323-3324
+docs/design/deepseek-v4-l2-kv-offload-perf-logbook.md
+  s_6486291bb56ff3::t_69f78250870e78 531-537,545-546,554-556,564-568
+  s_6486291bb56ff3::t_ace2fa451ba903 561-563
+  s_6486291bb56ff3::t_7327896fde8b17 519-521
+  s_6486291bb56ff3::t_0df236a5f1773a 528-530,538-540
+  s_6486291bb56ff3::t_437231588eced8 551-553,557-559
+  s_6486291bb56ff3::t_e46d635758f7c1 523-526
+  s_6486291bb56ff3::t_457044d06e7770 542-544,547-549
+  s_6486291bb56ff3::t_75971178ebc8d5 366-518,522,527,541,550,560,572,576,591,602,607,626,639,656,665
+  s_6486291bb56ff3::t_e7500111f823b8 569-571
+  s_6486291bb56ff3::t_81bf8fd6214426 573-575
+  s_6486291bb56ff3::t_c93ad341cdf00c 577-579,588-590
+  s_6486291bb56ff3::t_20f19bd6dec766 592-594,599-601
+  s_6486291bb56ff3::t_0e33654736c6e8 603-606
+  s_6486291bb56ff3::t_1212de997e6212 608-610,623-625
+  s_6486291bb56ff3::t_1d8c55001ab7e8 627-629,636-638
+  s_6486291bb56ff3::t_4a969d794159b4 640-642,653-655
+  s_6486291bb56ff3::t_b30b037ece406a 657-659,662-664
+  s_6486291bb56ff3::t_35df271a09f175 666-668
+  s_6486291bb56ff3::t_65702b7180f3a4 580-587,595-598,611-622,630-635,643-652,660-661,669-673
+test/runtime/test_deepseek_v4_attention_ops.py
+  s_6486291bb56ff3::t_46ab5d5733601f 42,359-404,737-740,743-749,761-770,772-773,776-777,786-790,793,797-799,814,816,840-965
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "024a3d090f8008efa1be889caf07c182da7b2a7c",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
