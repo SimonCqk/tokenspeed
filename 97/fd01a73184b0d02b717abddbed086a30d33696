@@ -1,0 +1,21 @@
+python/tokenspeed/runtime/configs/paged_cache_spec.py
+  s_de186cb3430702::t_ca6588f0516190 104,174-177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "97fd01a73184b0d02b717abddbed086a30d33696",
+  "prompts": {},
+  "sessions": {
+    "s_de186cb3430702": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4097-5ad8-7312-85d9-28ef4263a4d0",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
