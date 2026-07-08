@@ -1,0 +1,161 @@
+python/tokenspeed/runtime/cache/executor/host_executor.py
+  s_6486291bb56ff3::t_195fd85797f907 26-27,37-43,48,53-88,150-171,189,193-218,222-227,240-241,250-252,256,331-363,365-366,368-369,382,385-388,396-397,410-463,465-466,469,471-493,496,502-505,507-508,556-676,678-696
+  s_6486291bb56ff3::t_cda507241691f7 25
+  s_6486291bb56ff3::t_c8b187c54911d6 697-699
+  s_6486291bb56ff3::t_b8fdaa04e86058 840-841,854-857,861-865,873-876,883-884,889,892-893
+test/runtime/test_deepseek_v4_attention_ops.py
+  s_6486291bb56ff3::t_46ab5d5733601f 42,56,336-404,729-965
+  s_6486291bb56ff3::t_75660955d70653 16,31
+python/tokenspeed/runtime/layers/attention/deepseek_v4_ops.py
+  s_6486291bb56ff3::t_f15238b1167c6c 852,915
+  s_6486291bb56ff3::t_b05274c4e9ce23 46-48,93,916,919-1027
+  s_6486291bb56ff3::t_be2a35f7c9670f 917-918
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_9095b4a3b30c8c 4-592,596,602,609
+  s_6486291bb56ff3::t_6c9e7ab8d3824c 1-3
+  s_6486291bb56ff3::t_fdca48ecbd2e2f 593-595
+  s_6486291bb56ff3::t_8f38039e5e98a8 597-601
+  s_6486291bb56ff3::t_68fb4ff58c5f0c 603-608
+  s_6486291bb56ff3::t_51ddaf01002f7c 610-612
+python/tokenspeed/runtime/execution/model_executor.py
+  s_6486291bb56ff3::t_b0e6bec55c43a4 23,1068-1070,1095-1101,1112-1130
+python/tokenspeed/runtime/models/deepseek_v4.py
+  s_6486291bb56ff3::t_2593c2122ab4ca 3323-3324
+  s_6486291bb56ff3::t_8592a6e4c8767b 102,153-155,202,213,216,219,223,225,230,238,240,269,358-433,3129-3166,3217-3256,3271-3297,3315,3322,3326-3334
+  s_6486291bb56ff3::t_15f8d6979abb87 204,245,247,249,252-253,255-258,262-263,265-268,272-357,3000,3002-3005,3114,3116-3117,3125,3195,3215,3257,3269,3306-3314,3316-3319,3325,3335,3348,3351,3372,3501,3524-3537,3552-3553,3563,3586-3587,3589,3619-3622,3650-3654,3669-3686,3704-3716,3729,3737,3767-3770,3787-3789,3804-3806,3825-3828,3837,3839-3854,3893,3992,4004,4131-4149,4158,4175-4176,4179,4185-4186,4225-4226,4267-4280,4284-4285,4339-4351,4353,4358-4385
+  s_6486291bb56ff3::t_d5771a60991398 3320-3321
+  s_6486291bb56ff3::t_74d1ac3b51da6b 201
+  s_6486291bb56ff3::t_2b2138d0807582 203
+  s_6486291bb56ff3::t_9439691979d6f3 205-207,210-212
+  s_6486291bb56ff3::t_af258a890c82ec 214-215
+  s_6486291bb56ff3::t_179c7d278921a9 217-218
+  s_6486291bb56ff3::t_270ace4d1b7f30 220-222
+  s_6486291bb56ff3::t_e6c180e193c36c 224
+  s_6486291bb56ff3::t_eff235d0f6ebae 226-229
+  s_6486291bb56ff3::t_811cc303809f09 231-233,235-237
+  s_6486291bb56ff3::t_4ef6ebc81aa8d9 239
+  s_6486291bb56ff3::t_a75a9066d3ab66 241-244
+  s_6486291bb56ff3::t_aa8964f8abe8a0 246
+  s_6486291bb56ff3::t_cb350518804c3f 248
+  s_6486291bb56ff3::t_1b3aec785f3809 250-251
+  s_6486291bb56ff3::t_131090d0a8bb79 254
+  s_6486291bb56ff3::t_a7341c680ef92c 259-261
+  s_6486291bb56ff3::t_2ee8a622304b64 264
+  s_6486291bb56ff3::t_10aaac0562ce90 270-271
+  s_6486291bb56ff3::t_ca1b7784f6f56f 434-436
+  s_6486291bb56ff3::t_069b42ec8c57e1 2997-2999
+  s_6486291bb56ff3::t_bd218580a02453 3001
+  s_6486291bb56ff3::t_941b28c9192efb 3006-3008
+  s_6486291bb56ff3::t_01307ad2e40fc3 3111-3113
+  s_6486291bb56ff3::t_72e408de878dea 3115
+  s_6486291bb56ff3::t_9254a29e9c6be1 3118-3120,3122-3124
+  s_6486291bb56ff3::t_ea77d0073cfe69 3194
+  s_6486291bb56ff3::t_93d0ef1aad7ad4 3196-3197
+  s_6486291bb56ff3::t_ad31dd5e649b00 3212-3214
+  s_6486291bb56ff3::t_6dfdcecbe9f2ec 3216
+  s_6486291bb56ff3::t_e21d9aaa9e1808 3258-3260,3266-3268
+  s_6486291bb56ff3::t_57810bfef3c0e6 3270
+  s_6486291bb56ff3::t_255d6424a2c6af 3298-3300
+  s_6486291bb56ff3::t_d0c1a1313510aa 4386
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_7794aa73f6d045 49-51
+  s_6486291bb56ff3::t_155fcca686cf6f 62,72-127,587-933,955
+  s_6486291bb56ff3::t_bd91c9f074a416 48
+  s_6486291bb56ff3::t_7242a3fa38be85 338,345,365,367-371,504,506,510,512-526,533-536,551,564
+  s_6486291bb56ff3::t_90732f5f1921f1 584-586
+  s_6486291bb56ff3::t_cbb4aa2740d773 934-936
+python/tokenspeed/runtime/cache/deepseek_v4_cache_host.py
+  s_6486291bb56ff3::t_e23c720f87a02d 1-236
+python/tokenspeed/runtime/cache/executor/memory_executor.py
+  s_6486291bb56ff3::t_e8e71d02fc61b5 25-26,32-34,44,48-50,57-86,166-171,178,180-184,187-189,194,196-199,202-294,299,351-352,389-395,441-472,479-489,500-501,504-507,533-558,572,602-622
+python/tokenspeed/runtime/cache/transfer/__init__.py
+  s_6486291bb56ff3::t_bdf93c44e4db71 25,28,39-40
+python/tokenspeed/runtime/cache/transfer/types.py
+  s_6486291bb56ff3::t_5fd5a19235beef 25,29-30,64-70
+python/tokenspeed/runtime/engine/event_loop.py
+  s_6486291bb56ff3::t_57fdedb7129f28 22,39,103-114,122-123,274,304-309,328-332,349-352,366-367,369,391,394,399,404-405,408,420-425,558-573,577,579,604-611,614-615,617-619,632,634-637,879-884,903-911,921-922,925-926,936-950,955-963
+python/tokenspeed/runtime/engine/scheduler_utils.py
+  s_6486291bb56ff3::t_5c8f878936d837 74,109-113
+python/tokenspeed/runtime/layers/attention/kv_cache/deepseek_v4.py
+  s_6486291bb56ff3::t_c207b2210b5324 766,986,992-996,998,1239-1240,1246-1247
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_95ee293141c13d 1-371
+test/runtime/cache/test_transfer_host_executor.py
+  s_6486291bb56ff3::t_4963c50d49a326 8-13,117-164,283-361,433-495
+tokenspeed-kernel/python/tokenspeed_kernel/ops/kvcache/cuda.py
+  s_6486291bb56ff3::t_618219bf4ac5ec 32,44,56
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/flashinfer_kvcacheio_binding.cu
+  s_6486291bb56ff3::t_37f8938515fe4e 23-26,28-33,35-41,43-47,49-54,56-62,64-67,69-74,76-80,82-100,103-106,108-123
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/kvcacheio_transfer.cu
+  s_6486291bb56ff3::t_c76add0b2d3e2b 29,38,47-48,78-80,84-109,113-114,117-119,129-132,136-184,186-190,200-203,208-211,216-222,226-231,235-238,240-241,245-249,251-258,263-272,287-288,290-310,318-327,340-347,351-358,364-365,367-373,375-378,387-392,399-406,408-415,430-440,443-453,456-475,478-483,486-491,494-499,502-508,511-516,519-527,530-540,543-554,558-576,610-665,670-710
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/kvcacheio.py
+  s_6486291bb56ff3::t_6d0659f00b2580 22,47-81,116-340,524-549,643,649
+tokenspeed-kernel/test/test_kvcacheio_direct.py
+  s_6486291bb56ff3::t_2f068d0c6c5457 1-222
+tokenspeed-scheduler/CMakeLists.txt
+  s_6486291bb56ff3::t_a3e23fedee9564 127
+tokenspeed-scheduler/bindings/python_module.cpp
+  s_6486291bb56ff3::t_6f5322d38ff34b 234,358-362,378-379,387,447-452
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_6486291bb56ff3::t_f04f3f966adfdf 79-90,101-111,213-219,446-447,453-455,457-463,491,493-495,504-509,512-515,526-531,534-537,593,595-596,604,611-613,650-653
+tokenspeed-scheduler/csrc/fsm/forward_events.h
+  s_6486291bb56ff3::t_07674c6ab1a884 70-72,82-83,95-97,109-110,155-156,164,173-175,185,274-275,284
+tokenspeed-scheduler/csrc/fsm/forward_states.h
+  s_6486291bb56ff3::t_06a761b43c1814 290-293,297-300,308,310-314,320,322-323,331-332,335-337,344,346,348,353,355,365-370,375-376,388-390,404
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.cpp
+  s_6486291bb56ff3::t_e5118fa880a399 384-422
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.h
+  s_6486291bb56ff3::t_96054829dbe78e 33-34,93,158-164
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
+  s_6486291bb56ff3::t_a93f3caa3ff1c5 37,41,122,130,470-479,515-520,571-578,613,620,623,632-635,650-652,656-660,686-708,819-831,843,847,855,883-884,899,938,940-941,946,950,953-987,990-992,998,1004,1008-1009,1012-1047,1051-1055,1057-1062,1064,1066-1081,1086-1088,1090-1093,1095-1096,1098-1099,1102-1112,1114-1125,1128-1134,1136-1138,1174-1197,1306-1421,1762-1815,1842,1844,1858-1883,1887,1893,1897,1901,1905,1909,1914,1922-1933,1940-1945
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.h
+  s_6486291bb56ff3::t_91bfede68cbcaf 70-71,76,78-80,86,95-97,125-134,160,164,213,218,250,266
+tokenspeed-scheduler/csrc/resource/kv_prefix_cache/kv_prefix_cache.cpp
+  s_6486291bb56ff3::t_07f3a8ec4be8d5 194,389-424
+tokenspeed-scheduler/csrc/resource/kv_prefix_cache/kv_prefix_cache.h
+  s_6486291bb56ff3::t_05f3756ee36ebd 71-72
+tokenspeed-scheduler/csrc/resource/radix_tree/radix_tree.cpp
+  s_6486291bb56ff3::t_2e617108cce954 81-83,122-123,146,181-182,196
+tokenspeed-scheduler/csrc/resource/radix_tree/tree_node.cpp
+  s_6486291bb56ff3::t_1a24db6337bc60 102-103,115-137
+tokenspeed-scheduler/csrc/resource/radix_tree/tree_node.h
+  s_6486291bb56ff3::t_890a7123f10f41 125-127,147-152,169-170
+tokenspeed-scheduler/csrc/resource/types.h
+  s_6486291bb56ff3::t_4b424a6ee5e33f 55-57,91-93,117
+tokenspeed-scheduler/csrc/scheduler/operations/cache.h
+  s_6486291bb56ff3::t_c7bf8729ad8495 93-102,105-106,115-120,131-132,162,170-171,178-180,191-192,221
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_6486291bb56ff3::t_a4e111ebe9da7f 106,110-114,116-117,123-128,165-166,168-170,172,175-181,206-207,289-294,347-349,351,354-361,381,423,439-441,450-451,461,463-465,602,635-637,702-703,706-707,709-710,728-729,731-732,734-735
+tokenspeed-scheduler/csrc/scheduler/outside_event_handler.cpp
+  s_6486291bb56ff3::t_b844e4c4908ad7 160-162,165-167
+tokenspeed-scheduler/csrc/scheduler/request.h
+  s_6486291bb56ff3::t_8aa842ae68b414 274-303
+tokenspeed-scheduler/csrc/scheduler/scheduler.cpp
+  s_6486291bb56ff3::t_4699531d6245f9 116-134,249-252,291-311,345,347,351,354-355
+tokenspeed-scheduler/csrc/scheduler/scheduler.h
+  s_6486291bb56ff3::t_89bd5ade15627e 68,76-78
+tokenspeed-scheduler/csrc/scheduler/types.h
+  s_6486291bb56ff3::t_18fbbe2126c19e 24,88
+tokenspeed-scheduler/tests/cpp/test_cache_operation_kinds.cpp
+  s_6486291bb56ff3::t_8784f7009b408a 28-53,73-91
+tokenspeed-scheduler/tests/cpp/test_paged_cache_l2_offload.cpp
+  s_6486291bb56ff3::t_7dad59ae925726 1-534
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "9be4197d28afbf22fe1bda5387824299585837d1",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
