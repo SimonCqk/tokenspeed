@@ -1,0 +1,93 @@
+python/tokenspeed/runtime/cache/deepseek_v4_cache_host.py
+  s_6486291bb56ff3::t_7628a09dbf5201 1-236
+python/tokenspeed/runtime/cache/executor/host_executor.py
+  s_6486291bb56ff3::t_40bdcda573e5e1 34-40,127,131-156,160-165,178-179,188-190,194,269-301,303-304,306-307,320,342-350,354,358,412-433,435,576-577,590-593,597-601,609-612,619-620,625,628-629
+python/tokenspeed/runtime/cache/executor/memory_executor.py
+  s_6486291bb56ff3::t_6581129a5ab1b5 30-32,42,46-48,134-139,146,148-152,155-157,162,164-167,170-262,267,319-320,357-363,427-428,431-434,460-471,485,515-522
+python/tokenspeed/runtime/cache/transfer/__init__.py
+  s_6486291bb56ff3::t_75c5448021580d 25,28,39-40
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_a77d32db706b02 1-280
+python/tokenspeed/runtime/cache/transfer/types.py
+  s_6486291bb56ff3::t_dacc8e48295d7d 25,29-30,64-70
+python/tokenspeed/runtime/engine/event_loop.py
+  s_6486291bb56ff3::t_4aecbe34277d62 38,55,102-109,319,337-340,354,356-361,382,392-393,407,854-855,858-859,869-883,888-896
+python/tokenspeed/runtime/engine/scheduler_utils.py
+  s_6486291bb56ff3::t_3145a7851343b2 74,109-113,174-190
+python/tokenspeed/runtime/layers/attention/kv_cache/deepseek_v4.py
+  s_6486291bb56ff3::t_ae06e038240405 766,986,992-996,998,1239-1240,1246-1247
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_bb3fc0f1000f57 1-356
+test/runtime/cache/test_transfer_host_executor.py
+  s_6486291bb56ff3::t_9fc64bfc291b89 8-13,117-139,258-297,369-431
+test/runtime/test_v4_prefix_cache_metadata.py
+  s_6486291bb56ff3::t_0ebdb858e4d47e 179-211
+test/runtime/test_v4_sliding_window_groups_smoke.py
+  s_6486291bb56ff3::t_163d7904f83f48 382
+tokenspeed-scheduler/CMakeLists.txt
+  s_6486291bb56ff3::t_9d8695660b5519 127
+tokenspeed-scheduler/bindings/python_module.cpp
+  s_6486291bb56ff3::t_e3a1f925da1d54 234,358-362,378-379,387,447-452
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_6486291bb56ff3::t_eedd8e5aa8e206 79-90,101-111,213-219,446-447,453-455,457-463,491,493-495,504-509,512-515,526-531,534-537,593,595-596,604,611-613,650-653
+tokenspeed-scheduler/csrc/fsm/forward_events.h
+  s_6486291bb56ff3::t_2d849dda6bdddc 70-72,82-83,95-97,109-110,155-156,164,173-175,185,274-275,284
+tokenspeed-scheduler/csrc/fsm/forward_states.h
+  s_6486291bb56ff3::t_6cb6e044d859c9 290-293,297-300,308,310-314,320,322-323,331-332,335-337,344,346,348,353,355,365-370,375-376,388-390,404
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.cpp
+  s_6486291bb56ff3::t_c7ff63fa1dcff8 384-422
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.h
+  s_6486291bb56ff3::t_4ccb7e00bc554f 33-34,93,158-164
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
+  s_6486291bb56ff3::t_c1f28e1c9b3229 37,41,122,130,470-479,515-520,571-578,613,620,623,632-635,650-652,656-660,686-708,819-831,843,847,855,883-884,899,938,940-941,946,950,953-987,990-992,998,1004,1008-1009,1012-1047,1051-1055,1057-1062,1064,1066-1081,1086-1088,1090-1093,1095-1096,1098-1099,1102-1112,1114-1125,1128-1134,1136-1138,1174-1197,1306-1421,1762-1815,1842,1844,1858-1883,1887,1893,1897,1901,1905,1909,1914,1922-1933,1940-1945
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.h
+  s_6486291bb56ff3::t_0fa1e8c01c9daf 70-71,76,78-80,86,95-97,125-134,160,164,213,218,250,266
+tokenspeed-scheduler/csrc/resource/kv_prefix_cache/kv_prefix_cache.cpp
+  s_6486291bb56ff3::t_5c18bda935a8d1 194,389-424
+tokenspeed-scheduler/csrc/resource/kv_prefix_cache/kv_prefix_cache.h
+  s_6486291bb56ff3::t_9ec5705c8984e4 71-72
+tokenspeed-scheduler/csrc/resource/radix_tree/radix_tree.cpp
+  s_6486291bb56ff3::t_b798c813bf764c 81-83,122-123,146,181-182,196
+tokenspeed-scheduler/csrc/resource/radix_tree/tree_node.cpp
+  s_6486291bb56ff3::t_d524d1572b29de 102-103,115-137
+tokenspeed-scheduler/csrc/resource/radix_tree/tree_node.h
+  s_6486291bb56ff3::t_01184ba8996615 125-127,147-152,169-170
+tokenspeed-scheduler/csrc/resource/types.h
+  s_6486291bb56ff3::t_516b42b7b57d19 55-57,91-93,117
+tokenspeed-scheduler/csrc/scheduler/operations/cache.h
+  s_6486291bb56ff3::t_9cc145aeeaedbe 93-102,105-106,115-120,131-132,162,170-171,178-180,191-192,221
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_6486291bb56ff3::t_fe8ba87f052885 106,110-114,116-117,123-128,165-166,168-170,172,175-181,206-207,289-294,347-349,351,354-361,381,423,439-441,450-451,461,463-465,602,635-637,702-703,706-707,709-710,728-729,731-732,734-735
+tokenspeed-scheduler/csrc/scheduler/outside_event_handler.cpp
+  s_6486291bb56ff3::t_f09bc47e9ae568 160-162,165-167
+tokenspeed-scheduler/csrc/scheduler/request.h
+  s_6486291bb56ff3::t_44199e8eee58e0 274-303
+tokenspeed-scheduler/csrc/scheduler/scheduler.cpp
+  s_6486291bb56ff3::t_b8d850de3c1831 116-134,249-252,291-311,345,347,351,354-355
+tokenspeed-scheduler/csrc/scheduler/scheduler.h
+  s_6486291bb56ff3::t_2e0e96d4714f4b 68,76-78
+tokenspeed-scheduler/csrc/scheduler/types.h
+  s_6486291bb56ff3::t_a13d4106c658dd 24,88
+tokenspeed-scheduler/tests/cpp/test_cache_operation_kinds.cpp
+  s_6486291bb56ff3::t_e5b33219c05d63 28-53,73-91
+tokenspeed-scheduler/tests/cpp/test_paged_cache_l2_offload.cpp
+  s_6486291bb56ff3::t_38667d02629658 1-534
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "8bf4a63ff2dd94249eae867f87a63ae345058c0a",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
