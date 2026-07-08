@@ -1,0 +1,29 @@
+python/tokenspeed/runtime/layers/attention/deepseek_v4_ops.py
+  s_6486291bb56ff3::t_10b8f4fbdf290d 848,911
+python/tokenspeed/runtime/models/deepseek_v4.py
+  s_6486291bb56ff3::t_b00b089bdee447 270-323,3010-3045,3075,3077-3111,3114-3130,3137
+test/runtime/test_deepseek_v4_attention_ops.py
+  s_6486291bb56ff3::t_dacc32dc7eb44b 16,31,55,335-357,682-770
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_cfb1c5c7702299 262,289,291-295,428,430,434,436-450,457-460,475,488
+tokenspeed-scheduler/csrc/resource/allocator/page_allocator.cpp
+  s_6486291bb56ff3::t_e91db5d3d91b88 45,49-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "628f98b66a0b1c342b1a3ac8d8bcba6eb32019fd",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
