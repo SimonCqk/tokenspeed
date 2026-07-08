@@ -1,0 +1,35 @@
+python/tokenspeed/runtime/cache/executor/host_executor.py
+  s_6486291bb56ff3::t_1ef39d7c333d49 371-390,395-407,410,413-414,418-421,498-530,535-547,550-551,554-555,558-560,566-582
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_578434be4505a4 33-41,66-101,110,257-258,261-303,305,307-330,337-368
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_c9af9f79b33cc6 259-272,276-277,289-290,294-298,306-307,311-312,327
+test/runtime/cache/test_transfer_host_executor.py
+  s_6486291bb56ff3::t_ae113015b78596 140-164,304-342
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/flashinfer_kvcacheio_binding.cu
+  s_6486291bb56ff3::t_40695501f0d52d 23-26,28-33,35-41,43-47,49-54,56-62,64-67,69-74,76-80,82-93,96-99,101-114
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/kvcacheio_transfer.cu
+  s_6486291bb56ff3::t_476057464e8dd0 83-106,826-879
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/kvcacheio.py
+  s_6486291bb56ff3::t_7c65923fd3ea6a 46-57,92-183,367-392
+tokenspeed-kernel/test/test_kvcacheio_direct.py
+  s_6486291bb56ff3::t_46898f7a3aa760 1-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "744eb31792faa76ab2e2008c15df07c4663ba033",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
