@@ -1,0 +1,23 @@
+python/tokenspeed/runtime/configs/paged_cache_spec.py
+  s_de186cb3430702::t_ca6588f0516190 104,174-177
+test/runtime/test_v4_sliding_window_groups_smoke.py
+  s_de186cb3430702::t_1c4e0bb0fb2056 162,168,171-186,188-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "d2e72765e656b219154e5bd15ace75eac3c1eed9",
+  "prompts": {},
+  "sessions": {
+    "s_de186cb3430702": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4097-5ad8-7312-85d9-28ef4263a4d0",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
