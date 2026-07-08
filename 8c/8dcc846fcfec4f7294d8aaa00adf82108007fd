@@ -1,0 +1,25 @@
+python/tokenspeed/runtime/cache/executor/host_executor.py
+  s_6486291bb56ff3::t_5427abafb083c0 26,53-88,387-388,396-397,465-466,472-485,490,504-505,507-508,674-675,680-692,696
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_5e6935f137918d 4-5,34-70,394-396,414-426,435-437,451-463,540-542,555-580,592
+python/tokenspeed/runtime/models/deepseek_v4.py
+  s_6486291bb56ff3::t_3c847bee1e736a 270-355,2973-2976,3164,3203,3231-3247,4049-4053,4058,4060,4137,4179,4182-4192,4196,4251,4254-4262,4286-4297
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "8c8dcc846fcfec4f7294d8aaa00adf82108007fd",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
