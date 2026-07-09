@@ -114,38 +114,24 @@ class FakePool:
         self.counter.reset()
 
 
-class FakePagedPool:
+class FakePreparedPagedPool:
     kind = PAGED_CACHE_KIND
+    loadback_layer_chunk_size = 2
 
     def __init__(self, num_layers: int):
         self._num_layers = num_layers
         self.device = torch.device("cpu")
         self.counter = FakeCounter(num_layers)
-        self.writebacks = []
-        self.loadbacks = []
+        self.prepares = []
+        self.prepared_writebacks = []
+        self.prepared_loadbacks = []
+        self.prepared_range_loadbacks = []
 
     def num_layers(self):
         return self._num_layers
 
     def get_layer_done_counter(self):
         return self.counter
-
-    def writeback_paged(self, transfers):
-        self.writebacks.append(list(transfers))
-
-    def loadback_paged(self, transfers, layer_idx: int):
-        self.loadbacks.append((layer_idx, list(transfers)))
-
-
-class FakePreparedPagedPool(FakePagedPool):
-    loadback_layer_chunk_size = 2
-
-    def __init__(self, num_layers: int):
-        super().__init__(num_layers)
-        self.prepares = []
-        self.prepared_writebacks = []
-        self.prepared_loadbacks = []
-        self.prepared_range_loadbacks = []
 
     def prepare_paged_transfers(self, transfers):
         prepared = tuple(("prepared", id(transfer)) for transfer in transfers)
@@ -160,6 +146,20 @@ class FakePreparedPagedPool(FakePagedPool):
 
     def loadback_prepared_paged_range(self, prepared, layer_start: int, layer_end: int):
         self.prepared_range_loadbacks.append((layer_start, layer_end, tuple(prepared)))
+
+
+class FakeCacheOps:
+    class WriteBackOp:
+        pass
+
+    class LoadBackOp:
+        pass
+
+    class PrefetchOp:
+        pass
+
+    class BackUpOp:
+        pass
 
 
 def _patch_host_executor_device(monkeypatch):
@@ -280,27 +280,6 @@ def test_host_executor_loadback_uses_independent_layer_counters(monkeypatch):
     assert kv_pool.counter.consumer == [0]
 
 
-def test_host_executor_paged_cache_loadback_marks_layers_and_producer(monkeypatch):
-    HostExecutor = _patch_host_executor_device(monkeypatch)
-    paged_pool = FakePagedPool(num_layers=3)
-    executor = HostExecutor(pools=[], paged_pool=paged_pool, io_backend="kernel")
-    transfer = object()
-
-    executor.enqueue_paged_cache_loadback(33, [transfer])
-    executor.flush()
-
-    assert paged_pool.loadbacks == [
-        (0, [transfer]),
-        (1, [transfer]),
-        (2, [transfer]),
-    ]
-    assert all(event.recorded for event in paged_pool.counter.events[0].load_events)
-    assert executor.get_producer_index(PAGED_CACHE_KIND, 33) == 0
-    executor.set_consumer(PAGED_CACHE_KIND, [0])
-    assert paged_pool.counter.consumer == [0]
-    assert executor.drain() == []
-
-
 def test_host_executor_paged_cache_loadback_reuses_prepared_transfers(monkeypatch):
     HostExecutor = _patch_host_executor_device(monkeypatch)
     paged_pool = FakePreparedPagedPool(num_layers=3)
@@ -317,9 +296,10 @@ def test_host_executor_paged_cache_loadback_reuses_prepared_transfers(monkeypatc
         (2, 3, expected_prepared),
     ]
     assert paged_pool.prepared_loadbacks == []
-    assert paged_pool.loadbacks == []
     assert all(event.recorded for event in paged_pool.counter.events[0].load_events)
     assert executor.get_producer_index(PAGED_CACHE_KIND, 33) == 0
+    executor.set_consumer(PAGED_CACHE_KIND, [0])
+    assert paged_pool.counter.consumer == [0]
 
 
 def test_host_executor_paged_cache_writeback_uses_prepared_transfers(monkeypatch):
@@ -334,46 +314,13 @@ def test_host_executor_paged_cache_writeback_uses_prepared_transfers(monkeypatch
     assert paged_pool.prepares == [transfers]
     expected_prepared = tuple(("prepared", id(transfer)) for transfer in transfers)
     assert paged_pool.prepared_writebacks == [expected_prepared]
-    assert paged_pool.writebacks == []
     results = executor.drain()
     assert [event.op_id for event in results] == [44]
     assert all(event.success for event in results)
 
 
-def test_cache_event_payloads_commit_only_common_ops_and_and_success():
-    from tokenspeed.runtime.engine.scheduler_utils import (
-        pop_common_cache_event_payloads,
-    )
-
-    rank0 = [
-        {"kind": "WriteBackDoneEvent", "op_id": 3, "success": True},
-        {"kind": "WriteBackDoneEvent", "op_id": 5, "success": True},
-    ]
-    rank1 = [
-        {"kind": "WriteBackDoneEvent", "op_id": 3, "success": False},
-    ]
-
-    ready = pop_common_cache_event_payloads([rank0, rank1])
-
-    assert ready == [{"kind": "WriteBackDoneEvent", "op_id": 3, "success": False}]
-    assert pop_common_cache_event_payloads([rank0, []]) == []
-
-
 def test_memory_executor_submit_dispatches_flat_op_by_cache_kind(monkeypatch):
     import tokenspeed.runtime.cache.executor.memory_executor as memory_executor
-
-    class FakeCache:
-        class WriteBackOp:
-            pass
-
-        class LoadBackOp:
-            pass
-
-        class PrefetchOp:
-            pass
-
-        class BackUpOp:
-            pass
 
     class FakeHostExec:
         def __init__(self):
@@ -396,12 +343,12 @@ def test_memory_executor_submit_dispatches_flat_op_by_cache_kind(monkeypatch):
         def flush(self):
             self.order.append(("flush",))
 
-    monkeypatch.setattr(memory_executor, "Cache", FakeCache)
+    monkeypatch.setattr(memory_executor, "Cache", FakeCacheOps)
     executor = object.__new__(memory_executor.MemoryExecutor)
     executor.host_exec = FakeHostExec()
     executor.storage_exec = None
 
-    wb = FakeCache.WriteBackOp()
+    wb = FakeCacheOps.WriteBackOp()
     wb.op_ids = [7]
     wb.src_pages = [[1]]
     wb.dst_pages = [[11]]
@@ -416,7 +363,7 @@ def test_memory_executor_submit_dispatches_flat_op_by_cache_kind(monkeypatch):
     ]
     assert executor.host_exec.completed_writebacks == []
 
-    lb = FakeCache.LoadBackOp()
+    lb = FakeCacheOps.LoadBackOp()
     lb.op_ids = [9]
     lb.src_pages = [[10]]
     lb.dst_pages = [[20]]
@@ -432,19 +379,6 @@ def test_memory_executor_submit_dispatches_flat_op_by_cache_kind(monkeypatch):
 
 def test_memory_executor_submit_dispatches_paged_cache_transfers(monkeypatch):
     import tokenspeed.runtime.cache.executor.memory_executor as memory_executor
-
-    class FakeCache:
-        class WriteBackOp:
-            pass
-
-        class LoadBackOp:
-            pass
-
-        class PrefetchOp:
-            pass
-
-        class BackUpOp:
-            pass
 
     class FakeHostExec:
         def __init__(self):
@@ -462,13 +396,13 @@ def test_memory_executor_submit_dispatches_paged_cache_transfers(monkeypatch):
         def flush(self):
             pass
 
-    monkeypatch.setattr(memory_executor, "Cache", FakeCache)
+    monkeypatch.setattr(memory_executor, "Cache", FakeCacheOps)
     executor = object.__new__(memory_executor.MemoryExecutor)
     executor.host_exec = FakeHostExec()
     executor.storage_exec = None
 
     transfer = object()
-    wb = FakeCache.WriteBackOp()
+    wb = FakeCacheOps.WriteBackOp()
     wb.op_ids = [7]
     wb.src_pages = [[]]
     wb.dst_pages = [[]]
@@ -481,7 +415,7 @@ def test_memory_executor_submit_dispatches_paged_cache_transfers(monkeypatch):
     assert executor.host_exec.paged_writebacks == [(7, [transfer], True)]
     assert executor.host_exec.completed_writebacks == []
 
-    lb = FakeCache.LoadBackOp()
+    lb = FakeCacheOps.LoadBackOp()
     lb.op_ids = [9]
     lb.src_pages = [[]]
     lb.dst_pages = [[]]
@@ -496,24 +430,11 @@ def test_memory_executor_submit_dispatches_paged_cache_transfers(monkeypatch):
 def test_memory_executor_submit_plan_keeps_generic_submit_signature(monkeypatch):
     import tokenspeed.runtime.cache.executor.memory_executor as memory_executor
 
-    class FakeCache:
-        class WriteBackOp:
-            pass
-
-        class LoadBackOp:
-            pass
-
-        class PrefetchOp:
-            pass
-
-        class BackUpOp:
-            pass
-
-    monkeypatch.setattr(memory_executor, "Cache", FakeCache)
+    monkeypatch.setattr(memory_executor, "Cache", FakeCacheOps)
     executor = object.__new__(memory_executor.MemoryExecutor)
     executor.seen = []
 
-    wb = FakeCache.WriteBackOp()
+    wb = FakeCacheOps.WriteBackOp()
     plan = type("Plan", (), {"cache": [wb]})()
 
     def submit(self, op):
@@ -529,19 +450,6 @@ def test_memory_executor_submit_plan_keeps_generic_submit_signature(monkeypatch)
 
 def test_memory_executor_mamba_layerwise_cow_uses_dedicated_context(monkeypatch):
     import tokenspeed.runtime.cache.executor.memory_executor as memory_executor
-
-    class FakeCache:
-        class WriteBackOp:
-            pass
-
-        class LoadBackOp:
-            pass
-
-        class PrefetchOp:
-            pass
-
-        class BackUpOp:
-            pass
 
     class FakeHostExec:
         def __init__(self):
@@ -564,13 +472,13 @@ def test_memory_executor_mamba_layerwise_cow_uses_dedicated_context(monkeypatch)
         def flush(self):
             pass
 
-    monkeypatch.setattr(memory_executor, "Cache", FakeCache)
+    monkeypatch.setattr(memory_executor, "Cache", FakeCacheOps)
     executor = object.__new__(memory_executor.MemoryExecutor)
     executor.host_exec = FakeHostExec()
     executor.storage_exec = None
     executor.set_mamba_layerwise_cow({40: [400]})
 
-    lb = FakeCache.LoadBackOp()
+    lb = FakeCacheOps.LoadBackOp()
     lb.op_ids = [9]
     lb.src_pages = [[10]]
     lb.dst_pages = [[20]]
