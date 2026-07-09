@@ -1,0 +1,23 @@
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_155fcca686cf6f 464-465,466-467
+python/tokenspeed/runtime/layers/attention/deepseek_v4_ops.py
+  s_6486291bb56ff3::t_b05274c4e9ce23 910-912
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "47e92e3da133fcec52b4a0de21c87c700e2f7111",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
