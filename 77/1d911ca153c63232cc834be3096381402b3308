@@ -1,0 +1,35 @@
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_c22d704e740654 4
+tokenspeed-scheduler/csrc/core/token_container.h
+  s_6486291bb56ff3::t_cb07a5bf703bd6 39
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_6486291bb56ff3::t_697544fec1c79a 61-108,230-234,236,396-399,405,407
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
+  s_6486291bb56ff3::t_542bef5915e685 1227-1231
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.h
+  s_6486291bb56ff3::t_73da9d09da0e17 103
+tokenspeed-scheduler/csrc/resource/page_container.h
+  s_6486291bb56ff3::t_7475578566256b 35
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_6486291bb56ff3::t_ea1340c432800f 94-110,159-160,345-346,373-378,654
+tokenspeed-scheduler/tests/cpp/test_paged_cache_replay.cpp
+  s_6486291bb56ff3::t_ee254c87ee7123 533,552-558
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "771d911ca153c63232cc834be3096381402b3308",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
