@@ -60,6 +60,54 @@ std::vector<tokenspeed::TransferPair> BuildWriteBackPairs(const std::vector<toke
     return pages_to_transfer;
 }
 
+template <tokenspeed::ResourceType RType>
+tokenspeed::TreeNode* LastNodeWithResourceOrRoot(tokenspeed::TreeNode* node) {
+    for (tokenspeed::TreeNode* candidate = node; candidate != nullptr; candidate = candidate->Parent()) {
+        if (candidate->IsRoot()) return candidate;
+        if constexpr (RType == tokenspeed::ResourceType::Device) {
+            if (candidate->OnDevice()) {
+                return candidate;
+            }
+        } else {
+            if (candidate->OnHost()) {
+                return candidate;
+            }
+        }
+    }
+    return nullptr;
+}
+
+struct KVResourceNodes {
+    tokenspeed::TreeNode* device_node{nullptr};
+    tokenspeed::TreeNode* host_node{nullptr};
+    std::int32_t device_page_size{0};
+    std::int32_t host_page_size{0};
+
+    std::int32_t DeviceDepthInPage() const {
+        return device_node == nullptr ? 0 : device_node->DepthInPage(device_page_size);
+    }
+
+    std::int32_t HostDepthInPage() const { return host_node == nullptr ? 0 : host_node->DepthInPage(host_page_size); }
+
+    std::vector<tokenspeed::TreeNode*> NodesWithoutDevice() const {
+        std::vector<tokenspeed::TreeNode*> result;
+        for (tokenspeed::TreeNode* node : tokenspeed::LeafToRoot(host_node)) {
+            if (node->OnDevice()) break;
+            result.push_back(node);
+        }
+        return result;
+    }
+};
+
+KVResourceNodes GetKVResourceNodes(const tokenspeed::MatchResult& match) {
+    return KVResourceNodes{
+        LastNodeWithResourceOrRoot<tokenspeed::ResourceType::Device>(match.device.last_node),
+        LastNodeWithResourceOrRoot<tokenspeed::ResourceType::Host>(match.host.last_node),
+        match.device.page_size,
+        match.host.page_size,
+    };
+}
+
 std::vector<tokenspeed::TreeNode*> MambaNodesForTransferPairs(const std::vector<tokenspeed::TreeNode*>& candidates,
                                                               const std::vector<tokenspeed::TransferPair>& transfers) {
     std::unordered_set<std::int32_t> src_slots;
@@ -272,13 +320,13 @@ std::variant<PrefillDone, Prefilling> SchedulePrefillFirstChunkEvent::operator()
 #else
     std::unique_ptr<HostNodeRef> host_node_ref{nullptr};
     std::unique_ptr<DeviceNodeRef> device_node_ref{nullptr};
-    if (!disable_l2_cache_ && (match_result_.host.DepthInPage() > match_result_.device.DepthInPage())) {
-        host_node_ref = std::make_unique<HostNodeRef>(match_result_.host.last_node);
-        kv_prefix_cache_->AllocateResourceOfType<ResourceType::Device>(
-            match_result_.NodesWithout<ResourceType::Device>());
-        device_node_ref = std::make_unique<DeviceNodeRef>(match_result_.host.last_node);
+    const KVResourceNodes kv_nodes = GetKVResourceNodes(match_result_);
+    if (!disable_l2_cache_ && (kv_nodes.HostDepthInPage() > kv_nodes.DeviceDepthInPage())) {
+        host_node_ref = std::make_unique<HostNodeRef>(kv_nodes.host_node);
+        kv_prefix_cache_->AllocateResourceOfType<ResourceType::Device>(kv_nodes.NodesWithoutDevice());
+        device_node_ref = std::make_unique<DeviceNodeRef>(kv_nodes.host_node);
     } else {
-        device_node_ref = std::make_unique<DeviceNodeRef>(match_result_.device.last_node);
+        device_node_ref = std::make_unique<DeviceNodeRef>(kv_nodes.device_node);
     }
 
     auto local_kv_allocator = std::make_unique<LocalKVAllocator>(device_allocator_, tokens_this_round_);
@@ -522,17 +570,18 @@ Decoding ScheduleDecodeFromRetractedEvent::operator()(Retracted&& state) {
 #else
     std::unique_ptr<HostNodeRef> host_node_ref{nullptr};
     std::unique_ptr<DeviceNodeRef> device_node_ref{nullptr};
-    if (match_result_.host.DepthInPage() > match_result_.device.DepthInPage()) {
-        host_node_ref = std::make_unique<HostNodeRef>(match_result_.host.last_node);
-        if (!kv_prefix_cache_->AllocateResourceOfType<ResourceType::Device>(
-                match_result_.NodesWithout<ResourceType::Device>())) {
+    const KVResourceNodes kv_nodes = GetKVResourceNodes(match_result_);
+    if (kv_nodes.HostDepthInPage() > kv_nodes.DeviceDepthInPage()) {
+        host_node_ref = std::make_unique<HostNodeRef>(kv_nodes.host_node);
+        if (!kv_prefix_cache_->AllocateResourceOfType<ResourceType::Device>(kv_nodes.NodesWithoutDevice())) {
+            // Device allocation failed (race between capacity check and actual alloc).
             throw std::logic_error(
                 "ScheduleDecodeFromRetractedEvent: failed to allocate device pages for host cache recovery");
         }
-        // Device pages were just attached along the host-matched chain: pinning the HOST last node is not a typo.
-        device_node_ref = std::make_unique<DeviceNodeRef>(match_result_.host.last_node);
+        // This is not a typo
+        device_node_ref = std::make_unique<DeviceNodeRef>(kv_nodes.host_node);
     } else {
-        device_node_ref = std::make_unique<DeviceNodeRef>(match_result_.device.last_node);
+        device_node_ref = std::make_unique<DeviceNodeRef>(kv_nodes.device_node);
     }
     TokenContainer* token_container = state.GetTokenContainer();
     std::int32_t page_size = state.GetPageSize();

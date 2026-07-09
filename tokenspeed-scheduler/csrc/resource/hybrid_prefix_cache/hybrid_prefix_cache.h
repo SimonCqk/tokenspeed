@@ -100,6 +100,7 @@ public:
     std::vector<std::int32_t> GetRequestPagedCachePageIds(const std::string& request_id,
                                                           const std::string& group_id) const;
     std::int32_t GetRequestPagedCacheBaseLogicalPage(const std::string& request_id, const std::string& group_id) const;
+    bool HasRequestPagedCacheTables(const std::string& request_id) const;
 
     // Unified paged-cache lifecycle surface used by the Scheduler. All methods
     // below are no-ops when no paged-cache groups are registered.
@@ -200,6 +201,7 @@ private:
     // Drop only state-family groups from `node`'s snapshot; history portion
     // remains and the node stays registered. Returns true iff state groups removed.
     bool DetachStateSnapshotFromNode(TreeNode* node);
+    std::unique_ptr<PagedCacheSnapshot> DetachPagedCachePendingHostSnapshotFromNode(TreeNode* node);
 
     void RefreshPagedCacheSnapshotCompleteness(PagedCacheSnapshot& snapshot) const;
     bool isPagedCacheSnapshotBorrowed(const TreeNode* node,
@@ -264,6 +266,7 @@ private:
     // TODO(snapshot-lru-perf): O(N log N) per prune; swap in LRU index if profiling shows it matters.
     std::unordered_set<TreeNode*> paged_cache_snapshot_nodes_;
     std::unordered_set<TreeNode*> paged_cache_host_snapshot_nodes_;
+    std::unordered_set<TreeNode*> paged_cache_pending_host_snapshot_nodes_;
 };
 
 }  // namespace tokenspeed

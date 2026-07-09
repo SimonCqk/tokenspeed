@@ -287,6 +287,28 @@ TEST_F(PagedCacheL2OffloadTest, FailedHostWriteBackReleasesPendingSnapshotWithou
     EXPECT_EQ(match.paged_cache_host.prefix_len_tokens, 0);
 }
 
+TEST_F(PagedCacheL2OffloadTest, DemotedDeviceSnapshotDoesNotMatchAsDeviceHit) {
+    TreeNode* terminal = SeedCompleteDeviceSnapshot();
+    ASSERT_NE(terminal, nullptr);
+    AttachHostResource(terminal);
+    const auto tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1);
+
+    auto device_match = hybrid_->Match(tokens);
+    ASSERT_EQ(device_match.paged_cache.last_node, terminal);
+    ASSERT_EQ(device_match.paged_cache.prefix_len_tokens, kLcm);
+
+    auto demoted = terminal->DetachResource<ResourceType::Device>();
+    ASSERT_NE(demoted, nullptr);
+    hybrid_->OnKVDeviceDemote(terminal);
+
+    EXPECT_TRUE(terminal->HasPagedCacheSnapshot());
+    EXPECT_FALSE(terminal->OnDevice());
+    auto demoted_match = hybrid_->Match(tokens);
+    EXPECT_EQ(demoted_match.paged_cache.last_node, nullptr);
+    EXPECT_EQ(demoted_match.paged_cache.prefix_len_tokens, 0);
+    EXPECT_EQ(demoted_match.paged_cache_host.last_node, nullptr);
+}
+
 TEST_F(PagedCacheL2OffloadTest, HostHitMaterializesDeviceDestinationPagesForForwardMetadata) {
     TreeNode* terminal = SeedCompleteDeviceSnapshot();
     ASSERT_NE(terminal, nullptr);

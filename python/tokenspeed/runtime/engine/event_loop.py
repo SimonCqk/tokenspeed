@@ -114,10 +114,6 @@ def _paged_cache_host_group_pages_for_scheduler(
     return dict(getattr(host_pool, "paged_cache_group_page_counts", {}))
 
 
-def _needs_memory_executor(enable_kvstore: bool, enable_mamba_l2: bool) -> bool:
-    return bool(enable_kvstore or enable_mamba_l2)
-
-
 def calc_l3_query_hashes(scheduler, tokens: list[int]) -> list[str]:
     return scheduler.calc_rolling_hash(tokens, apply_match=True)
 
@@ -307,9 +303,6 @@ class EventLoop:
 
         enable_mamba_l2 = bool(
             has_mamba and server_args.enable_mamba_l2 and mamba_l2_host_slots > 0
-        )
-        create_memory_executor = _needs_memory_executor(
-            server_args.enable_kvstore, enable_mamba_l2
         )
         mem_cfg = MemoryExecutorConfig(
             layer_num=self.model_config.num_hidden_layers,
@@ -1286,7 +1279,11 @@ class EventLoop:
             if self.kv_transfer is not None and not is_epd:
                 self.kv_transfer.register(spec.request_id, bootstrap)
 
-            if self.memory_executor is not None:
+            if (
+                self.memory_executor is not None
+                and self.server_args.enable_kvstore
+                and self.server_args.kvstore_storage_backend is not None
+            ):
                 hashes = calc_l3_query_hashes(self.scheduler, spec.tokens)
                 if hashes and len(hashes) > self.prefetch_threshold:
                     hit_pages = self.memory_executor.query_l3_pages(hashes)

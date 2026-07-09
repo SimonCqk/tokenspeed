@@ -68,6 +68,15 @@ protected:
     }
 };
 
+class DisableL2RetractTestSuite : public RetractTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        auto cfg = RetractTestSuite::MakeConfig();
+        cfg.disable_l2_cache = true;
+        return cfg;
+    }
+};
+
 // Device full + extra page needed → WriteBack (Retract) op emitted.
 TEST_F(RetractTestSuite, Retract_TriggeredWhenDeviceFull) {
     BringToDecoding("r1");
@@ -86,6 +95,17 @@ TEST_F(RetractTestSuite, Retract_TriggeredWhenDeviceFull) {
         }
     }
     EXPECT_TRUE(any_pages);
+}
+
+TEST_F(DisableL2RetractTestSuite, RetractStillEmitsHostWriteBackWhenL2Disabled) {
+    BringToDecoding("r1");
+    SendReserveNumTokens("r1", 3);
+
+    auto plan = PlanOnce();
+    const auto* wb = GetWriteBack(plan);
+    ASSERT_NE(wb, nullptr);
+    EXPECT_FALSE(wb->op_ids.empty());
+    EXPECT_EQ(scheduler_->AvailableHostKvPages(), Config().host_allocator.total_pages - 2);
 }
 
 // Retracting request must not appear in the forward batch.

@@ -2,6 +2,11 @@ import pytest
 import torch
 
 
+class _FakePointerPlatform:
+    def device_visible_data_ptr(self, tensor):
+        return tensor.data_ptr()
+
+
 def test_transfer_kv_direct_prefers_cpp_binding(monkeypatch):
     from tokenspeed_kernel.thirdparty.cuda import kvcacheio
 
@@ -28,6 +33,7 @@ def test_transfer_kv_direct_prefers_cpp_binding(monkeypatch):
 
     monkeypatch.setattr(kvcacheio, "_load_transfer_kv_direct_func", lambda: fake_direct)
     monkeypatch.setattr(kvcacheio, "_has_cuda_layer", lambda *_args: True)
+    monkeypatch.setattr(kvcacheio, "current_platform", lambda: _FakePointerPlatform())
 
     src = torch.arange(4, dtype=torch.float32).reshape(2, 2)
     dst = torch.zeros_like(src)
@@ -142,6 +148,7 @@ def test_transfer_kv_direct_h2d_scatter_bucketed_pointer_tables(monkeypatch):
         "_h2d_scatter_device",
         lambda *_args: (torch.device("cpu"), ""),
     )
+    monkeypatch.setattr(kvcacheio, "current_platform", lambda: _FakePointerPlatform())
 
     src_a = torch.arange(8, dtype=torch.float32).reshape(4, 2)
     dst_a = torch.zeros_like(src_a)

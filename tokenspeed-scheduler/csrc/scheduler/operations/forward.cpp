@@ -102,6 +102,23 @@ static void MaybeFillFlatBlockTables(Op& op, Request* request, std::span<const s
     }
 }
 
+template <ResourceType RType>
+TreeNode* LastNodeWithResourceOrRoot(TreeNode* node) {
+    for (TreeNode* candidate = node; candidate != nullptr; candidate = candidate->Parent()) {
+        if (candidate->IsRoot()) return candidate;
+        if constexpr (RType == ResourceType::Device) {
+            if (candidate->OnDevice()) {
+                return candidate;
+            }
+        } else {
+            if (candidate->OnHost()) {
+                return candidate;
+            }
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 #if TOKENSPEED_FLAT_KVCACHE
@@ -314,7 +331,8 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
     std::int32_t num_tokens = loadback_tokens + tokens_this_round + decode_input_tokens;
     std::int32_t device_pages_needed = (num_tokens + config_.block_size - 1) / config_.block_size;
 
-    std::unique_ptr<DeviceNodeRef> temp_lock = std::make_unique<DeviceNodeRef>(match_result.device.last_node);
+    std::unique_ptr<DeviceNodeRef> temp_lock = std::make_unique<DeviceNodeRef>(
+        LastNodeWithResourceOrRoot<ResourceType::Device>(match_result.device.last_node));
 
     // Evict unlocked prefix-cache nodes before allocating request-local pages.
     if (!(kv_prefix_cache_.EnsureCapacityByEvict<ResourceType::Device>(device_pages_needed))) {
@@ -572,7 +590,8 @@ std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFr
     }
     std::int32_t device_pages_needed = (num_tokens + config_.block_size - 1) / config_.block_size;
 
-    std::unique_ptr<DeviceNodeRef> temp_lock = std::make_unique<DeviceNodeRef>(match_result.device.last_node);
+    std::unique_ptr<DeviceNodeRef> temp_lock = std::make_unique<DeviceNodeRef>(
+        LastNodeWithResourceOrRoot<ResourceType::Device>(match_result.device.last_node));
     if (!kv_prefix_cache_.EnsureCapacityByEvict<ResourceType::Device>(device_pages_needed)) {
         return {};
     }
@@ -596,11 +615,12 @@ std::optional<fsm::ScheduleDecodeFromRetractedEvent> Scheduler::scheduleDecodeFr
         return {};
     }
     if (use_paged_host_hit) {
-        hybrid_prefix_cache_->ReleaseRequest(request->Id());
-        paged_cache_loadback_transfers =
-            hybrid_prefix_cache_->PreparePagedCacheDeviceLoadBack(request->Id(), match_result.paged_cache_host);
-        if (paged_cache_loadback_transfers.empty()) {
-            return {};
+        if (!hybrid_prefix_cache_->HasRequestPagedCacheTables(request->Id())) {
+            paged_cache_loadback_transfers =
+                hybrid_prefix_cache_->PreparePagedCacheDeviceLoadBack(request->Id(), match_result.paged_cache_host);
+            if (paged_cache_loadback_transfers.empty()) {
+                return {};
+            }
         }
     }
     if (needs_mamba_loadback) {
@@ -978,7 +998,7 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
         const std::int32_t target = std::max(
             request->TokenSize(),
             DecodePagedCacheReservationEnd(op.hist_token_len, op.input_length, config_.overlap_schedule_depth));
-        if (!has_paged_cache_loadback) {
+        if (!has_paged_cache_loadback && !hybrid_prefix_cache_->HasRequestPagedCacheTables(op.request_id)) {
             hybrid_prefix_cache_->ReleaseRequest(op.request_id);
         }
         // Preserve the existing table across retraction. Its request-local
