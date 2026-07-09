@@ -1,0 +1,21 @@
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_6486291bb56ff3::t_fb1f206442b86c 165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "5d44d0ab27d4f72d510c415d89bbd66925467e2a",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
