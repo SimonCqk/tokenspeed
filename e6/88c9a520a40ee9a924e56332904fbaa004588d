@@ -18,6 +18,10 @@ tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/kvcacheio.py
   s_6486291bb56ff3::t_b3723b6758ba08 22,47-81,116-340,524-549,643,649
 tokenspeed-kernel/test/test_kvcacheio_direct.py
   s_6486291bb56ff3::t_e5b87f3b1e0fb0 1-222
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_155fcca686cf6f 464-465,466-467
+python/tokenspeed/runtime/layers/attention/deepseek_v4_ops.py
+  s_6486291bb56ff3::t_b05274c4e9ce23 910-912
 ---
 {
   "schema_version": "authorship/3.0.0",
