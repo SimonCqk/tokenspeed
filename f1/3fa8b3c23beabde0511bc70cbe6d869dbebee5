@@ -1,0 +1,31 @@
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_ece0ba47dde314 74-130,229,236-258,261,266-267,269,271-275,278,284-288,291,294-297,305-318,322-326,332-343,354-356
+test/runtime/cache/test_transfer_host_executor.py
+  s_6486291bb56ff3::t_b5d37245836c51 117,119,125-128,151-164,301-302,346,351,366,399,405,418,433,437,475,481
+test/runtime/test_deepseek_v4_attention_ops.py
+  s_6486291bb56ff3::t_68f95d240e821f 68-184,824-825,830,834-835,844-845,850-851,855
+test/runtime/test_scheduler_utils_cache_events.py
+  s_6486291bb56ff3::t_4bd92d655525ed 1-18
+test/runtime/test_v4_prefix_cache_metadata.py
+  s_6486291bb56ff3::t_03554bb6c364f9 33,87-102,130-149,163-184
+tokenspeed-kernel/test/test_kvcacheio_direct.py
+  s_6486291bb56ff3::t_f0a87e738fa119 74-85,104,108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "f13fa8b3c23beabde0511bc70cbe6d869dbebee5",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
