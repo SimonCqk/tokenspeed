@@ -4,8 +4,10 @@ python/tokenspeed/runtime/cache/deepseek_v4_cache_host.py
   s_6486291bb56ff3::t_c91a0888570800 1-236
 python/tokenspeed/runtime/cache/executor/host_executor.py
   s_6486291bb56ff3::t_37868df8f41433 25,35-41,46,112-133,151,155-180,184-189,202-203,212-214,218,293-325,327-328,330-331,344,366-386,390,394,448-482,484,625-626,639-642,646-650,658-661,668-669,674,677-678
+  s_6486291bb56ff3::t_71e4540cb812c2 25,46,112-133,368-379,451-463
 python/tokenspeed/runtime/cache/executor/memory_executor.py
   s_6486291bb56ff3::t_645a067c206ec9 25,31-33,43,47-49,56-85,165-170,177,179-183,186-188,193,195-198,201-293,298,350-351,388-394,458-459,462-465,491-516,530,560-580
+  s_6486291bb56ff3::t_30e9f06697374e 25,56-85,496-509,564-576
 python/tokenspeed/runtime/cache/transfer/__init__.py
   s_6486291bb56ff3::t_50fd064a14b021 25,28,39-40
 python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
@@ -14,12 +16,14 @@ python/tokenspeed/runtime/cache/transfer/types.py
   s_6486291bb56ff3::t_eaedfa3083fe00 25,29-30,64-70
 python/tokenspeed/runtime/engine/event_loop.py
   s_6486291bb56ff3::t_cf6420c0bdec38 38,102-113,301-306,325-329,346-349,363-364,366,388,391,396,401-402,405,417-422,1008-1009,1012-1013,1023-1037,1042-1050
+  s_6486291bb56ff3::t_a2989c5212d139 55,110-113,301-306,326-329,363-364,367-370,388,396,402,405,418-422
 python/tokenspeed/runtime/engine/scheduler_utils.py
   s_6486291bb56ff3::t_574a0b279bd386 74,109-113
 python/tokenspeed/runtime/layers/attention/kv_cache/deepseek_v4.py
   s_6486291bb56ff3::t_ee53fb99855ba3 766,986,992-996,998,1239-1240,1246-1247
 test/runtime/cache/test_deepseek_v4_l2_offload.py
   s_6486291bb56ff3::t_7e7c9eafcac414 1-360
+  s_6486291bb56ff3::t_08686718777c10 11,21-23
 test/runtime/cache/test_transfer_host_executor.py
   s_6486291bb56ff3::t_0a7d98761a493d 8-13,117-139,258-297,369-431
 test/runtime/test_v4_sliding_window_groups_smoke.py
