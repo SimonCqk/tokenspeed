@@ -1,0 +1,23 @@
+python/tokenspeed/runtime/cache/executor/host_executor.py
+  s_6486291bb56ff3::t_71e4540cb812c2 25,46,112-133,368-379,451-463
+python/tokenspeed/runtime/cache/executor/memory_executor.py
+  s_6486291bb56ff3::t_30e9f06697374e 25,56-85,496-509,564-576
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "397dfb3a24084b34f2608aab5231add34ef15dcf",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
