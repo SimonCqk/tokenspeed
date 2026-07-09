@@ -6,21 +6,36 @@ import pytest
 import torch
 
 
-def test_deepseek_v4_disable_kvstore_hides_host_groups_from_scheduler():
+def test_deepseek_v4_disable_kvstore_keeps_retract_host_pages_only():
     from tokenspeed.runtime.engine.event_loop import (
-        _needs_memory_executor,
         _paged_cache_host_group_pages_for_scheduler,
     )
+    from tokenspeed.runtime.engine.scheduler_utils import make_config
 
     host_pool = SimpleNamespace(paged_cache_group_page_counts={"v4.swa_kv": 1})
 
-    assert _paged_cache_host_group_pages_for_scheduler(False, host_pool) == {}
+    hidden_host_groups = _paged_cache_host_group_pages_for_scheduler(False, host_pool)
+    assert hidden_host_groups == {}
     assert _paged_cache_host_group_pages_for_scheduler(True, host_pool) == {
         "v4.swa_kv": 1
     }
-    assert not _needs_memory_executor(enable_kvstore=False, enable_mamba_l2=False)
-    assert _needs_memory_executor(enable_kvstore=True, enable_mamba_l2=False)
-    assert _needs_memory_executor(enable_kvstore=False, enable_mamba_l2=True)
+
+    cfg = make_config(
+        num_device_pages=8,
+        max_scheduled_tokens=4,
+        max_batch_size=2,
+        page_size=64,
+        num_host_pages=32,
+        disable_l2_cache=True,
+        enable_l3_storage=False,
+        prefetch_threshold=4,
+        role="null",
+        paged_cache_host_group_pages=hidden_host_groups,
+    )
+
+    assert cfg.disable_l2_cache
+    assert cfg.num_host_pages == 32
+    assert cfg.paged_cache_host_group_pages == {}
 
 
 def _make_v4_pool():

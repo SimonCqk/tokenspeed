@@ -530,7 +530,7 @@ TEST_F(PagedCacheTerminalContinuationTest, CurrentBorrowPinsAncestorWhenTerminal
     hybrid_->ReleaseRequest("current");
 }
 
-TEST_F(PagedCacheTerminalContinuationTest, StatePruneDropsContinuationAndFallsBackToColdPrefill) {
+TEST_F(PagedCacheTerminalContinuationTest, StatePruneDropsContinuationAndFallsBackToHistoryPrefix) {
     TreeNode* n256 = InsertDeviceTokens(256);
     ASSERT_NE(n256, nullptr);
     CommitRequest("r1", /*first_token=*/0, /*target=*/256, n256);
@@ -549,9 +549,13 @@ TEST_F(PagedCacheTerminalContinuationTest, StatePruneDropsContinuationAndFallsBa
               n256->GetPagedCacheSnapshot()->groups.end());
 
     auto match = MatchTokens(256);
-    EXPECT_EQ(match.paged_cache.history_hit_tokens, 0);
-    EXPECT_EQ(match.paged_cache.prefix_len_tokens, 0);
-    EXPECT_TRUE(match.paged_cache.per_group_page_ids.empty());
+    EXPECT_EQ(match.paged_cache.history_hit_tokens, 256);
+    EXPECT_GT(match.paged_cache.prefix_len_tokens, 0);
+    EXPECT_LT(match.paged_cache.prefix_len_tokens, match.paged_cache.history_hit_tokens);
+    EXPECT_NE(match.paged_cache.per_group_page_ids.find(kHistoryGroup), match.paged_cache.per_group_page_ids.end());
+    EXPECT_NE(match.paged_cache.per_group_page_ids.find(kRequiredStateGroup),
+              match.paged_cache.per_group_page_ids.end());
+    EXPECT_EQ(match.paged_cache.per_group_page_ids.find(kWindowStateGroup), match.paged_cache.per_group_page_ids.end());
 }
 
 TEST_F(PagedCacheTerminalContinuationTest, StateOnlyPruneIgnoresHistoryOnlySideTableBorrow) {

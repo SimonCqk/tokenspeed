@@ -114,6 +114,14 @@ HybridPrefixCache::~HybridPrefixCache() {
         TreeNode* node = *paged_cache_snapshot_nodes_.begin();
         DetachPagedCacheSnapshotFromNode(node);
     }
+    while (!paged_cache_host_snapshot_nodes_.empty()) {
+        TreeNode* node = *paged_cache_host_snapshot_nodes_.begin();
+        DetachPagedCacheHostSnapshotFromNode(node);
+    }
+    while (!paged_cache_pending_host_snapshot_nodes_.empty()) {
+        TreeNode* node = *paged_cache_pending_host_snapshot_nodes_.begin();
+        DetachPagedCachePendingHostSnapshotFromNode(node);
+    }
 }
 
 MatchResult HybridPrefixCache::Match(const token_vec_t& token_ids, MatchIntent intent) {
@@ -536,6 +544,12 @@ std::unique_ptr<PagedCacheSnapshot> HybridPrefixCache::DetachPagedCacheHostSnaps
     return node->DetachPagedCacheHostSnapshot();
 }
 
+std::unique_ptr<PagedCacheSnapshot> HybridPrefixCache::DetachPagedCachePendingHostSnapshotFromNode(TreeNode* node) {
+    if (node == nullptr) return nullptr;
+    paged_cache_pending_host_snapshot_nodes_.erase(node);
+    return node->DetachPagedCachePendingHostSnapshot();
+}
+
 void HybridPrefixCache::OnKVEvict(TreeNode* node) {
     if (node == nullptr) return;
     if (mamba_allocator_ != nullptr && node->HasMamba()) {
@@ -575,6 +589,12 @@ void HybridPrefixCache::OnNodeDestroyed(TreeNode* node) {
                 "HybridPrefixCache::OnNodeDestroyed: paged snapshot still has a request-table borrower");
         DetachPagedCacheSnapshotFromNode(node);
     }
+    if (node->HasPagedCacheHostSnapshot()) {
+        DetachPagedCacheHostSnapshotFromNode(node);
+    }
+    if (node->HasPagedCachePendingHostSnapshot()) {
+        DetachPagedCachePendingHostSnapshotFromNode(node);
+    }
     // Host-side Mamba L2 bookkeeping (no-op when the L2 pool is disabled, since
     // these sets are only populated when mamba_host_allocator_ is present).
     pending_mamba_host_writebacks_.erase(node);
@@ -591,7 +611,7 @@ void HybridPrefixCache::OnKVHostEvict(TreeNode* node) {
         DetachPagedCacheHostSnapshotFromNode(node);
     }
     if (node->HasPagedCachePendingHostSnapshot()) {
-        node->DetachPagedCachePendingHostSnapshot();
+        DetachPagedCachePendingHostSnapshotFromNode(node);
     }
     if (mamba_host_allocator_ == nullptr) return;
     pending_mamba_host_writebacks_.erase(node);
@@ -840,8 +860,10 @@ const PagedCacheSnapshot* GetPagedCacheSnapshotForResidency(TreeNode* node, Page
     if (node == nullptr) return nullptr;
     switch (residency) {
         case PagedCacheResidency::kDevice:
+            if (!node->OnDevice()) return nullptr;
             return node->GetPagedCacheSnapshot();
         case PagedCacheResidency::kHost:
+            if (!node->OnHost()) return nullptr;
             return node->GetPagedCacheHostSnapshot();
     }
     return nullptr;
@@ -1242,6 +1264,11 @@ std::int32_t HybridPrefixCache::GetRequestPagedCacheBaseLogicalPage(const std::s
     return group_it->second.BaseLogicalPage();
 }
 
+bool HybridPrefixCache::HasRequestPagedCacheTables(const std::string& request_id) const {
+    auto it = request_paged_cache_tables_.find(request_id);
+    return it != request_paged_cache_tables_.end() && !it->second.empty();
+}
+
 std::map<std::string, std::int32_t> HybridPrefixCache::InitialSimulatedFree() const {
     std::map<std::string, std::int32_t> out;
     for (const auto& [gid, allocator] : paged_cache_allocators_) {
@@ -1411,6 +1438,7 @@ std::vector<PagedCacheTransferPair> HybridPrefixCache::PreparePagedCacheHostWrit
         }
         RefreshPagedCacheSnapshotCompleteness(*pending);
         node->AttachPagedCachePendingHostSnapshot(std::move(pending));
+        paged_cache_pending_host_snapshot_nodes_.insert(node);
         transfers.insert(transfers.end(), std::make_move_iterator(node_transfers.begin()),
                          std::make_move_iterator(node_transfers.end()));
     }
@@ -1424,9 +1452,10 @@ void HybridPrefixCache::OnPagedCacheHostWriteBackDone(const std::vector<TreeNode
     for (TreeNode* node : nodes) {
         if (node == nullptr || !node->HasPagedCachePendingHostSnapshot()) continue;
         if (!success) {
-            node->DetachPagedCachePendingHostSnapshot();
+            DetachPagedCachePendingHostSnapshotFromNode(node);
             continue;
         }
+        paged_cache_pending_host_snapshot_nodes_.erase(node);
         node->PromotePagedCachePendingHostSnapshot();
         if (node->HasPagedCacheHostSnapshot()) {
             paged_cache_host_snapshot_nodes_.insert(node);
