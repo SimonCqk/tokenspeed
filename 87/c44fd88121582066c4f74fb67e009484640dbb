@@ -1,0 +1,29 @@
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_b5a8ce12afea49 74-126,279-281,287-288,301,308-319,335,344-355,365
+test/runtime/test_scheduler_utils_cache_events.py
+  s_6486291bb56ff3::t_e6a9654289a4bf 1-18
+test/runtime/test_v4_prefix_cache_metadata.py
+  s_6486291bb56ff3::t_31d6dafee71a62 30,34,88-121,149-183,249-292
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
+  s_6486291bb56ff3::t_f50f1f3d8e19df 1051-1053
+tokenspeed-scheduler/tests/cpp/test_paged_cache_l2_offload.cpp
+  s_6486291bb56ff3::t_bde042c352e6c9 408-435
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "87c44fd88121582066c4f74fb67e009484640dbb",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
