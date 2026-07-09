@@ -1,0 +1,25 @@
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_30be40c217a49c 261,268-285,291-292,305-318,321,355-356
+test/runtime/cache/test_transfer_host_executor.py
+  s_6486291bb56ff3::t_e095799b7cf429 151-164,346,351,366,399,405,418,433,437,475,481
+test/runtime/test_v4_prefix_cache_metadata.py
+  s_6486291bb56ff3::t_61fee7a87b008e 163-184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "04917440b8e462e3fa5a3a8dc9af2fbc3f0e9e36",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
