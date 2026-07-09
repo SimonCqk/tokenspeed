@@ -1,0 +1,39 @@
+docs/design/deepseek-v4-l2-kv-offload-perf-logbook.md
+  s_6486291bb56ff3::t_f2cf0931ab5ef0 1-73
+python/tokenspeed/runtime/cache/executor/host_executor.py
+  s_6486291bb56ff3::t_8db531c73ac408 368-387,392-404,407,410-411,415-418,484-516,521-533,536-537,540-541,544-546,552-568
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_07c23e5a84aa50 3,8-11,26-29,41-62,87-122,131,278-279,282-355,357,359,364,366-370,372-406,408-419,421-423,427-428,431-481
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_fdcaa77bee00bf 259-272,276-277,289-290,294-298,306-307,311-312,327
+test/runtime/cache/test_transfer_host_executor.py
+  s_6486291bb56ff3::t_af58da782a77c1 140-164,304-342
+tokenspeed-kernel/python/tokenspeed_kernel/ops/kvcache/cuda.py
+  s_6486291bb56ff3::t_20fe5c57613829 32,44,56
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/flashinfer_kvcacheio_binding.cu
+  s_6486291bb56ff3::t_4b9d358bd2a012 23-26,28-33,35-41,43-47,49-54,56-62,64-67,69-74,76-80,82-100,103-106,108-123
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/kvcacheio_transfer.cu
+  s_6486291bb56ff3::t_013ae7005b7493 29,38,47-48,78-80,84-109,113-114,117-119,129-132,136-184,186-190,200-203,208-211,216-222,226-231,235-238,240-241,245-249,251-258,263-272,287-288,290-310,318-327,340-347,351-358,364-365,367-373,375-378,387-392,399-406,408-415,430-440,443-453,456-475,478-483,486-491,494-499,502-508,511-516,519-527,530-540,543-554,558-576,610-665,670-710
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/kvcacheio.py
+  s_6486291bb56ff3::t_b3723b6758ba08 22,47-81,116-340,524-549,643,649
+tokenspeed-kernel/test/test_kvcacheio_direct.py
+  s_6486291bb56ff3::t_e5b87f3b1e0fb0 1-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "e688c9a520a40ee9a924e56332904fbaa004588d",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
