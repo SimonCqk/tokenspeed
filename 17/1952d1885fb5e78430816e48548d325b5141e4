@@ -2,6 +2,8 @@ tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
   s_6486291bb56ff3::t_93720792cc1b58 1051-1053
 tokenspeed-scheduler/tests/cpp/test_paged_cache_l2_offload.cpp
   s_6486291bb56ff3::t_d0fa0f990db3a4 408-435
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_30be40c217a49c 200,208,224-225,228-232,273,300
 ---
 {
   "schema_version": "authorship/3.0.0",
