@@ -71,7 +71,18 @@ def test_transfer_kv_direct_python_fallback(monkeypatch):
     assert torch.equal(dst, expected)
 
 
-def test_transfer_kv_direct_h2d_scatter_threshold_fallback(monkeypatch):
+@pytest.mark.parametrize(
+    ("effective_copy_calls", "expected_reason"),
+    [
+        (16, "below_threshold"),
+        (4096, "symbol_missing"),
+    ],
+)
+def test_transfer_kv_direct_h2d_scatter_fallbacks(
+    monkeypatch,
+    effective_copy_calls,
+    expected_reason,
+):
     from tokenspeed_kernel.thirdparty.cuda import kvcacheio
 
     monkeypatch.setattr(
@@ -90,37 +101,11 @@ def test_transfer_kv_direct_h2d_scatter_threshold_fallback(monkeypatch):
         indices,
         indices,
         page_size=1,
-        effective_copy_calls=16,
+        effective_copy_calls=effective_copy_calls,
     )
 
     assert not result.used
-    assert result.fallback_reason == "below_threshold"
-
-
-def test_transfer_kv_direct_h2d_scatter_symbol_missing(monkeypatch):
-    from tokenspeed_kernel.thirdparty.cuda import kvcacheio
-
-    monkeypatch.setattr(
-        kvcacheio,
-        "_load_transfer_kv_direct_scatter_h2d_func",
-        lambda: None,
-    )
-
-    src = torch.arange(4, dtype=torch.float32).reshape(2, 2)
-    dst = torch.zeros_like(src)
-    indices = torch.tensor([0, 1], dtype=torch.int64)
-
-    result = kvcacheio.transfer_kv_direct_h2d_scatter(
-        [src],
-        [dst],
-        indices,
-        indices,
-        page_size=1,
-        effective_copy_calls=4096,
-    )
-
-    assert not result.used
-    assert result.fallback_reason == "symbol_missing"
+    assert result.fallback_reason == expected_reason
 
 
 def test_transfer_kv_direct_h2d_scatter_bucketed_pointer_tables(monkeypatch):

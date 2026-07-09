@@ -30,6 +30,7 @@ try:
         ExecutionEvent,
         ForwardEvent,
         PagedCacheGroupConfig,
+        PagedCacheGroupFamily,
         PagedCacheRetention,
         PrefixCacheAdjunctSpec,
         RequestSpec,
@@ -83,6 +84,22 @@ def _make_two_group_config() -> "SchedulerConfig":
     return cfg
 
 
+def _make_l2_binding_config() -> "SchedulerConfig":
+    cfg = _make_two_group_config()
+    cfg.disable_l2_cache = False
+    cfg.paged_cache_host_group_pages = {"fh": 32, "swa": 32}
+    groups = list(cfg.paged_cache_groups)
+    for group in groups:
+        group.family = (
+            PagedCacheGroupFamily.History
+            if group.group_id == "fh"
+            else PagedCacheGroupFamily.State
+        )
+    cfg.paged_cache_groups = groups
+    cfg.prefix_cache_adjunct.required_groups = ["fh"]
+    return cfg
+
+
 def _post(sched: "Scheduler", payload) -> None:
     ev = ExecutionEvent()
     ev.add_event(payload)
@@ -110,6 +127,26 @@ def _prime_r1(sched: "Scheduler") -> tuple[list[int], list[int]]:
     return r1_fh, r1_swa
 
 
+def _drive_request_to_writeback_plan(sched: "Scheduler", request_id: str):
+    spec = RequestSpec()
+    spec.request_id = request_id
+    spec.tokens = list(range(1, 13))
+    sched.submit_requests([spec])
+    plan = sched.next_execution_plan()
+    assert len(plan.forward) == 1
+
+    er = ForwardEvent.ExtendResult()
+    er.request_id = request_id
+    er.tokens = [99]
+    _post(sched, er)
+    sched.next_execution_plan()
+
+    fin = ForwardEvent.Finish()
+    fin.request_id = request_id
+    _post(sched, fin)
+    return sched.next_execution_plan()
+
+
 def _submit_r2_same_prefix(sched: "Scheduler") -> int:
     spec = RequestSpec()
     spec.request_id = "r2"
@@ -121,6 +158,28 @@ def _submit_r2_same_prefix(sched: "Scheduler") -> int:
     assert forward.request_ids == ["r2"]
     assert len(forward.extend_prefix_lens) == 1
     return int(forward.extend_prefix_lens[0])
+
+
+def test_paged_l2_transfer_binding_shape() -> None:
+    sched = Scheduler(_make_l2_binding_config())
+    writeback_plan = _drive_request_to_writeback_plan(sched, "r1")
+    writeback = next(
+        (op for op in writeback_plan.cache if hasattr(op, "is_retract")),
+        None,
+    )
+    assert writeback is not None
+    assert len(writeback.op_ids) == 1
+    assert len(writeback.paged_cache_transfers) == 1
+    assert writeback.paged_cache_transfers[0]
+
+    writeback_groups = {
+        transfer.group_id for transfer in writeback.paged_cache_transfers[0]
+    }
+    assert writeback_groups == {"fh", "swa"}
+    for transfer in writeback.paged_cache_transfers[0]:
+        assert isinstance(transfer.group_id, str)
+        assert len(transfer.src_pages) == len(transfer.dst_pages)
+        assert len(transfer.src_pages) > 0
 
 
 class TestV4PrefixCacheMetadata(unittest.TestCase):
