@@ -405,6 +405,34 @@ TEST_F(PagedCacheL2OffloadTest, HostStateRecoveryCapsWhenTerminalStateGroupMissi
     EXPECT_TRUE(match.host.last_node->IsRoot());
 }
 
+TEST_F(PagedCacheL2OffloadTest, HostPrefixReuseCapsToHistoryWhenContinuationStateGroupMissing) {
+    hybrid_->EnablePagedCacheAdjunct({"fh"}, {});
+    TreeNode* terminal = SeedCompleteDeviceSnapshot();
+    ASSERT_NE(terminal, nullptr);
+    AttachHostResource(terminal);
+    auto writeback = hybrid_->PreparePagedCacheHostWriteBack({terminal});
+    ASSERT_FALSE(writeback.empty());
+    hybrid_->OnPagedCacheHostWriteBackDone({terminal}, /*success=*/true);
+    auto detached_device = hybrid_->DetachPagedCacheSnapshotFromNode(terminal);
+    ASSERT_NE(detached_device, nullptr);
+
+    auto host_snapshot = hybrid_->DetachPagedCacheHostSnapshotFromNode(terminal);
+    ASSERT_NE(host_snapshot, nullptr);
+    host_snapshot->groups.erase("swa");
+    ASSERT_TRUE(hybrid_->AttachPagedCacheHostSnapshotToNode(terminal, std::move(host_snapshot)));
+
+    const auto tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1);
+    auto match = hybrid_->Match(tokens);
+
+    ASSERT_EQ(match.paged_cache.last_node, nullptr);
+    ASSERT_NE(match.paged_cache_host.last_node, nullptr);
+    EXPECT_EQ(match.paged_cache_host.last_node, terminal);
+    EXPECT_EQ(match.paged_cache_host.history_hit_tokens, kLcm);
+    EXPECT_EQ(match.paged_cache_host.prefix_len_tokens, kLcm);
+    ASSERT_EQ(match.paged_cache_host.per_group_page_ids.count("fh"), 1u);
+    EXPECT_EQ(match.paged_cache_host.per_group_page_ids.count("swa"), 0u);
+}
+
 TEST_F(PagedCacheL2OffloadTest, KVHostEvictReleasesPagedCacheHostSnapshotPages) {
     TreeNode* terminal = SeedCompleteDeviceSnapshot();
     ASSERT_NE(terminal, nullptr);
