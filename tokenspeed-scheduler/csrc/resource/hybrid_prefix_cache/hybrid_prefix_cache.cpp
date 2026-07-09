@@ -1066,12 +1066,9 @@ void HybridPrefixCache::augmentMatchPagedCache(MatchResult& match, MatchIntent i
             }
         }
 
-        const bool has_transport_only_state =
-            paged_cache_continuation_state_group_set_.size() != paged_cache_state_group_set_.size();
-        if (has_transport_only_state) {
-            return MatchResult::PagedCache{};
-        }
-
+        // Missing continuation-only State groups cap PrefixReuse to the replayable
+        // history/required-state prefix. Exact terminal continuation remains
+        // enforced by the StateRecovery branch above.
         std::int32_t worst_window = 0;
         for (const auto& gid : paged_cache_state_groups_) {
             auto it = paged_cache_sliding_window_per_group_.find(gid);
