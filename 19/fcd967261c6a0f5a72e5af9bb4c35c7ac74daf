@@ -1,0 +1,49 @@
+tokenspeed-scheduler/tests/cpp/test_paged_cache_replay.cpp
+  s_6486291bb56ff3::t_ee254c87ee7123 533,552-558
+tokenspeed-scheduler/tests/cpp/test_paged_cache_l2_offload.cpp
+  s_6486291bb56ff3::t_0eec9a645d26e5 290-311
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_6bebabf136f112 9,13,17-18,22-38
+python/tokenspeed/runtime/engine/event_loop.py
+  s_6486291bb56ff3::t_3f12b8b852c84a 319,1250-1254
+tokenspeed-kernel/test/test_kvcacheio_direct.py
+  s_6486291bb56ff3::t_4271314c83fa1e 5-9,36,151
+tokenspeed-scheduler/csrc/resource/page_container.h
+  s_6486291bb56ff3::t_7475578566256b 35
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
+  s_6486291bb56ff3::t_542bef5915e685 533,1249-1253
+  s_6486291bb56ff3::t_92edd91e65e1e3 530-532
+  s_6486291bb56ff3::t_2bf6083836b0bb 117-124,529,574-579,596,845,848,1423,1437,1440
+  s_6486291bb56ff3::t_2f39373698460c 534
+tokenspeed-scheduler/tests/cpp/test_retract.cpp
+  s_6486291bb56ff3::t_8e247589b780ea 71-79,100-110
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.h
+  s_6486291bb56ff3::t_73da9d09da0e17 103
+  s_6486291bb56ff3::t_dc80dce919d079 204,269
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_6486291bb56ff3::t_697544fec1c79a 61-108,230-234,236,396-399,405,407
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_6486291bb56ff3::t_ea1340c432800f 94-110,159-160,345-346,373-378,654
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_c22d704e740654 4
+tokenspeed-scheduler/csrc/core/token_container.h
+  s_6486291bb56ff3::t_cb07a5bf703bd6 39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "19fcd967261c6a0f5a72e5af9bb4c35c7ac74daf",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
