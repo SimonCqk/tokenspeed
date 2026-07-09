@@ -15,6 +15,7 @@ import math
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -36,6 +37,7 @@ from tokenspeed.runtime.configs.deepseek_v4_cache_spec import (
     deepseek_v4_swa_scale_dim,
     deepseek_v4_swa_token_stride,
 )
+from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
 from tokenspeed.runtime.layers.attention.deepseek_v4_ops import (
     deepseek_v4_combine_dense_swa_indices,
     deepseek_v4_combine_topk_swa_indices,
@@ -46,6 +48,7 @@ from tokenspeed.runtime.layers.attention.deepseek_v4_ops import (
     deepseek_v4_decode_swa_indices_and_lens,
     deepseek_v4_dequantize_and_gather_k_cache,
     deepseek_v4_hca_compress_kv_cache_insert,
+    deepseek_v4_hca_direct_compress_kv_cache_insert,
     deepseek_v4_prepare_indexer_q_mxfp4,
     dequantize_deepseek_v4_fp8_ds_mla_cache,
     fused_qnorm_rope_kv_insert,
@@ -59,6 +62,7 @@ from tokenspeed.runtime.layers.attention.kv_cache.deepseek_v4 import (
     _mask_invalid_graph_tokens,
 )
 from tokenspeed.runtime.models.deepseek_v4 import (
+    _deepseek_v4_hca_active_token_indices,
     _deepseek_v4_sanitize_swa_slot_mapping,
 )
 
@@ -333,6 +337,75 @@ class DeepseekV4AttentionOpsCpuValidationTest(unittest.TestCase):
         torch.testing.assert_close(
             sanitized,
             torch.tensor([0, -1, -1, -1], dtype=torch.int64),
+        )
+
+    def test_hca_active_token_indices_uses_cpu_lens(self):
+        metadata = SimpleNamespace(
+            num_prefill_reqs=2,
+            num_prefill_tokens=330,
+            seq_lens_cpu=torch.tensor([300, 512], dtype=torch.int32),
+            query_lens_cpu=torch.tensor([200, 130], dtype=torch.int32),
+        )
+        ctx = SimpleNamespace(forward_mode=ForwardMode.EXTEND)
+        positions = torch.empty(330, dtype=torch.int64)
+
+        indices = _deepseek_v4_hca_active_token_indices(
+            ctx,
+            metadata,
+            positions,
+            compress_ratio=128,
+        )
+
+        self.assertIsNotNone(indices)
+        torch.testing.assert_close(
+            indices,
+            torch.tensor([27, 155, 201, 329], dtype=torch.int64),
+        )
+
+    def test_hca_active_token_indices_include_boundary_rows(self):
+        metadata = SimpleNamespace(
+            num_prefill_reqs=2,
+            num_prefill_tokens=330,
+            seq_lens_cpu=torch.tensor([300, 512], dtype=torch.int32),
+            query_lens_cpu=torch.tensor([200, 130], dtype=torch.int32),
+        )
+        ctx = SimpleNamespace(forward_mode=ForwardMode.EXTEND)
+        positions = torch.empty(330, dtype=torch.int64)
+
+        indices = _deepseek_v4_hca_active_token_indices(
+            ctx,
+            metadata,
+            positions,
+            compress_ratio=128,
+        )
+
+        self.assertIsNotNone(indices)
+        torch.testing.assert_close(
+            indices,
+            torch.tensor([27, 155, 201, 329], dtype=torch.int64),
+        )
+
+    def test_hca_active_token_indices_include_plain_prefill_rows(self):
+        metadata = SimpleNamespace(
+            num_prefill_reqs=1,
+            num_prefill_tokens=256,
+            seq_lens_cpu=torch.tensor([256], dtype=torch.int32),
+            query_lens_cpu=torch.tensor([256], dtype=torch.int32),
+        )
+        ctx = SimpleNamespace(forward_mode=ForwardMode.EXTEND)
+        positions = torch.empty(256, dtype=torch.int64)
+
+        indices = _deepseek_v4_hca_active_token_indices(
+            ctx,
+            metadata,
+            positions,
+            compress_ratio=128,
+        )
+
+        self.assertIsNotNone(indices)
+        torch.testing.assert_close(
+            indices,
+            torch.tensor([127, 255], dtype=torch.int64),
         )
 
     def test_slot_mapping_guard_expands_per_request_validity(self):
@@ -772,6 +845,243 @@ class DeepseekV4AttentionOpsTest(unittest.TestCase):
         self.assertEqual(
             int(flat_cache[SWA_TOKEN_STRIDE : 2 * SWA_TOKEN_STRIDE].sum()),
             0,
+        )
+
+    def test_hca_compressor_active_rows_match_dense_insert(self):
+        torch.manual_seed(9876)
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        compress_ratio = 128
+        state_block_size = 8
+        kv_cache_block_size = 2
+        num_tokens = compress_ratio * 2
+        prefix_len = 232
+        logical_start = 128
+        full_tokens = prefix_len + num_tokens - logical_start
+        num_state_blocks = full_tokens // state_block_size
+        eps = 1.0e-6
+
+        full_kv = torch.randn(full_tokens, HEAD_DIM, device=device, dtype=dtype)
+        full_score = (
+            torch.randn(full_tokens, HEAD_DIM, device=device, dtype=dtype) * 0.1
+        )
+        tail_start = prefix_len - logical_start
+        kv = full_kv[tail_start:]
+        score = full_score[tail_start:]
+        ape = (
+            torch.randn(compress_ratio, HEAD_DIM, device=device, dtype=torch.float32)
+            * 0.01
+        )
+        state_cache = torch.zeros(
+            num_state_blocks,
+            state_block_size,
+            HEAD_DIM * 2,
+            device=device,
+            dtype=torch.float32,
+        )
+        full_positions = torch.arange(
+            logical_start,
+            prefix_len + num_tokens,
+            device=device,
+            dtype=torch.int64,
+        )
+        positions = torch.arange(
+            prefix_len, prefix_len + num_tokens, device=device, dtype=torch.int64
+        )
+        full_state_slots = torch.arange(full_tokens, device=device, dtype=torch.int64)
+        save_deepseek_v4_compressor_state(
+            kv=full_kv,
+            score=full_score,
+            ape=ape,
+            state_cache=state_cache,
+            slot_mapping=full_state_slots,
+            positions=full_positions,
+            block_size=state_block_size,
+            compress_ratio=compress_ratio,
+        )
+
+        token_to_req_indices = torch.zeros(num_tokens, device=device, dtype=torch.int32)
+        block_table = torch.arange(
+            num_state_blocks, device=device, dtype=torch.int32
+        ).view(1, -1)
+        block_table_base_offsets = torch.tensor(
+            [logical_start // state_block_size],
+            device=device,
+            dtype=torch.int32,
+        )
+        kv_slots = torch.full((num_tokens,), -1, device=device, dtype=torch.int64)
+        active_token_indices = torch.tensor(
+            [255 - prefix_len, 383 - prefix_len],
+            device=device,
+            dtype=torch.int64,
+        )
+        kv_slots[active_token_indices[0]] = 0
+        kv_slots[active_token_indices[1]] = 1
+        cos_sin = torch.randn(512, ROPE_DIM, device=device, dtype=torch.float32) * 0.05
+        rms_weight = (
+            torch.randn(HEAD_DIM, device=device, dtype=torch.float32) * 0.1 + 1.0
+        )
+        cache_shape = (
+            1,
+            kv_cache_block_size * (SWA_TOKEN_STRIDE + SWA_SCALE_DIM),
+        )
+        dense_cache = torch.zeros(cache_shape, device=device, dtype=torch.uint8)
+        compact_cache = torch.zeros_like(dense_cache)
+
+        kwargs = dict(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            compressor_slot_mapping=full_state_slots[tail_start:],
+            block_table=block_table,
+            block_table_base_offsets=block_table_base_offsets,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_slot_mapping=kv_slots,
+            kv_cache_block_size=kv_cache_block_size,
+            compress_ratio=compress_ratio,
+        )
+        deepseek_v4_hca_compress_kv_cache_insert(
+            kv_cache_2d=dense_cache,
+            **kwargs,
+        )
+        deepseek_v4_hca_compress_kv_cache_insert(
+            kv_cache_2d=compact_cache,
+            active_token_indices=active_token_indices,
+            **kwargs,
+        )
+
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            compact_cache.cpu(), dense_cache.cpu(), atol=0, rtol=0
+        )
+
+    def test_hca_direct_compressor_matches_paged_insert(self):
+        torch.manual_seed(2468)
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        compress_ratio = 128
+        state_block_size = 8
+        kv_cache_block_size = 2
+        num_tokens = compress_ratio * 2
+        prefix_len = 232
+        logical_start = 128
+        full_tokens = prefix_len + num_tokens - logical_start
+        num_state_blocks = full_tokens // state_block_size
+        eps = 1.0e-6
+
+        full_kv = torch.randn(full_tokens, HEAD_DIM, device=device, dtype=dtype)
+        full_score = (
+            torch.randn(full_tokens, HEAD_DIM, device=device, dtype=dtype) * 0.1
+        )
+        tail_start = prefix_len - logical_start
+        kv = full_kv[tail_start:]
+        score = full_score[tail_start:]
+        ape = (
+            torch.randn(compress_ratio, HEAD_DIM, device=device, dtype=torch.float32)
+            * 0.01
+        )
+        state_cache = torch.zeros(
+            num_state_blocks,
+            state_block_size,
+            HEAD_DIM * 2,
+            device=device,
+            dtype=torch.float32,
+        )
+        full_positions = torch.arange(
+            logical_start,
+            prefix_len + num_tokens,
+            device=device,
+            dtype=torch.int64,
+        )
+        positions = torch.arange(
+            prefix_len, prefix_len + num_tokens, device=device, dtype=torch.int64
+        )
+        full_state_slots = torch.arange(full_tokens, device=device, dtype=torch.int64)
+        save_deepseek_v4_compressor_state(
+            kv=full_kv,
+            score=full_score,
+            ape=ape,
+            state_cache=state_cache,
+            slot_mapping=full_state_slots,
+            positions=full_positions,
+            block_size=state_block_size,
+            compress_ratio=compress_ratio,
+        )
+
+        token_to_req_indices = torch.zeros(num_tokens, device=device, dtype=torch.int32)
+        block_table = torch.arange(
+            num_state_blocks, device=device, dtype=torch.int32
+        ).view(1, -1)
+        block_table_base_offsets = torch.tensor(
+            [logical_start // state_block_size],
+            device=device,
+            dtype=torch.int32,
+        )
+        kv_slots = torch.full((num_tokens,), -1, device=device, dtype=torch.int64)
+        active_token_indices = torch.tensor(
+            [255 - prefix_len, 383 - prefix_len],
+            device=device,
+            dtype=torch.int64,
+        )
+        kv_slots[active_token_indices[0]] = 0
+        kv_slots[active_token_indices[1]] = 1
+        cos_sin = torch.randn(512, ROPE_DIM, device=device, dtype=torch.float32) * 0.05
+        rms_weight = (
+            torch.randn(HEAD_DIM, device=device, dtype=torch.float32) * 0.1 + 1.0
+        )
+        cache_shape = (
+            1,
+            kv_cache_block_size * (SWA_TOKEN_STRIDE + SWA_SCALE_DIM),
+        )
+        paged_cache = torch.zeros(cache_shape, device=device, dtype=torch.uint8)
+        direct_cache = torch.zeros_like(paged_cache)
+
+        deepseek_v4_hca_compress_kv_cache_insert(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            compressor_slot_mapping=full_state_slots[tail_start:],
+            block_table=block_table,
+            block_table_base_offsets=block_table_base_offsets,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_cache_2d=paged_cache,
+            kv_slot_mapping=kv_slots,
+            kv_cache_block_size=kv_cache_block_size,
+            compress_ratio=compress_ratio,
+            active_token_indices=active_token_indices,
+        )
+        query_start_loc = torch.tensor(
+            [0, num_tokens], device=device, dtype=torch.int32
+        )
+        deepseek_v4_hca_direct_compress_kv_cache_insert(
+            state_cache=state_cache,
+            kv=kv,
+            score=score,
+            ape=ape,
+            token_to_req_indices=token_to_req_indices,
+            query_start_loc=query_start_loc,
+            positions=positions,
+            block_table=block_table,
+            block_table_base_offsets=block_table_base_offsets,
+            compressor_block_size=state_block_size,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=eps,
+            cos_sin_cache=cos_sin,
+            kv_cache_2d=direct_cache,
+            kv_slot_mapping=kv_slots,
+            kv_cache_block_size=kv_cache_block_size,
+            active_token_indices=active_token_indices,
+        )
+
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            direct_cache.cpu(), paged_cache.cpu(), atol=0, rtol=0
         )
 
     def test_csa_compressor_state_insert_matches_reference(self):
