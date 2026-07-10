@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -149,17 +150,44 @@ class FakePreparedPagedPool:
 
 
 class FakeCacheOps:
-    class WriteBackOp:
+    class WriteBackOp(SimpleNamespace):
         pass
 
-    class LoadBackOp:
+    class LoadBackOp(SimpleNamespace):
         pass
 
-    class PrefetchOp:
+
+class FakeMemoryHostExecutor:
+    def __init__(self):
+        self.pools = {CacheKind.KV: object(), CacheKind.MAMBA: object()}
+        self.completed_writebacks = []
+        self.writebacks = []
+        self.loadbacks = []
+        self.paged_writebacks = []
+        self.paged_loadbacks = []
+
+    def enqueue_writeback(self, op_id, src_pages, dst_pages, **kwargs):
+        self.writebacks.append((op_id, src_pages, dst_pages, kwargs))
+
+    def enqueue_loadback(self, op_id, src_pages, dst_pages, **kwargs):
+        self.loadbacks.append((op_id, src_pages, dst_pages, kwargs))
+
+    def enqueue_paged_cache_writeback(self, op_id, transfers, is_retract=False):
+        self.paged_writebacks.append((op_id, transfers, is_retract))
+
+    def enqueue_paged_cache_loadback(self, op_id, transfers):
+        self.paged_loadbacks.append((op_id, transfers))
+
+    def flush(self):
         pass
 
-    class BackUpOp:
-        pass
+
+def _make_memory_executor(monkeypatch, memory_executor):
+    monkeypatch.setattr(memory_executor, "Cache", FakeCacheOps)
+    executor = object.__new__(memory_executor.MemoryExecutor)
+    executor.host_exec = FakeMemoryHostExecutor()
+    executor.storage_exec = None
+    return executor
 
 
 def _patch_host_executor_device(monkeypatch):
@@ -167,6 +195,16 @@ def _patch_host_executor_device(monkeypatch):
 
     monkeypatch.setattr(host_executor, "device_module", FakeDeviceModule)
     return host_executor.HostExecutor
+
+
+@pytest.fixture
+def paged_host_executor(monkeypatch):
+    HostExecutor = _patch_host_executor_device(monkeypatch)
+    pool = FakePreparedPagedPool(num_layers=3)
+    executor = HostExecutor(pools=[], paged_pool=pool, io_backend="kernel")
+    transfers = [object(), object()]
+    prepared = tuple(("prepared", id(transfer)) for transfer in transfers)
+    return pool, executor, transfers, prepared
 
 
 def test_transfer_unit_exposes_direction():
@@ -278,19 +316,18 @@ def test_host_executor_loadback_uses_independent_layer_counters(monkeypatch):
     executor.set_consumer(CacheKind.KV, [0])
     executor.set_consumer(CacheKind.MAMBA, [0])
     assert kv_pool.counter.consumer == [0]
+    assert executor.drain() == []
 
 
-def test_host_executor_paged_cache_loadback_reuses_prepared_transfers(monkeypatch):
-    HostExecutor = _patch_host_executor_device(monkeypatch)
-    paged_pool = FakePreparedPagedPool(num_layers=3)
-    executor = HostExecutor(pools=[], paged_pool=paged_pool, io_backend="kernel")
-    transfers = [object(), object()]
+def test_host_executor_paged_cache_loadback_reuses_prepared_transfers(
+    paged_host_executor,
+):
+    paged_pool, executor, transfers, expected_prepared = paged_host_executor
 
     executor.enqueue_paged_cache_loadback(33, transfers)
     executor.flush()
 
     assert paged_pool.prepares == [transfers]
-    expected_prepared = tuple(("prepared", id(transfer)) for transfer in transfers)
     assert paged_pool.prepared_range_loadbacks == [
         (0, 2, expected_prepared),
         (2, 3, expected_prepared),
@@ -300,19 +337,21 @@ def test_host_executor_paged_cache_loadback_reuses_prepared_transfers(monkeypatc
     assert executor.get_producer_index(PAGED_CACHE_KIND, 33) == 0
     executor.set_consumer(PAGED_CACHE_KIND, [0])
     assert paged_pool.counter.consumer == [0]
+    (result,) = executor.drain()
+    assert result.op_id == 33
+    assert result.success is True
+    assert type(result).__name__ == "LoadBackDoneEvent"
 
 
-def test_host_executor_paged_cache_writeback_uses_prepared_transfers(monkeypatch):
-    HostExecutor = _patch_host_executor_device(monkeypatch)
-    paged_pool = FakePreparedPagedPool(num_layers=3)
-    executor = HostExecutor(pools=[], paged_pool=paged_pool, io_backend="kernel")
-    transfers = [object(), object()]
+def test_host_executor_paged_cache_writeback_uses_prepared_transfers(
+    paged_host_executor,
+):
+    paged_pool, executor, transfers, expected_prepared = paged_host_executor
 
     executor.enqueue_paged_cache_writeback(44, transfers)
     executor.flush()
 
     assert paged_pool.prepares == [transfers]
-    expected_prepared = tuple(("prepared", id(transfer)) for transfer in transfers)
     assert paged_pool.prepared_writebacks == [expected_prepared]
     results = executor.drain()
     assert [event.op_id for event in results] == [44]
@@ -322,109 +361,74 @@ def test_host_executor_paged_cache_writeback_uses_prepared_transfers(monkeypatch
 def test_memory_executor_submit_dispatches_flat_op_by_cache_kind(monkeypatch):
     import tokenspeed.runtime.cache.executor.memory_executor as memory_executor
 
-    class FakeHostExec:
-        def __init__(self):
-            self.pools = {CacheKind.KV: object(), CacheKind.MAMBA: object()}
-            self.writebacks = []
-            self.loadbacks = []
-            self.completed_writebacks = []
-            self.order = []
-
-        def enqueue_writeback(
-            self, op_id, src_pages, dst_pages, is_retract=False, kind=CacheKind.KV
-        ):
-            self.order.append(("writeback", kind, op_id))
-            self.writebacks.append((kind, op_id, src_pages, dst_pages, is_retract))
-
-        def enqueue_loadback(self, op_id, src_pages, dst_pages, kind=CacheKind.KV):
-            self.order.append(("loadback", kind, op_id))
-            self.loadbacks.append((kind, op_id, src_pages, dst_pages))
-
-        def flush(self):
-            self.order.append(("flush",))
-
-    monkeypatch.setattr(memory_executor, "Cache", FakeCacheOps)
-    executor = object.__new__(memory_executor.MemoryExecutor)
-    executor.host_exec = FakeHostExec()
-    executor.storage_exec = None
-
-    wb = FakeCacheOps.WriteBackOp()
-    wb.op_ids = [7]
-    wb.src_pages = [[1]]
-    wb.dst_pages = [[11]]
-    wb.src_pages_by_kind = {"kv": [[1]], "mamba": [[2, 3]]}
-    wb.dst_pages_by_kind = {"kv": [[11]], "mamba": [[22, 23]]}
-    wb.is_retract = [True]
+    executor = _make_memory_executor(monkeypatch, memory_executor)
+    wb = FakeCacheOps.WriteBackOp(
+        op_ids=[7],
+        src_pages=[[1]],
+        dst_pages=[[11]],
+        src_pages_by_kind={"kv": [[1]], "mamba": [[2, 3]]},
+        dst_pages_by_kind={"kv": [[11]], "mamba": [[22, 23]]},
+        is_retract=[True],
+    )
     executor.submit(wb)
 
     assert executor.host_exec.writebacks == [
-        (CacheKind.KV, 7, [1], [11], True),
-        (CacheKind.MAMBA, 7, [2, 3], [22, 23], True),
+        (7, [1], [11], {"is_retract": True, "kind": CacheKind.KV}),
+        (7, [2, 3], [22, 23], {"is_retract": True, "kind": CacheKind.MAMBA}),
     ]
     assert executor.host_exec.completed_writebacks == []
 
-    lb = FakeCacheOps.LoadBackOp()
-    lb.op_ids = [9]
-    lb.src_pages = [[10]]
-    lb.dst_pages = [[20]]
-    lb.src_pages_by_kind = {"kv": [[10]], "mamba": [[30]]}
-    lb.dst_pages_by_kind = {"kv": [[20]], "mamba": [[40]]}
+    lb = FakeCacheOps.LoadBackOp(
+        op_ids=[9],
+        src_pages=[[10]],
+        dst_pages=[[20]],
+        src_pages_by_kind={"kv": [[10]], "mamba": [[30]]},
+        dst_pages_by_kind={"kv": [[20]], "mamba": [[40]]},
+    )
     executor.submit(lb)
 
     assert executor.host_exec.loadbacks == [
-        (CacheKind.KV, 9, [10], [20]),
-        (CacheKind.MAMBA, 9, [30], [40]),
+        (9, [10], [20], {"kind": CacheKind.KV}),
+        (9, [30], [40], {"kind": CacheKind.MAMBA}),
     ]
 
 
 def test_memory_executor_submit_dispatches_paged_cache_transfers(monkeypatch):
     import tokenspeed.runtime.cache.executor.memory_executor as memory_executor
 
-    class FakeHostExec:
-        def __init__(self):
-            self.pools = {}
-            self.completed_writebacks = []
-            self.paged_writebacks = []
-            self.paged_loadbacks = []
+    monkeypatch.setattr(memory_executor.logger, "isEnabledFor", lambda _level: True)
+    executor = _make_memory_executor(monkeypatch, memory_executor)
 
-        def enqueue_paged_cache_writeback(self, op_id, transfers, is_retract=False):
-            self.paged_writebacks.append((op_id, transfers, is_retract))
-
-        def enqueue_paged_cache_loadback(self, op_id, transfers):
-            self.paged_loadbacks.append((op_id, transfers))
-
-        def flush(self):
-            pass
-
-    monkeypatch.setattr(memory_executor, "Cache", FakeCacheOps)
-    executor = object.__new__(memory_executor.MemoryExecutor)
-    executor.host_exec = FakeHostExec()
-    executor.storage_exec = None
-
-    transfer = object()
-    wb = FakeCacheOps.WriteBackOp()
-    wb.op_ids = [7]
-    wb.src_pages = [[]]
-    wb.dst_pages = [[]]
-    wb.src_pages_by_kind = {"kv": [[]], "mamba": [[]]}
-    wb.dst_pages_by_kind = {"kv": [[]], "mamba": [[]]}
-    wb.paged_cache_transfers = [[transfer]]
-    wb.is_retract = [True]
+    transfer = SimpleNamespace(group_id="v4.test", src_pages=[1], dst_pages=[2])
+    wb = FakeCacheOps.WriteBackOp(
+        op_ids=[7, 8],
+        src_pages=[[], [3]],
+        dst_pages=[[], [4]],
+        src_pages_by_kind={"kv": [[], [3]], "mamba": [[], []]},
+        dst_pages_by_kind={"kv": [[], [4]], "mamba": [[], []]},
+        paged_cache_transfers=[[transfer], []],
+        is_retract=[True, False],
+    )
     executor.submit(wb)
 
     assert executor.host_exec.paged_writebacks == [(7, [transfer], True)]
+    assert executor.host_exec.writebacks == [
+        (8, [3], [4], {"is_retract": False, "kind": CacheKind.KV})
+    ]
     assert executor.host_exec.completed_writebacks == []
 
-    lb = FakeCacheOps.LoadBackOp()
-    lb.op_ids = [9]
-    lb.src_pages = [[]]
-    lb.dst_pages = [[]]
-    lb.src_pages_by_kind = {"kv": [[]], "mamba": [[]]}
-    lb.dst_pages_by_kind = {"kv": [[]], "mamba": [[]]}
-    lb.paged_cache_transfers = [[transfer]]
+    lb = FakeCacheOps.LoadBackOp(
+        op_ids=[9, 10],
+        src_pages=[[], [5]],
+        dst_pages=[[], [6]],
+        src_pages_by_kind={"kv": [[], [5]], "mamba": [[], []]},
+        dst_pages_by_kind={"kv": [[], [6]], "mamba": [[], []]},
+        paged_cache_transfers=[[transfer], []],
+    )
     executor.submit(lb)
 
     assert executor.host_exec.paged_loadbacks == [(9, [transfer])]
+    assert executor.host_exec.loadbacks == [(10, [5], [6], {"kind": CacheKind.KV})]
 
 
 def test_memory_executor_submit_plan_keeps_generic_submit_signature(monkeypatch):
@@ -451,45 +455,25 @@ def test_memory_executor_submit_plan_keeps_generic_submit_signature(monkeypatch)
 def test_memory_executor_mamba_layerwise_cow_uses_dedicated_context(monkeypatch):
     import tokenspeed.runtime.cache.executor.memory_executor as memory_executor
 
-    class FakeHostExec:
-        def __init__(self):
-            self.pools = {CacheKind.KV: object(), CacheKind.MAMBA: object()}
-            self.completed_writebacks = []
-            self.loadbacks = []
-
-        def enqueue_loadback(
-            self,
-            op_id,
-            src_pages,
-            dst_pages,
-            kind=CacheKind.KV,
-            layerwise_cow_dst_pages_by_src=None,
-        ):
-            self.loadbacks.append(
-                (kind, op_id, src_pages, dst_pages, layerwise_cow_dst_pages_by_src)
-            )
-
-        def flush(self):
-            pass
-
-    monkeypatch.setattr(memory_executor, "Cache", FakeCacheOps)
-    executor = object.__new__(memory_executor.MemoryExecutor)
-    executor.host_exec = FakeHostExec()
-    executor.storage_exec = None
+    executor = _make_memory_executor(monkeypatch, memory_executor)
     executor.set_mamba_layerwise_cow({40: [400]})
 
-    lb = FakeCacheOps.LoadBackOp()
-    lb.op_ids = [9]
-    lb.src_pages = [[10]]
-    lb.dst_pages = [[20]]
-    lb.src_pages_by_kind = {"kv": [[10]], "mamba": [[30]]}
-    lb.dst_pages_by_kind = {"kv": [[20]], "mamba": [[40]]}
+    lb = FakeCacheOps.LoadBackOp(
+        op_ids=[9],
+        src_pages=[[10]],
+        dst_pages=[[20]],
+        src_pages_by_kind={"kv": [[10]], "mamba": [[30]]},
+        dst_pages_by_kind={"kv": [[20]], "mamba": [[40]]},
+    )
     plan = type("Plan", (), {"cache": [lb]})()
 
     executor.submit_plan(plan)
 
-    assert executor.host_exec.loadbacks == [
-        (CacheKind.KV, 9, [10], [20], None),
-        (CacheKind.MAMBA, 9, [30], [40], {40: [400]}),
-    ]
+    kv_loadback, mamba_loadback = executor.host_exec.loadbacks
+    assert kv_loadback == (9, [10], [20], {"kind": CacheKind.KV})
+    assert mamba_loadback[:3] == (9, [30], [40])
+    assert mamba_loadback[3] == {
+        "kind": CacheKind.MAMBA,
+        "layerwise_cow_dst_pages_by_src": {40: [400]},
+    }
     assert executor._pending_mamba_layerwise_cow is None

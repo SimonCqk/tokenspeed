@@ -159,6 +159,17 @@ void ReleaseFailedHostWriteBack(tokenspeed::KVPrefixCache* kv_prefix_cache,
     });
 }
 
+void RollbackHostWriteBack(tokenspeed::KVPrefixCache* kv_prefix_cache,
+                           tokenspeed::HybridPrefixCache* hybrid_prefix_cache, tokenspeed::fsm::WritingBack& state) {
+    if (hybrid_prefix_cache != nullptr) {
+        hybrid_prefix_cache->OnMambaHostWriteBackDone(state.MambaWriteBackNodes(), false);
+        hybrid_prefix_cache->OnPagedCacheHostWriteBackDone(state.PagedCacheWriteBackNodes(), false);
+    }
+    state.DropHostNodeRef();
+    ReleaseFailedHostWriteBack(kv_prefix_cache, hybrid_prefix_cache, state.HostWriteBackNodes());
+    state.DropDeviceNodeRef();
+}
+
 bool ShouldPublishMambaCheckpoint(tokenspeed::HybridPrefixCache* hybrid_cache, std::int32_t chunk_begin,
                                   std::int32_t chunk_size, std::int32_t page_size) {
     if (hybrid_cache == nullptr || chunk_size <= 0 || page_size <= 0) return false;
@@ -731,44 +742,40 @@ WritingBack CommitDrainingEvent::operator()(Draining&& state) {
 // WritingBack -> Finished: written-back cache demotes to host-only, so the next hit must load back.
 Finished WriteBackDoneEvent::operator()(WritingBack&& state) {
     TreeNode* device_node = state.DeviceNode();
-    if (hybrid_prefix_cache_ != nullptr) {
-        hybrid_prefix_cache_->OnMambaHostWriteBackDone(state.MambaWriteBackNodes(), success_);
-        hybrid_prefix_cache_->OnPagedCacheHostWriteBackDone(state.PagedCacheWriteBackNodes(), success_);
-    }
     if (!success_) {
-        state.DropHostNodeRef();
-        ReleaseFailedHostWriteBack(kv_prefix_cache_, hybrid_prefix_cache_, state.HostWriteBackNodes());
+        RollbackHostWriteBack(kv_prefix_cache_, hybrid_prefix_cache_, state);
+        return Finished{};
+    }
+    if (hybrid_prefix_cache_ != nullptr) {
+        hybrid_prefix_cache_->OnMambaHostWriteBackDone(state.MambaWriteBackNodes(), true);
+        hybrid_prefix_cache_->OnPagedCacheHostWriteBackDone(state.PagedCacheWriteBackNodes(), true);
     }
     state.DropDeviceNodeRef();
-    if (success_) {
-        DemoteWrittenBackDevice(kv_prefix_cache_, hybrid_prefix_cache_, device_node);
-    }
-    if (success_ && hybrid_prefix_cache_ != nullptr) {
+    DemoteWrittenBackDevice(kv_prefix_cache_, hybrid_prefix_cache_, device_node);
+    if (hybrid_prefix_cache_ != nullptr) {
         hybrid_prefix_cache_->DemoteIdleMambaDeviceCopiesPresentOnHost();
     }
     return Finished{};
 }
 
-Retracted WriteBackDoneEvent::operator()(Retracting&& state) {
+std::variant<Retracted, Finished> WriteBackDoneEvent::operator()(Retracting&& state) {
 #if TOKENSPEED_FLAT_KVCACHE
     FlatRetractUnsupported();
 #else
+    if (!success_) {
+        RollbackHostWriteBack(kv_prefix_cache_, hybrid_prefix_cache_, state);
+        return Finished{};
+    }
     TokenContainer* token_container = state.GetTokenContainer();
     std::int32_t page_size = state.GetPageSize();
     TreeNode* device_node = state.DeviceNode();
     if (hybrid_prefix_cache_ != nullptr) {
-        hybrid_prefix_cache_->OnMambaHostWriteBackDone(state.MambaWriteBackNodes(), success_);
-        hybrid_prefix_cache_->OnPagedCacheHostWriteBackDone(state.PagedCacheWriteBackNodes(), success_);
-    }
-    if (!success_) {
-        state.DropHostNodeRef();
-        ReleaseFailedHostWriteBack(kv_prefix_cache_, hybrid_prefix_cache_, state.HostWriteBackNodes());
+        hybrid_prefix_cache_->OnMambaHostWriteBackDone(state.MambaWriteBackNodes(), true);
+        hybrid_prefix_cache_->OnPagedCacheHostWriteBackDone(state.PagedCacheWriteBackNodes(), true);
     }
     state.DropDeviceNodeRef();
-    if (success_) {
-        DemoteWrittenBackDevice(kv_prefix_cache_, hybrid_prefix_cache_, device_node);
-    }
-    if (success_ && hybrid_prefix_cache_ != nullptr) {
+    DemoteWrittenBackDevice(kv_prefix_cache_, hybrid_prefix_cache_, device_node);
+    if (hybrid_prefix_cache_ != nullptr) {
         hybrid_prefix_cache_->DemoteIdleMambaDeviceCopiesPresentOnHost();
     }
     auto host_ref = std::move(static_cast<WritingBack&&>(state)).TakeHostNodeRef();
@@ -788,7 +795,15 @@ Aborting AbortEvent::operator()(Prefetching&& state) {
     return Aborting{std::move(state).TakeHostPages()};
 }
 
-Finished AbortEvent::operator()(Draining&&) {
+Finished AbortEvent::operator()(Draining&& state) {
+    auto device_node_ref = std::move(state).TakeDeviceNodeRef();
+    auto host_node_ref = std::move(state).TakeHostNodeRef();
+    auto host_writeback_nodes = std::move(state).TakeHostWriteBackNodes();
+    auto mamba_writeback_nodes = std::move(state).TakeMambaWriteBackNodes();
+    auto paged_cache_writeback_nodes = std::move(state).TakePagedCacheWriteBackNodes();
+    auto writeback = WritingBack{std::move(device_node_ref), std::move(host_node_ref), std::move(host_writeback_nodes),
+                                 std::move(mamba_writeback_nodes), std::move(paged_cache_writeback_nodes)};
+    RollbackHostWriteBack(kv_prefix_cache_, hybrid_prefix_cache_, writeback);
     return Finished{};
 }
 
@@ -830,10 +845,6 @@ Finished AbortEvent::operator()(Decoding&& state) {
 #else
     (void)state;
 #endif
-    return Finished{};
-}
-
-Finished AbortEvent::operator()(Retracting&&) {
     return Finished{};
 }
 

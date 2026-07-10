@@ -6,7 +6,34 @@ import pytest
 import torch
 
 
-def test_deepseek_v4_disable_kvstore_keeps_retract_host_pages_only():
+@pytest.mark.parametrize(
+    ("enable_kvstore", "paged_cache_groups", "draft_pool", "should_raise"),
+    [
+        (True, [object()], object(), True),
+        (False, [object()], object(), False),
+        (True, [object()], None, False),
+        (True, [], object(), False),
+    ],
+)
+def test_grouped_kvstore_rejects_only_paged_draft_pool(
+    enable_kvstore, paged_cache_groups, draft_pool, should_raise
+):
+    from tokenspeed.runtime.engine.event_loop import (
+        _validate_grouped_kvstore_draft_pool,
+    )
+
+    if should_raise:
+        with pytest.raises(NotImplementedError, match="--disable-kvstore"):
+            _validate_grouped_kvstore_draft_pool(
+                enable_kvstore, paged_cache_groups, draft_pool
+            )
+    else:
+        _validate_grouped_kvstore_draft_pool(
+            enable_kvstore, paged_cache_groups, draft_pool
+        )
+
+
+def test_deepseek_v4_scheduler_host_pages_follow_kvstore_mode():
     from tokenspeed.runtime.engine.event_loop import (
         _paged_cache_host_group_pages_for_scheduler,
     )
@@ -15,27 +42,36 @@ def test_deepseek_v4_disable_kvstore_keeps_retract_host_pages_only():
     host_pool = SimpleNamespace(paged_cache_group_page_counts={"v4.swa_kv": 1})
 
     hidden_host_groups = _paged_cache_host_group_pages_for_scheduler(False, host_pool)
+    visible_host_groups = _paged_cache_host_group_pages_for_scheduler(True, host_pool)
     assert hidden_host_groups == {}
-    assert _paged_cache_host_group_pages_for_scheduler(True, host_pool) == {
-        "v4.swa_kv": 1
-    }
+    assert visible_host_groups == {"v4.swa_kv": 1}
 
-    cfg = make_config(
+    common_config = dict(
         num_device_pages=8,
         max_scheduled_tokens=4,
         max_batch_size=2,
         page_size=64,
-        num_host_pages=32,
-        disable_l2_cache=True,
         enable_l3_storage=False,
         prefetch_threshold=4,
         role="null",
+    )
+    disabled_config = make_config(
+        **common_config,
+        num_host_pages=32,
+        disable_l2_cache=True,
         paged_cache_host_group_pages=hidden_host_groups,
     )
+    enabled_config = make_config(
+        **common_config,
+        num_host_pages=0,
+        disable_l2_cache=False,
+        paged_cache_host_group_pages=visible_host_groups,
+    )
 
-    assert cfg.disable_l2_cache
-    assert cfg.num_host_pages == 32
-    assert cfg.paged_cache_host_group_pages == {}
+    assert disabled_config.disable_l2_cache
+    assert disabled_config.num_host_pages == 32
+    assert disabled_config.paged_cache_host_group_pages == {}
+    assert enabled_config.paged_cache_host_group_pages == {"v4.swa_kv": 1}
 
 
 def _make_v4_pool():
@@ -56,7 +92,7 @@ def _make_v4_pool():
         page_size=64,
         use_fp4_indexer_cache=True,
     )
-    pool = DeepseekV4TokenToKVPool(
+    return DeepseekV4TokenToKVPool(
         size=512,
         model_dtype=torch.bfloat16,
         layout=layout,
@@ -70,7 +106,6 @@ def _make_v4_pool():
         hf_config=hf_config,
         max_scheduled_tokens=64,
     )
-    return pool
 
 
 def _make_host_pool(device_pool, ratio: float = 1.5):
@@ -83,6 +118,18 @@ def _make_host_pool(device_pool, ratio: float = 1.5):
         host_to_device_ratio=ratio,
         host_size_gb=0,
         register_host=False,
+    )
+
+
+def _make_transfer_pool(io_backend: str = "kernel"):
+    from tokenspeed.runtime.cache.transfer.deepseek_v4_pool import DeepseekV4CachePool
+
+    device_pool = _make_v4_pool()
+    host_pool = _make_host_pool(device_pool)
+    return (
+        device_pool,
+        host_pool,
+        DeepseekV4CachePool(device_pool, host_pool, io_backend=io_backend),
     )
 
 
@@ -134,13 +181,9 @@ def _patch_direct_transfer_recorder(monkeypatch):
 
 def _assert_ratio4_direct_call(call, src_tensors, dst_tensors):
     src_layers, dst_layers, src_indices, dst_indices, page_size = call
-    assert src_indices == [1, 2, 3]
-    assert dst_indices == [7, 8, 9]
-    assert page_size == 1
-    assert src_layers[0] is src_tensors[0]
-    assert src_layers[1] is src_tensors[1]
-    assert dst_layers[0] is dst_tensors[0]
-    assert dst_layers[1] is dst_tensors[1]
+    assert (src_indices, dst_indices, page_size) == ([1, 2, 3], [7, 8, 9], 1)
+    assert all(src_layers[i] is expected for i, expected in enumerate(src_tensors))
+    assert all(dst_layers[i] is expected for i, expected in enumerate(dst_tensors))
 
 
 def test_deepseek_v4_host_pool_shapes_and_group_counts():
@@ -242,11 +285,7 @@ def test_deepseek_v4_shadow_capacity_uses_complete_history_limit():
 
 
 def test_deepseek_v4_descriptor_expansion_maps_paged_groups():
-    from tokenspeed.runtime.cache.transfer.deepseek_v4_pool import DeepseekV4CachePool
-
-    device_pool = _make_v4_pool()
-    host_pool = _make_host_pool(device_pool)
-    transfer_pool = DeepseekV4CachePool(device_pool, host_pool, io_backend="direct")
+    device_pool, host_pool, transfer_pool = _make_transfer_pool("direct")
 
     checks = [
         (
@@ -274,11 +313,7 @@ def test_deepseek_v4_descriptor_expansion_maps_paged_groups():
 
 
 def test_deepseek_v4_paged_pool_prepares_coalesced_transfers():
-    from tokenspeed.runtime.cache.transfer.deepseek_v4_pool import DeepseekV4CachePool
-
-    device_pool = _make_v4_pool()
-    host_pool = _make_host_pool(device_pool)
-    transfer_pool = DeepseekV4CachePool(device_pool, host_pool, io_backend="kernel")
+    _, _, transfer_pool = _make_transfer_pool()
     transfers = _make_ratio4_paged_transfers()
 
     prepared = transfer_pool.prepare_paged_transfers(transfers)
@@ -290,86 +325,78 @@ def test_deepseek_v4_paged_pool_prepares_coalesced_transfers():
     assert prepared[0].dst_indices.tolist() == [7, 8, 9]
 
 
-def test_deepseek_v4_paged_pool_writeback_prepared_tracks_stats(monkeypatch):
-    from tokenspeed.runtime.cache.transfer.deepseek_v4_pool import DeepseekV4CachePool
-
-    device_pool = _make_v4_pool()
-    host_pool = _make_host_pool(device_pool)
-    transfer_pool = DeepseekV4CachePool(device_pool, host_pool, io_backend="kernel")
+@pytest.mark.parametrize("host_to_device", [False, True], ids=["writeback", "loadback"])
+def test_deepseek_v4_paged_pool_prepared_maps_group_tensors(
+    monkeypatch, host_to_device
+):
+    device_pool, host_pool, transfer_pool = _make_transfer_pool()
     calls = _patch_direct_transfer_recorder(monkeypatch)
     prepared = transfer_pool.prepare_paged_transfers(_make_ratio4_paged_transfers())
-    c4_bytes = (
-        device_pool.compressed_kv_buffer[1][0].nbytes
-        + device_pool.indexer_kv_buffer[1][0].nbytes
-    )
-
-    transfer_pool.writeback_prepared_paged(prepared)
+    if host_to_device:
+        transfer_pool.loadback_prepared_paged(prepared, layer_idx=1)
+        src_pool, dst_pool = host_pool, device_pool
+    else:
+        transfer_pool.writeback_prepared_paged(prepared)
+        src_pool, dst_pool = device_pool, host_pool
 
     assert len(calls) == 1
     _assert_ratio4_direct_call(
         calls[-1],
-        (device_pool.compressed_kv_buffer[1], device_pool.indexer_kv_buffer[1]),
-        (host_pool.compressed_kv_buffer[1], host_pool.indexer_kv_buffer[1]),
-    )
-    assert transfer_pool.get_transfer_stats()["D2H"]["v4.c4a.compressed_kv"] == {
-        "calls": 1,
-        "pages": 3,
-        "bytes": 3 * c4_bytes,
-    }
-
-
-def test_deepseek_v4_paged_pool_loadback_prepared_tracks_stats(monkeypatch):
-    from tokenspeed.runtime.cache.transfer.deepseek_v4_pool import DeepseekV4CachePool
-
-    device_pool = _make_v4_pool()
-    host_pool = _make_host_pool(device_pool)
-    transfer_pool = DeepseekV4CachePool(device_pool, host_pool, io_backend="kernel")
-    calls = _patch_direct_transfer_recorder(monkeypatch)
-    prepared = transfer_pool.prepare_paged_transfers(_make_ratio4_paged_transfers())
-    c4_bytes = (
-        device_pool.compressed_kv_buffer[1][0].nbytes
-        + device_pool.indexer_kv_buffer[1][0].nbytes
+        (src_pool.compressed_kv_buffer[1], src_pool.indexer_kv_buffer[1]),
+        (dst_pool.compressed_kv_buffer[1], dst_pool.indexer_kv_buffer[1]),
     )
 
-    transfer_pool.loadback_prepared_paged(prepared, layer_idx=1)
 
-    assert len(calls) == 1
-    _assert_ratio4_direct_call(
-        calls[-1],
-        (host_pool.compressed_kv_buffer[1], host_pool.indexer_kv_buffer[1]),
-        (device_pool.compressed_kv_buffer[1], device_pool.indexer_kv_buffer[1]),
-    )
-    assert transfer_pool.get_transfer_stats()["H2D"]["v4.c4a.compressed_kv"] == {
-        "calls": 1,
-        "pages": 3,
-        "bytes": 3 * c4_bytes,
-    }
-
-
-def test_deepseek_v4_paged_pool_writeback_failure_does_not_update_stats(
+def test_deepseek_v4_paged_pool_reuses_and_invalidates_h2d_scatter_plan(
     monkeypatch,
 ):
     from tokenspeed.runtime.cache.transfer import deepseek_v4_pool
-    from tokenspeed.runtime.cache.transfer.deepseek_v4_pool import DeepseekV4CachePool
 
-    device_pool = _make_v4_pool()
-    host_pool = _make_host_pool(device_pool)
-    transfer_pool = DeepseekV4CachePool(device_pool, host_pool, io_backend="kernel")
-    transfers = _make_ratio4_paged_transfers()
+    device_pool, host_pool, transfer_pool = _make_transfer_pool()
+    monkeypatch.setattr(deepseek_v4_pool, "_H2D_SCATTER_MIN_COPY_CALLS", 0)
+    prepared = transfer_pool.prepare_paged_transfers(_make_ratio4_paged_transfers())
+    prepared_plans = []
+    launches = []
 
-    def failing_transfer_kv_direct(**kwargs):
-        del kwargs
-        raise RuntimeError("copy submission failed")
+    def prepare_plan(src_layers, dst_layers, entry_ids):
+        plan = object()
+        prepared_plans.append((plan, src_layers, dst_layers, entry_ids))
+        return plan, ""
+
+    def launch(plan, src_indices, dst_indices, entry_begin, entry_end):
+        launches.append((plan, src_indices, dst_indices, entry_begin, entry_end))
+        return SimpleNamespace(
+            used=True,
+            buckets=1,
+            kernel_launches=1,
+            fallback_reason="",
+        )
 
     monkeypatch.setattr(
         deepseek_v4_pool,
-        "transfer_kv_direct",
-        failing_transfer_kv_direct,
+        "prepare_kv_direct_h2d_scatter_plan",
+        prepare_plan,
     )
-    with pytest.raises(RuntimeError, match="copy submission failed"):
-        prepared = transfer_pool.prepare_paged_transfers(transfers)
-        transfer_pool.writeback_prepared_paged(prepared)
-    assert transfer_pool.get_transfer_stats() == {"D2H": {}, "H2D": {}}
+    monkeypatch.setattr(
+        deepseek_v4_pool,
+        "transfer_kv_direct_h2d_scatter_prepared",
+        launch,
+    )
+
+    transfer_pool.loadback_prepared_paged(prepared, layer_idx=1)
+    transfer_pool.loadback_prepared_paged(prepared, layer_idx=1)
+
+    assert len(prepared_plans) == 1
+    assert len(launches) == 2
+    assert launches[0][0] is launches[1][0] is prepared_plans[0][0]
+    assert launches[0][1] is launches[1][1]
+    assert launches[0][2] is launches[1][2]
+
+    host_pool.compressed_kv_buffer[1] = host_pool.compressed_kv_buffer[1].clone()
+    transfer_pool.loadback_prepared_paged(prepared, layer_idx=1)
+
+    assert len(prepared_plans) == 2
+    assert launches[-1][0] is prepared_plans[-1][0]
 
 
 def test_deepseek_v4_layer_getters_wait_on_registered_counter():
@@ -390,22 +417,3 @@ def test_deepseek_v4_layer_getters_wait_on_registered_counter():
     device_pool.get_kv_buffer(2)
 
     assert waits == [0, 1, 1, 1, 1, 2]
-
-
-def test_scheduler_config_accepts_paged_cache_host_group_pages():
-    from tokenspeed.runtime.engine.scheduler_utils import make_config
-
-    cfg = make_config(
-        num_device_pages=8,
-        max_scheduled_tokens=4,
-        max_batch_size=2,
-        page_size=64,
-        num_host_pages=0,
-        disable_l2_cache=False,
-        enable_l3_storage=False,
-        prefetch_threshold=4,
-        role="null",
-        paged_cache_host_group_pages={"v4.swa_kv": 17},
-    )
-
-    assert cfg.paged_cache_host_group_pages == {"v4.swa_kv": 17}

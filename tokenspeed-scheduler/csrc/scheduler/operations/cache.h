@@ -132,9 +132,9 @@ struct FlatWriteBackOperation {
     std::vector<std::vector<PagedCacheTransferPair>> paged_cache_transfers;
     std::vector<bool> is_retract;
 
-    explicit FlatWriteBackOperation(const std::vector<WriteBackOperation>& ops) {
+    explicit FlatWriteBackOperation(std::vector<WriteBackOperation> ops) {
         std::unordered_set<TransferPair, TransferPairHash> seen;
-        for (const auto& op : ops) {
+        for (auto& op : ops) {
             std::map<std::string, std::vector<std::int32_t>> src_this_op;
             std::map<std::string, std::vector<std::int32_t>> dst_this_op;
             src_this_op[CacheKindName(CacheKind::kKV)];
@@ -159,7 +159,7 @@ struct FlatWriteBackOperation {
             for (auto& [kind, pages] : dst_this_op) {
                 dst_pages_by_kind[kind].push_back(std::move(pages));
             }
-            paged_cache_transfers.push_back(op.paged_cache_transfers);
+            paged_cache_transfers.push_back(std::move(op.paged_cache_transfers));
             is_retract.push_back(op.is_retract);
         }
     }
@@ -191,9 +191,9 @@ struct FlatLoadBackOperation {
     // Indexed by op_ids; each item preserves the op's paged-cache group transfer specs.
     std::vector<std::vector<PagedCacheTransferPair>> paged_cache_transfers;
 
-    explicit FlatLoadBackOperation(const std::vector<LoadBackOperation>& ops) {
+    explicit FlatLoadBackOperation(std::vector<LoadBackOperation> ops) {
         std::unordered_set<TransferPair, TransferPairHash> seen;
-        for (const auto& op : ops) {
+        for (auto& op : ops) {
             std::map<std::string, std::vector<std::int32_t>> src_this_op;
             std::map<std::string, std::vector<std::int32_t>> dst_this_op;
             src_this_op[CacheKindName(CacheKind::kKV)];
@@ -218,7 +218,7 @@ struct FlatLoadBackOperation {
             for (auto& [kind, pages] : dst_this_op) {
                 dst_pages_by_kind[kind].push_back(std::move(pages));
             }
-            paged_cache_transfers.push_back(op.paged_cache_transfers);
+            paged_cache_transfers.push_back(std::move(op.paged_cache_transfers));
         }
     }
 };

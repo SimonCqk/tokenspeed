@@ -24,10 +24,6 @@
 
 from __future__ import annotations
 
-import logging
-import os
-import time
-
 import torch
 from tokenspeed_kernel._triton import tl, triton
 
@@ -46,10 +42,6 @@ DEEPSEEK_V4_INDEXER_MXFP4_SCALE_DIM = (
 )
 DEEPSEEK_V4_SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 _HCA_DIRECT_LAUNCH_BUCKET = 64
-_DEBUG = logging.DEBUG
-
-logger = logging.getLogger(__name__)
-
 __all__ = [
     "deepseek_v4_build_dense_prefill_local_compressed_indices",
     "deepseek_v4_combine_dense_swa_indices",
@@ -75,54 +67,6 @@ def _deepseek_v4_hca_direct_launch_rows(num_actual: int) -> int:
         // _HCA_DIRECT_LAUNCH_BUCKET
         * _HCA_DIRECT_LAUNCH_BUCKET
     )
-
-
-def _deepseek_v4_hca_direct_event_timing_enabled() -> bool:
-    if not logger.isEnabledFor(_DEBUG):
-        return False
-    if os.getenv("TS_DSV4_CUDA_EVENT_TIMING", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
-        return False
-    if not torch.cuda.is_available():
-        return False
-    is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
-    if is_capturing is None:
-        return True
-    try:
-        return not is_capturing()
-    except RuntimeError:
-        return False
-
-
-def _deepseek_v4_record_event(enabled: bool) -> torch.cuda.Event | None:
-    if not enabled:
-        return None
-    try:
-        event = torch.cuda.Event(enable_timing=True)
-        event.record()
-        return event
-    except RuntimeError:
-        return None
-
-
-def _deepseek_v4_elapsed_ms(
-    start: torch.cuda.Event | None,
-    end: torch.cuda.Event | None,
-) -> float | None:
-    if start is None or end is None:
-        return None
-    try:
-        return float(start.elapsed_time(end))
-    except RuntimeError:
-        return None
-
-
-def _deepseek_v4_fmt_ms(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.3f}"
 
 
 @triton.jit
@@ -323,7 +267,7 @@ def deepseek_v4_fused_indexer_q_rope_hadamard_mxfp4(
 # ``tl.constexpr`` compiles a fresh kernel variant for every distinct width and
 # stalls the compute stream on first use of each width. It only bounds
 # ``table_idx``, so it is a runtime scalar excluded from alignment specialization
-# (see the HCA direct kernel above for the full rationale).
+# (see the HCA direct kernel below for the full rationale).
 @triton.jit(
     do_not_specialize_on_alignment=[
         "block_table_width",
@@ -335,7 +279,6 @@ def _deepseek_v4_fused_sparse_compress_cache_kernel(
     state_cache_ptr,
     state_cache_stride0,
     state_cache_stride1,
-    active_token_indices_ptr,
     token_to_req_indices_ptr,
     positions_ptr,
     slot_mapping_ptr,
@@ -362,13 +305,8 @@ def _deepseek_v4_fused_sparse_compress_cache_kernel(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
-    HAS_ACTIVE_INDICES: tl.constexpr,
 ):
-    row_idx = tl.program_id(0)
-    if HAS_ACTIVE_INDICES:
-        token_idx = tl.load(active_token_indices_ptr + row_idx)
-    else:
-        token_idx = row_idx
+    token_idx = tl.program_id(0)
 
     state_slot = tl.load(slot_mapping_ptr + token_idx)
     if state_slot < 0:
@@ -501,39 +439,22 @@ def deepseek_v4_fused_sparse_compress_cache_insert(
     compress_ratio: int,
     overlap: bool,
     block_table_base_offsets: torch.Tensor | None = None,
-    active_token_indices: torch.Tensor | None = None,
 ) -> None:
-    num_source_tokens = min(
+    num_actual = min(
         compressor_slot_mapping.numel(),
         positions.numel(),
         kv_slot_mapping.numel(),
         token_to_req_indices.numel(),
     )
-    if active_token_indices is not None:
-        if active_token_indices.dim() != 1:
-            raise ValueError("active_token_indices must be a 1D tensor")
-        if active_token_indices.dtype != torch.int64:
-            active_token_indices = active_token_indices.to(torch.int64)
-        if active_token_indices.device != positions.device:
-            active_token_indices = active_token_indices.to(
-                positions.device,
-                non_blocking=True,
-            )
-        if not active_token_indices.is_contiguous():
-            active_token_indices = active_token_indices.contiguous()
-        num_actual = active_token_indices.numel()
-    else:
-        num_actual = num_source_tokens
     if num_actual == 0:
         return
     _deepseek_v4_fused_sparse_compress_cache_kernel[(num_actual,)](
         state_cache,
         state_cache.stride(0),
         state_cache.stride(1),
-        active_token_indices[:num_actual] if active_token_indices is not None else None,
-        token_to_req_indices[:num_source_tokens],
-        positions[:num_source_tokens],
-        compressor_slot_mapping[:num_source_tokens],
+        token_to_req_indices[:num_actual],
+        positions[:num_actual],
+        compressor_slot_mapping[:num_actual],
         block_table,
         (
             block_table_base_offsets.to(torch.int32)
@@ -548,7 +469,7 @@ def deepseek_v4_fused_sparse_compress_cache_insert(
         cos_sin_cache,
         cos_sin_cache.stride(0),
         kv_cache_2d,
-        kv_slot_mapping[:num_source_tokens],
+        kv_slot_mapping[:num_actual],
         kv_cache_block_size,
         HEAD_SIZE=DEEPSEEK_V4_HEAD_DIM,
         TRITON_BLOCK_SIZE=triton.next_power_of_2(DEEPSEEK_V4_HEAD_DIM),
@@ -561,7 +482,6 @@ def deepseek_v4_fused_sparse_compress_cache_insert(
         TOKEN_STRIDE=DEEPSEEK_V4_SWA_TOKEN_STRIDE,
         SCALE_DIM=DEEPSEEK_V4_SWA_SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache_2d.stride(0),
-        HAS_ACTIVE_INDICES=active_token_indices is not None,
         num_warps=4,
     )
 
@@ -626,7 +546,7 @@ def _deepseek_v4_fused_hca_direct_compress_cache_kernel(
     if row_idx >= num_active_tokens:
         return
     token_idx = tl.load(active_token_indices_ptr + row_idx)
-    if token_idx >= num_source_tokens:
+    if token_idx < 0 or token_idx >= num_source_tokens:
         return
 
     position = tl.load(positions_ptr + token_idx)
@@ -826,14 +746,12 @@ def deepseek_v4_fused_hca_direct_compress_cache_insert(
         block_table_base_offsets: Optional logical-page offset per request.
     """
 
-    timing_enabled = _deepseek_v4_hca_direct_event_timing_enabled()
-    wrapper_wall_start = time.perf_counter() if timing_enabled else 0.0
-    wrapper_start_event = _deepseek_v4_record_event(timing_enabled)
     num_source_tokens = min(
         kv.shape[0],
         score.shape[0],
         positions.numel(),
         kv_slot_mapping.numel(),
+        token_to_req_indices.numel(),
     )
     if active_token_indices.dim() != 1:
         raise ValueError("active_token_indices must be a 1D tensor")
@@ -855,7 +773,6 @@ def deepseek_v4_fused_hca_direct_compress_cache_insert(
     ):
         block_table_base_offsets = block_table_base_offsets.to(torch.int32)
     launch_rows = _deepseek_v4_hca_direct_launch_rows(num_actual)
-    kernel_start_event = _deepseek_v4_record_event(timing_enabled)
     _deepseek_v4_fused_hca_direct_compress_cache_kernel[(launch_rows,)](
         active_token_indices[:num_actual],
         state_cache,
@@ -895,40 +812,6 @@ def deepseek_v4_fused_hca_direct_compress_cache_insert(
         KV_BLOCK_STRIDE=kv_cache_2d.stride(0),
         num_warps=4,
     )
-    kernel_end_event = _deepseek_v4_record_event(timing_enabled)
-    wrapper_end_event = _deepseek_v4_record_event(timing_enabled)
-    if wrapper_end_event is not None:
-        try:
-            wrapper_end_event.synchronize()
-            wrapper_wall_ms = (time.perf_counter() - wrapper_wall_start) * 1000.0
-            prep_event_ms = _deepseek_v4_elapsed_ms(
-                wrapper_start_event, kernel_start_event
-            )
-            kernel_event_ms = _deepseek_v4_elapsed_ms(
-                kernel_start_event, kernel_end_event
-            )
-            post_event_ms = _deepseek_v4_elapsed_ms(kernel_end_event, wrapper_end_event)
-            wrapper_event_ms = _deepseek_v4_elapsed_ms(
-                wrapper_start_event, wrapper_end_event
-            )
-            logger.debug(
-                "[DeepSeekV4][hca_direct_event] wrapper_wall_ms=%.3f "
-                "wrapper_event_ms=%s prep_event_ms=%s kernel_event_ms=%s "
-                "post_event_ms=%s active_rows=%s launch_rows=%s "
-                "source_tokens=%s block_table_width=%s state_block_size=%s",
-                wrapper_wall_ms,
-                _deepseek_v4_fmt_ms(wrapper_event_ms),
-                _deepseek_v4_fmt_ms(prep_event_ms),
-                _deepseek_v4_fmt_ms(kernel_event_ms),
-                _deepseek_v4_fmt_ms(post_event_ms),
-                num_actual,
-                launch_rows,
-                num_source_tokens,
-                block_table.shape[-1],
-                compressor_block_size,
-            )
-        except RuntimeError:
-            pass
 
 
 # Same fix as the sparse/HCA compress kernels: ``block_table_width`` is a

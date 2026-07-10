@@ -25,6 +25,7 @@
 
 #include <map>
 #include <set>
+#include <stdexcept>
 
 namespace tokenspeed::test {
 
@@ -47,14 +48,7 @@ protected:
         hybrid_->RegisterPagedCacheHostGroup(std::move(swa_host));
     }
 
-    TreeNode* SeedCompleteDeviceSnapshot() {
-        TreeNode* terminal = InsertDevicePages(/*num_pages=*/2, /*token_start=*/1);
-        EXPECT_NE(terminal, nullptr);
-        hybrid_->AttachPagedCacheSnapshotToNode(terminal, MakeCompleteSnapshot(kLcm));
-        return terminal;
-    }
-
-    TreeNode* SeedCompleteDeviceSnapshot(token_t token_start) {
+    TreeNode* SeedCompleteDeviceSnapshot(token_t token_start = 1) {
         TreeNode* terminal = InsertDevicePages(/*num_pages=*/2, token_start);
         EXPECT_NE(terminal, nullptr);
         hybrid_->AttachPagedCacheSnapshotToNode(terminal, MakeCompleteSnapshot(kLcm));
@@ -65,13 +59,37 @@ protected:
         ASSERT_NE(node, nullptr);
         node->AttachResource<ResourceType::Host>(std::make_unique<NodeResource<ResourceType::Host>>(OwnedPages{}));
     }
+
+    void PublishHostSnapshot(TreeNode* node) {
+        AttachHostResource(node);
+        auto transfers = hybrid_->PreparePagedCacheHostWriteBack({node});
+        ASSERT_FALSE(transfers.empty());
+        hybrid_->OnPagedCacheHostWriteBackDone({node}, /*success=*/true);
+        ASSERT_TRUE(node->HasPagedCacheHostSnapshot());
+    }
+
+    void BorrowSnapshot(TreeNode* node) {
+        auto match = hybrid_->Match(MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1));
+        ASSERT_EQ(match.paged_cache.last_node, node);
+        hybrid_->AcquireForRequest("borrower", /*first_raw_position_of_op=*/0,
+                                   /*target_raw_tokens_exclusive=*/kLcm, match.paged_cache);
+    }
+
+    static void ExpectMissAtRoot(const MatchResult& match) {
+        EXPECT_EQ(match.paged_cache.last_node, nullptr);
+        EXPECT_EQ(match.paged_cache_host.last_node, nullptr);
+        ASSERT_NE(match.device.last_node, nullptr);
+        EXPECT_TRUE(match.device.last_node->IsRoot());
+        ASSERT_NE(match.host.last_node, nullptr);
+        EXPECT_TRUE(match.host.last_node->IsRoot());
+    }
 };
 
 class PagedCacheL2SchedulerTest : public SchedulerTestSuite {
 protected:
     SchedulerConfig MakeConfig() override {
         auto cfg = SchedulerTestSuite::MakeConfig();
-        cfg.page_size = kSmallFixtureParams.page_size;
+        cfg.block_size = kSmallFixtureParams.page_size;
         cfg.device_allocator.total_pages = 32;
         cfg.host_allocator.total_pages = 32;
         cfg.max_scheduled_tokens = 64;
@@ -117,35 +135,10 @@ protected:
         PlanOnce();
     }
 
-    static const FlatWriteBackOperation* GetWriteBack(const ExecutionPlan& plan) {
-        for (const auto& op : plan.Operations()) {
-            if (auto* cache_op = std::get_if<CacheOperation>(&op)) {
-                if (auto* wb = std::get_if<FlatWriteBackOperation>(cache_op)) {
-                    return wb;
-                }
-            }
-        }
-        return nullptr;
-    }
-
-    static const FlatLoadBackOperation* GetLoadBack(const ExecutionPlan& plan) {
-        for (const auto& op : plan.Operations()) {
-            if (auto* cache_op = std::get_if<CacheOperation>(&op)) {
-                if (auto* lb = std::get_if<FlatLoadBackOperation>(cache_op)) {
-                    return lb;
-                }
-            }
-        }
-        return nullptr;
-    }
-
-    static const FlatForwardOperation* GetForward(const ExecutionPlan& plan) {
-        for (const auto& op : plan.Operations()) {
-            if (auto* fwd = std::get_if<FlatForwardOperation>(&op)) {
-                return fwd;
-            }
-        }
-        return nullptr;
+    ExecutionPlan FinishForWriteBack(const std::string& id = "r1") {
+        BringToDecoding(id);
+        SendFinish(id);
+        return PlanOnce();
     }
 
     static std::map<std::string, std::int32_t> UniqueDstPagesByGroup(const FlatWriteBackOperation& writeback) {
@@ -171,6 +164,61 @@ protected:
         return static_cast<std::int32_t>(pages.size());
     }
 };
+
+class PagedCacheExhaustionSchedulerTest : public PagedCacheL2SchedulerTest {
+protected:
+    SchedulerConfig MakeConfig() override {
+        auto cfg = PagedCacheL2SchedulerTest::MakeConfig();
+        for (auto& group : cfg.paged_cache_groups) {
+            group.total_pages = group.group_id == "fh" ? 3 : 5;
+        }
+        return cfg;
+    }
+};
+
+TEST(TreeNodeTest, DuplicateChildPreservesExistingAndIncomingOwnership) {
+    TreeNode root;
+    const token_vec_t key{1, 2};
+    auto existing = std::make_unique<TreeNode>(key);
+    auto incoming = std::make_unique<TreeNode>(key);
+    TreeNode* existing_ptr = existing.get();
+    TreeNode* incoming_ptr = incoming.get();
+
+    root.AddChild(key, std::move(existing));
+    EXPECT_THROW(root.AddChild(key, std::move(incoming)), std::logic_error);
+
+    ASSERT_NE(incoming, nullptr);
+    EXPECT_EQ(incoming.get(), incoming_ptr);
+    auto retained = root.RemoveChild(key);
+    ASSERT_NE(retained, nullptr);
+    EXPECT_EQ(retained.get(), existing_ptr);
+}
+
+TEST_F(PagedCacheExhaustionSchedulerTest, AbortsOneDeterministicVictimAndSurvivorAdvancesNextRound) {
+    Submit({MakeRequestSpec("z-request", /*num_pages=*/2, /*start=*/1),
+            MakeRequestSpec("a-request", /*num_pages=*/2, /*start=*/101)});
+
+    auto prefill_plan = PlanOnce();
+    const auto* prefill = GetForward(prefill_plan);
+    ASSERT_NE(prefill, nullptr);
+    ASSERT_EQ(prefill->request_ids.size(), 2u);
+    SendForwardDone("z-request", {42});
+    SendForwardDone("a-request", {43});
+
+    auto abort_plan = PlanOnce();
+    ASSERT_EQ(abort_plan.SchedulerAborts().size(), 1u);
+    EXPECT_EQ(abort_plan.SchedulerAborts().front().request_id, "a-request");
+    const auto* blocked = GetForward(abort_plan);
+    ASSERT_NE(blocked, nullptr);
+    EXPECT_TRUE(blocked->request_ids.empty());
+
+    auto survivor_plan = PlanOnce();
+    EXPECT_TRUE(survivor_plan.SchedulerAborts().empty());
+    const auto* survivor = GetForward(survivor_plan);
+    ASSERT_NE(survivor, nullptr);
+    ASSERT_EQ(survivor->request_ids.size(), 1u);
+    EXPECT_EQ(survivor->request_ids.front(), "z-request");
+}
 
 class PagedCacheHistoryOnlyL2OffloadTest : public ::testing::Test {
 protected:
@@ -309,13 +357,118 @@ TEST_F(PagedCacheL2OffloadTest, DemotedDeviceSnapshotDoesNotMatchAsDeviceHit) {
     EXPECT_EQ(demoted_match.paged_cache_host.last_node, nullptr);
 }
 
-TEST_F(PagedCacheL2OffloadTest, HostHitMaterializesDeviceDestinationPagesForForwardMetadata) {
+TEST_F(PagedCacheL2OffloadTest, DeviceDemotePreservesSnapshotBorrowedByRequestTable) {
     TreeNode* terminal = SeedCompleteDeviceSnapshot();
     ASSERT_NE(terminal, nullptr);
-    AttachHostResource(terminal);
+    ASSERT_NO_FATAL_FAILURE(PublishHostSnapshot(terminal));
+    ASSERT_NO_FATAL_FAILURE(BorrowSnapshot(terminal));
+    const auto borrowed_fh = hybrid_->GetRequestPagedCachePageIds("borrower", "fh");
+    ASSERT_FALSE(borrowed_fh.empty());
+
+    auto demoted = terminal->DetachResource<ResourceType::Device>();
+    ASSERT_NE(demoted, nullptr);
+    hybrid_->OnKVDeviceDemote(terminal);
+
+    EXPECT_TRUE(terminal->HasPagedCacheSnapshot());
+    EXPECT_EQ(hybrid_->GetRequestPagedCachePageIds("borrower", "fh"), borrowed_fh);
+
+    hybrid_->ReleaseRequest("borrower");
+    hybrid_->OnKVDeviceDemote(terminal);
+    EXPECT_FALSE(terminal->HasPagedCacheSnapshot());
+}
+
+TEST_F(PagedCacheL2OffloadTest, ReleasingBorrowedOnlyTableAllowsAdmissionToPruneSnapshot) {
+    TreeNode* terminal = SeedCompleteDeviceSnapshot();
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_NO_FATAL_FAILURE(BorrowSnapshot(terminal));
+    auto blocked_free = hybrid_->InitialSimulatedFree();
+    blocked_free["fh"] = 0;
+    blocked_free["swa"] = 0;
+    EXPECT_FALSE(hybrid_->AdmitChunk("pressure", /*first_raw_position_of_op=*/0,
+                                     /*target_raw_tokens_exclusive=*/kLcm, blocked_free));
+    EXPECT_TRUE(terminal->HasPagedCacheSnapshot());
+
+    hybrid_->ReleaseRequest("borrower");
+    auto released_free = hybrid_->InitialSimulatedFree();
+    released_free["fh"] = 0;
+    released_free["swa"] = 0;
+    EXPECT_TRUE(hybrid_->AdmitChunk("pressure", /*first_raw_position_of_op=*/0,
+                                    /*target_raw_tokens_exclusive=*/kLcm, released_free));
+    EXPECT_FALSE(terminal->HasPagedCacheSnapshot());
+}
+
+TEST_F(PagedCacheL2OffloadTest, PendingSnapshotPartialSplitPreservesSuffixIdentityAndBorrowedPages) {
+    PageAllocator split_host_alloc{kPageSize, /*total_pages=*/3};
+    TreeNode* terminal = SeedCompleteDeviceSnapshot();
+    ASSERT_NE(terminal, nullptr);
+    const PagedCacheSnapshot* device_snapshot = terminal->GetPagedCacheSnapshot();
+    const std::size_t terminal_depth = terminal->DepthInTokens();
+
+    ASSERT_NO_FATAL_FAILURE(BorrowSnapshot(terminal));
+    const auto borrowed_fh = hybrid_->GetRequestPagedCachePageIds("borrower", "fh");
+    const auto borrowed_swa = hybrid_->GetRequestPagedCachePageIds("borrower", "swa");
+
+    terminal->AttachResource<ResourceType::Host>(
+        std::make_unique<NodeResource<ResourceType::Host>>(split_host_alloc.Allocate(/*count=*/2)));
+    auto writeback = hybrid_->PreparePagedCacheHostWriteBack({terminal});
+    ASSERT_FALSE(writeback.empty());
+    ASSERT_TRUE(terminal->HasPagedCachePendingHostSnapshot());
+
+    TreeNode* prefix = kv_cache_->GetRadixTree().SplitAt(terminal, kPageSize);
+    ASSERT_NE(prefix, nullptr);
+    EXPECT_NE(prefix, terminal);
+    EXPECT_EQ(terminal->Parent(), prefix);
+    EXPECT_EQ(terminal->DepthInTokens(), terminal_depth);
+    EXPECT_EQ(terminal->GetPagedCacheSnapshot(), device_snapshot);
+    EXPECT_TRUE(terminal->HasPagedCachePendingHostSnapshot());
+    EXPECT_EQ(hybrid_->GetRequestPagedCachePageIds("borrower", "fh"), borrowed_fh);
+    EXPECT_EQ(hybrid_->GetRequestPagedCachePageIds("borrower", "swa"), borrowed_swa);
+
+    hybrid_->OnPagedCacheHostWriteBackDone({terminal}, /*success=*/true);
+    EXPECT_FALSE(terminal->HasPagedCachePendingHostSnapshot());
+    EXPECT_TRUE(terminal->HasPagedCacheHostSnapshot());
+    EXPECT_EQ(terminal->GetPagedCacheSnapshot(), device_snapshot);
+    hybrid_->ReleaseRequest("borrower");
+
+    auto prefix_host = prefix->DetachResource<ResourceType::Host>();
+    auto suffix_host = terminal->DetachResource<ResourceType::Host>();
+    ASSERT_NE(prefix_host, nullptr);
+    ASSERT_NE(suffix_host, nullptr);
+}
+
+TEST_F(PagedCacheL2OffloadTest, HostSnapshotPartialSplitStaysOnSuffix) {
+    PageAllocator split_host_alloc{kPageSize, /*total_pages=*/3};
+    TreeNode* terminal = SeedCompleteDeviceSnapshot();
+    ASSERT_NE(terminal, nullptr);
+    terminal->AttachResource<ResourceType::Host>(
+        std::make_unique<NodeResource<ResourceType::Host>>(split_host_alloc.Allocate(/*count=*/2)));
     auto writeback = hybrid_->PreparePagedCacheHostWriteBack({terminal});
     ASSERT_FALSE(writeback.empty());
     hybrid_->OnPagedCacheHostWriteBackDone({terminal}, /*success=*/true);
+    const PagedCacheSnapshot* device_snapshot = terminal->GetPagedCacheSnapshot();
+    const PagedCacheSnapshot* host_snapshot = terminal->GetPagedCacheHostSnapshot();
+    ASSERT_NE(device_snapshot, nullptr);
+    ASSERT_NE(host_snapshot, nullptr);
+    const std::size_t terminal_depth = terminal->DepthInTokens();
+
+    TreeNode* prefix = kv_cache_->GetRadixTree().SplitAt(terminal, kPageSize);
+
+    ASSERT_NE(prefix, nullptr);
+    EXPECT_EQ(terminal->Parent(), prefix);
+    EXPECT_EQ(terminal->DepthInTokens(), terminal_depth);
+    EXPECT_EQ(terminal->GetPagedCacheSnapshot(), device_snapshot);
+    EXPECT_EQ(terminal->GetPagedCacheHostSnapshot(), host_snapshot);
+
+    auto prefix_host = prefix->DetachResource<ResourceType::Host>();
+    auto suffix_host = terminal->DetachResource<ResourceType::Host>();
+    ASSERT_NE(prefix_host, nullptr);
+    ASSERT_NE(suffix_host, nullptr);
+}
+
+TEST_F(PagedCacheL2OffloadTest, HostHitMaterializesDeviceDestinationPagesForForwardMetadata) {
+    TreeNode* terminal = SeedCompleteDeviceSnapshot();
+    ASSERT_NE(terminal, nullptr);
+    ASSERT_NO_FATAL_FAILURE(PublishHostSnapshot(terminal));
     auto detached_device = hybrid_->DetachPagedCacheSnapshotFromNode(terminal);
     ASSERT_NE(detached_device, nullptr);
 
@@ -385,10 +538,7 @@ TEST_F(PagedCacheHistoryOnlyL2OffloadTest, HostLoadedHistoryPrefixCanPublishCont
 TEST_F(PagedCacheL2OffloadTest, HostStateRecoveryRequiresExactTerminalStateCompleteness) {
     TreeNode* terminal = SeedCompleteDeviceSnapshot();
     ASSERT_NE(terminal, nullptr);
-    AttachHostResource(terminal);
-    auto writeback = hybrid_->PreparePagedCacheHostWriteBack({terminal});
-    ASSERT_FALSE(writeback.empty());
-    hybrid_->OnPagedCacheHostWriteBackDone({terminal}, /*success=*/true);
+    ASSERT_NO_FATAL_FAILURE(PublishHostSnapshot(terminal));
     auto detached_device = hybrid_->DetachPagedCacheSnapshotFromNode(terminal);
     ASSERT_NE(detached_device, nullptr);
 
@@ -404,10 +554,7 @@ TEST_F(PagedCacheL2OffloadTest, HostStateRecoveryRequiresExactTerminalStateCompl
 TEST_F(PagedCacheL2OffloadTest, HostStateRecoveryCapsWhenTerminalStateGroupMissing) {
     TreeNode* terminal = SeedCompleteDeviceSnapshot();
     ASSERT_NE(terminal, nullptr);
-    AttachHostResource(terminal);
-    auto writeback = hybrid_->PreparePagedCacheHostWriteBack({terminal});
-    ASSERT_FALSE(writeback.empty());
-    hybrid_->OnPagedCacheHostWriteBackDone({terminal}, /*success=*/true);
+    ASSERT_NO_FATAL_FAILURE(PublishHostSnapshot(terminal));
     auto detached_device = hybrid_->DetachPagedCacheSnapshotFromNode(terminal);
     ASSERT_NE(detached_device, nullptr);
 
@@ -419,22 +566,27 @@ TEST_F(PagedCacheL2OffloadTest, HostStateRecoveryCapsWhenTerminalStateGroupMissi
     const auto tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1);
     auto match = hybrid_->Match(tokens, MatchIntent::StateRecovery);
 
-    EXPECT_EQ(match.paged_cache.last_node, nullptr);
-    EXPECT_EQ(match.paged_cache_host.last_node, nullptr);
-    ASSERT_NE(match.device.last_node, nullptr);
-    EXPECT_TRUE(match.device.last_node->IsRoot());
-    ASSERT_NE(match.host.last_node, nullptr);
-    EXPECT_TRUE(match.host.last_node->IsRoot());
+    ExpectMissAtRoot(match);
 }
 
-TEST_F(PagedCacheL2OffloadTest, HostPrefixReuseCapsToHistoryWhenContinuationStateGroupMissing) {
+TEST_F(PagedCacheL2OffloadTest, PrefixReuseMissesWhenContinuationStateGroupMissing) {
     hybrid_->EnablePagedCacheAdjunct({"fh"}, {});
     TreeNode* terminal = SeedCompleteDeviceSnapshot();
     ASSERT_NE(terminal, nullptr);
-    AttachHostResource(terminal);
-    auto writeback = hybrid_->PreparePagedCacheHostWriteBack({terminal});
-    ASSERT_FALSE(writeback.empty());
-    hybrid_->OnPagedCacheHostWriteBackDone({terminal}, /*success=*/true);
+
+    auto device_snapshot = hybrid_->DetachPagedCacheSnapshotFromNode(terminal);
+    ASSERT_NE(device_snapshot, nullptr);
+    device_snapshot->groups.erase("swa");
+    ASSERT_TRUE(hybrid_->AttachPagedCacheSnapshotToNode(terminal, std::move(device_snapshot)));
+
+    const auto tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1);
+    auto device_match = hybrid_->Match(tokens);
+    EXPECT_EQ(device_match.paged_cache.last_node, nullptr);
+    EXPECT_EQ(device_match.paged_cache_host.last_node, nullptr);
+    ASSERT_NE(device_match.device.last_node, nullptr);
+    EXPECT_TRUE(device_match.device.last_node->IsRoot());
+
+    ASSERT_NO_FATAL_FAILURE(PublishHostSnapshot(terminal));
     auto detached_device = hybrid_->DetachPagedCacheSnapshotFromNode(terminal);
     ASSERT_NE(detached_device, nullptr);
 
@@ -443,26 +595,15 @@ TEST_F(PagedCacheL2OffloadTest, HostPrefixReuseCapsToHistoryWhenContinuationStat
     host_snapshot->groups.erase("swa");
     ASSERT_TRUE(hybrid_->AttachPagedCacheHostSnapshotToNode(terminal, std::move(host_snapshot)));
 
-    const auto tokens = MakeAlignedTokens(/*num_pages=*/2, kPageSize, /*start=*/1);
-    auto match = hybrid_->Match(tokens);
+    auto host_match = hybrid_->Match(tokens);
 
-    ASSERT_EQ(match.paged_cache.last_node, nullptr);
-    ASSERT_NE(match.paged_cache_host.last_node, nullptr);
-    EXPECT_EQ(match.paged_cache_host.last_node, terminal);
-    EXPECT_EQ(match.paged_cache_host.history_hit_tokens, kLcm);
-    EXPECT_EQ(match.paged_cache_host.prefix_len_tokens, kLcm);
-    ASSERT_EQ(match.paged_cache_host.per_group_page_ids.count("fh"), 1u);
-    EXPECT_EQ(match.paged_cache_host.per_group_page_ids.count("swa"), 0u);
+    ExpectMissAtRoot(host_match);
 }
 
 TEST_F(PagedCacheL2OffloadTest, KVHostEvictReleasesPagedCacheHostSnapshotPages) {
     TreeNode* terminal = SeedCompleteDeviceSnapshot();
     ASSERT_NE(terminal, nullptr);
-    AttachHostResource(terminal);
-    auto writeback = hybrid_->PreparePagedCacheHostWriteBack({terminal});
-    ASSERT_FALSE(writeback.empty());
-    hybrid_->OnPagedCacheHostWriteBackDone({terminal}, /*success=*/true);
-    ASSERT_TRUE(terminal->HasPagedCacheHostSnapshot());
+    ASSERT_NO_FATAL_FAILURE(PublishHostSnapshot(terminal));
     EXPECT_EQ(hybrid_->PagedCacheHostGroupAvailablePages("fh"), 1);
     EXPECT_EQ(hybrid_->PagedCacheHostGroupAvailablePages("swa"), 0);
 
@@ -476,11 +617,7 @@ TEST_F(PagedCacheL2OffloadTest, KVHostEvictReleasesPagedCacheHostSnapshotPages) 
 TEST_F(PagedCacheL2OffloadTest, HostWriteBackPrunesOnlyUnpinnedPagedCacheHostSnapshots) {
     TreeNode* pinned = SeedCompleteDeviceSnapshot(/*token_start=*/1);
     ASSERT_NE(pinned, nullptr);
-    AttachHostResource(pinned);
-    auto first_writeback = hybrid_->PreparePagedCacheHostWriteBack({pinned});
-    ASSERT_FALSE(first_writeback.empty());
-    hybrid_->OnPagedCacheHostWriteBackDone({pinned}, /*success=*/true);
-    ASSERT_TRUE(pinned->HasPagedCacheHostSnapshot());
+    ASSERT_NO_FATAL_FAILURE(PublishHostSnapshot(pinned));
 
     TreeNode* next = SeedCompleteDeviceSnapshot(/*token_start=*/101);
     ASSERT_NE(next, nullptr);
@@ -499,12 +636,41 @@ TEST_F(PagedCacheL2OffloadTest, HostWriteBackPrunesOnlyUnpinnedPagedCacheHostSna
     EXPECT_TRUE(next->HasPagedCachePendingHostSnapshot());
 }
 
-TEST_F(PagedCacheL2SchedulerTest, WriteBackAckDemotesDeviceSnapshotAndNextHitLoadsFromHost) {
-    const auto request_tokens = MakeAlignedTokens(/*num_pages=*/3, kSmallFixtureParams.page_size, /*start=*/1);
-    BringToDecoding("r1");
-    SendFinish("r1");
+TEST_F(PagedCacheL2OffloadTest, HostWriteBackPrunesMultipleSnapshotsForOneAllocation) {
+    auto publish_history_snapshot = [&](token_t token_start) {
+        TreeNode* node = InsertDevicePages(/*num_pages=*/2, token_start);
+        EXPECT_NE(node, nullptr);
+        EXPECT_TRUE(hybrid_->AttachPagedCacheSnapshotToNode(node, MakeHistoryOnlySnapshot(kLcm)));
+        AttachHostResource(node);
+        auto writeback = hybrid_->PreparePagedCacheHostWriteBack({node});
+        EXPECT_FALSE(writeback.empty());
+        hybrid_->OnPagedCacheHostWriteBackDone({node}, /*success=*/true);
+        return node;
+    };
 
-    auto writeback_plan = PlanOnce();
+    TreeNode* first = publish_history_snapshot(/*token_start=*/1);
+    TreeNode* second = publish_history_snapshot(/*token_start=*/101);
+    ASSERT_TRUE(first->HasPagedCacheHostSnapshot());
+    ASSERT_TRUE(second->HasPagedCacheHostSnapshot());
+
+    constexpr std::int32_t kTargetTokens = 2 * kLcm;
+    TreeNode* target = InsertDevicePages(/*num_pages=*/2, /*token_start=*/201, first);
+    ASSERT_NE(target, nullptr);
+    ASSERT_TRUE(hybrid_->AttachPagedCacheSnapshotToNode(target, MakeHistoryOnlySnapshot(kTargetTokens)));
+    AttachHostResource(target);
+
+    auto writeback = hybrid_->PreparePagedCacheHostWriteBack({target});
+
+    ASSERT_FALSE(writeback.empty());
+    EXPECT_FALSE(first->HasPagedCacheHostSnapshot());
+    EXPECT_FALSE(second->HasPagedCacheHostSnapshot());
+    EXPECT_TRUE(target->HasPagedCachePendingHostSnapshot());
+}
+
+#if !TOKENSPEED_FLAT_KVCACHE
+TEST_F(PagedCacheL2SchedulerTest, WriteBackAckDemotesDeviceSnapshotAndLoadbackPinsHostSnapshot) {
+    const auto request_tokens = MakeAlignedTokens(/*num_pages=*/3, kSmallFixtureParams.page_size, /*start=*/1);
+    auto writeback_plan = FinishForWriteBack();
     const auto* writeback = GetWriteBack(writeback_plan);
     ASSERT_NE(writeback, nullptr);
     ASSERT_EQ(writeback->op_ids.size(), 1u);
@@ -541,14 +707,46 @@ TEST_F(PagedCacheL2SchedulerTest, WriteBackAckDemotesDeviceSnapshotAndNextHitLoa
     EXPECT_EQ(groups, (std::set<std::string>{"fh", "swa"}));
     EXPECT_EQ(scheduler_->PagedCacheHostGroupAvailablePages("fh"), fh_host_after_writeback);
     EXPECT_EQ(scheduler_->PagedCacheHostGroupAvailablePages("swa"), swa_host_after_writeback);
+
+    ASSERT_EQ(loadback->op_ids.size(), 1u);
+    EXPECT_THROW(SendLoadBackDone(loadback->op_ids[0], /*success=*/false), std::runtime_error);
+    EXPECT_NO_THROW(SendLoadBackDone(loadback->op_ids[0]));
+    EXPECT_NO_THROW(SendLoadBackDone(loadback->op_ids[0], /*success=*/false));
 }
+
+TEST_F(PagedCacheL2SchedulerTest, AbortDuringLoadbackWaitsForAck) {
+    const auto request_tokens = MakeAlignedTokens(/*num_pages=*/3, kSmallFixtureParams.page_size, /*start=*/1);
+    auto writeback_plan = FinishForWriteBack();
+    const auto* writeback = GetWriteBack(writeback_plan);
+    ASSERT_NE(writeback, nullptr);
+    ASSERT_EQ(writeback->op_ids.size(), 1u);
+    SendWriteBackDone(writeback->op_ids[0]);
+    PlanOnce();
+
+    Submit(RequestSpec{.request_id = "r2", .tokens = request_tokens});
+    auto loadback_plan = PlanOnce();
+    const auto* loadback = GetLoadBack(loadback_plan);
+    ASSERT_NE(loadback, nullptr);
+    ASSERT_EQ(loadback->op_ids.size(), 1u);
+
+    ExecutionEvent abort;
+    abort.With(ForwardEvent{forward::Abort{.request_id = "r2"}});
+    scheduler_->Advance(std::move(abort));
+    EXPECT_EQ(scheduler_->PrefillSize(), 1u);
+    auto waiting_plan = PlanOnce();
+    ASSERT_NE(GetForward(waiting_plan), nullptr);
+    EXPECT_TRUE(GetForward(waiting_plan)->request_ids.empty());
+    EXPECT_EQ(GetLoadBack(waiting_plan), nullptr);
+
+    SendLoadBackDone(loadback->op_ids[0]);
+    EXPECT_EQ(scheduler_->PrefillSize(), 0u);
+    EXPECT_TRUE(PlanOnce().SchedulerAborts().empty());
+}
+#endif
 
 TEST_F(PagedCacheL2SchedulerTest, FailedWriteBackDoesNotPublishHostSnapshotOrDemoteDeviceSnapshot) {
     const auto request_tokens = MakeAlignedTokens(/*num_pages=*/3, kSmallFixtureParams.page_size, /*start=*/1);
-    BringToDecoding("r1");
-    SendFinish("r1");
-
-    auto writeback_plan = PlanOnce();
+    auto writeback_plan = FinishForWriteBack();
     const auto* writeback = GetWriteBack(writeback_plan);
     ASSERT_NE(writeback, nullptr);
     ASSERT_EQ(writeback->op_ids.size(), 1u);

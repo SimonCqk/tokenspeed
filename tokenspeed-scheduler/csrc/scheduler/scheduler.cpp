@@ -379,7 +379,7 @@ std::vector<WriteBackOperation> Scheduler::newWriteBackOperation(
         return ops;
     }
     for (auto& [id, req] : requests) {
-        if (!req->Is<fsm::Draining>()) continue;
+        if (!req->Is<fsm::Draining>() || (!deferred_aborts_.empty() && deferred_aborts_.contains(id))) continue;
         const auto& pages_to_transfer = req->GetPagesToTransfer<fsm::Draining>();
         const auto& paged_cache_transfers = req->GetPagedCacheWriteBackTransfers<fsm::Draining>();
 
@@ -394,9 +394,10 @@ std::vector<WriteBackOperation> Scheduler::newWriteBackOperation(
                 std::vector<PagedCacheTransferPair>(paged_cache_transfers.begin(), paged_cache_transfers.end())});
             req->Apply(fsm::CommitDrainingEvent{});
         } else {
-            req->Apply(fsm::AbortEvent{
+            req->Apply(fsm::AbortEvent{&kv_prefix_cache_, hybrid_prefix_cache_ ? &*hybrid_prefix_cache_ : nullptr
 #if TOKENSPEED_FLAT_KVCACHE
-                &coordinator_
+                                       ,
+                                       &coordinator_
 #endif
             });
         }
@@ -410,19 +411,23 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
     std::vector<WriteBackOperation> write_back_ops;
     write_back_ops = std::move(newWriteBackOperation(requests_));
 
+    const bool has_deferred_aborts = !deferred_aborts_.empty();
     if (hybrid_prefix_cache_) {
         for (const auto& [id, req] : requests_) {
-            if (req->Is<fsm::Finished>()) {
+            if (req->Is<fsm::Finished>() && (!has_deferred_aborts || !deferred_aborts_.contains(id))) {
                 hybrid_prefix_cache_->ReleaseRequest(id);
             }
         }
     }
-    std::erase_if(requests_, [](const auto& req) { return req.second->template Is<fsm::Finished>(); });
+    std::erase_if(requests_, [this, has_deferred_aborts](const auto& req) {
+        return req.second->template Is<fsm::Finished>() &&
+               (!has_deferred_aborts || !deferred_aborts_.contains(req.first));
+    });
 
     std::vector<Request*> candidates;
     for (auto& [id, req] : requests_) {
-        if (!req->Is<fsm::Draining>() && !req->Is<fsm::Prefetching>() && !req->Is<fsm::Retracting>() &&
-            !req->Is<fsm::WritingBack>()) {
+        if ((!has_deferred_aborts || !deferred_aborts_.contains(id)) && !req->Is<fsm::Draining>() &&
+            !req->Is<fsm::Prefetching>() && !req->Is<fsm::Retracting>() && !req->Is<fsm::WritingBack>()) {
             candidates.push_back(req.get());
         }
     }
@@ -471,16 +476,17 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
     }
 #endif
     if (!write_back_ops.empty()) {
-        plan.With(CacheOperation{FlatWriteBackOperation{write_back_ops}});
+        plan.With(CacheOperation{FlatWriteBackOperation{std::move(write_back_ops)}});
     }
     if (auto* lb = std::get_if<std::vector<LoadBackOperation>>(&cache_ops)) {
         if (!lb->empty()) {
-            plan.With(CacheOperation{FlatLoadBackOperation{*lb}});
+            plan.With(CacheOperation{FlatLoadBackOperation{std::move(*lb)}});
         }
     }
     if (std::getenv("DEBUG_MEM")) {
         check_device_mem();
     }
+    plan.WithSchedulerAborts(std::exchange(scheduler_aborts_, {}));
     return plan;
 }
 

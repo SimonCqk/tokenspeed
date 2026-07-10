@@ -6,8 +6,10 @@ from dataclasses import dataclass
 
 import torch
 from tokenspeed_kernel.ops.kvcache.cuda import (
+    DirectH2DScatterPlan,
+    prepare_kv_direct_h2d_scatter_plan,
     transfer_kv_direct,
-    transfer_kv_direct_h2d_scatter,
+    transfer_kv_direct_h2d_scatter_prepared,
 )
 
 from tokenspeed.runtime.cache.deepseek_v4_cache_host import (
@@ -27,6 +29,7 @@ from tokenspeed.runtime.utils import get_colorful_logger
 
 logger = get_colorful_logger(__name__)
 _DEBUG = logging.DEBUG
+_H2D_SCATTER_MIN_COPY_CALLS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,13 +41,27 @@ class PagedCacheTensorRef:
     page_bytes: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _PreparedPagedCacheTransfer:
     group_id: str
     src_indices: torch.Tensor
     dst_indices: torch.Tensor
     page_count: int
     span_count: int
+    src_indices_device: torch.Tensor | None = None
+    dst_indices_device: torch.Tensor | None = None
+
+    def h2d_indices(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.src_indices_device is None or self.src_indices_device.device != device:
+            if device.type == "cuda":
+                if not self.src_indices.is_pinned():
+                    self.src_indices = self.src_indices.pin_memory()
+                if not self.dst_indices.is_pinned():
+                    self.dst_indices = self.dst_indices.pin_memory()
+            self.src_indices_device = self.src_indices.to(device, non_blocking=True)
+            self.dst_indices_device = self.dst_indices.to(device, non_blocking=True)
+        assert self.dst_indices_device is not None
+        return self.src_indices_device, self.dst_indices_device
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,10 +162,10 @@ class DeepseekV4CachePool:
         self.io_backend = io_backend
         self._counter = LayerDoneCounter(self.num_layers())
         device_pool.register_layer_transfer_counter(self._counter)
-        self._transfer_stats: dict[str, dict[str, dict[str, int]]] = {
-            "D2H": {},
-            "H2D": {},
-        }
+        self._h2d_scatter_plans: dict[
+            str,
+            tuple[int, tuple[tuple[int, int, int, int], ...], DirectH2DScatterPlan],
+        ] = {}
 
     @property
     def device(self):
@@ -166,16 +183,6 @@ class DeepseekV4CachePool:
 
     def get_layer_done_counter(self) -> LayerDoneCounter:
         return self._counter
-
-    def get_transfer_stats(self) -> dict[str, dict[str, dict[str, int]]]:
-        return {
-            direction: {group_id: dict(values) for group_id, values in groups.items()}
-            for direction, groups in self._transfer_stats.items()
-        }
-
-    def reset_transfer_stats(self) -> None:
-        for groups in self._transfer_stats.values():
-            groups.clear()
 
     def local_layer_idx(self, global_layer_id: int) -> int:
         return global_layer_id
@@ -311,17 +318,18 @@ class DeepseekV4CachePool:
         self, transfers: list[_PreparedPagedCacheTransfer]
     ) -> None:
         """Submit D2H copies using coalesced page index tensors."""
-        self._copy_prepared_paged(transfers, host_to_device=False, layer_idx=None)
+        for transfer in transfers:
+            self._copy_prepared_transfer(
+                transfer,
+                self.tensor_refs_for_group(transfer.group_id),
+                host_to_device=False,
+            )
 
     def loadback_prepared_paged(
         self, transfers: list[_PreparedPagedCacheTransfer], layer_idx: int
     ) -> None:
         """Submit one layer's H2D copy using precomputed page index tensors."""
-        self._copy_prepared_paged(
-            transfers,
-            host_to_device=True,
-            layer_idx=layer_idx,
-        )
+        self.loadback_prepared_paged_range(transfers, layer_idx, layer_idx + 1)
 
     def loadback_prepared_paged_range(
         self,
@@ -349,32 +357,12 @@ class DeepseekV4CachePool:
                 transfer,
                 refs,
                 host_to_device=True,
+                layer_start=layer_start,
+                layer_end=layer_end,
             )
             if summary is not None:
                 summaries.append(summary)
         self._log_h2d_chunk_summary(layer_start, layer_end, summaries)
-
-    def _copy_prepared_paged(
-        self,
-        transfers: list[_PreparedPagedCacheTransfer],
-        *,
-        host_to_device: bool,
-        layer_idx: int | None,
-    ) -> None:
-        summaries: list[_PagedCopySummary] = []
-        for transfer in transfers:
-            refs = self.tensor_refs_for_group(transfer.group_id, layer_idx=layer_idx)
-            summary = self._copy_prepared_transfer(
-                transfer,
-                refs,
-                host_to_device=host_to_device,
-            )
-            if summary is not None:
-                summaries.append(summary)
-        if host_to_device:
-            layer_start = 0 if layer_idx is None else layer_idx
-            layer_end = self.num_layers() if layer_idx is None else layer_idx + 1
-            self._log_h2d_chunk_summary(layer_start, layer_end, summaries)
 
     def _copy_prepared_transfer(
         self,
@@ -382,10 +370,11 @@ class DeepseekV4CachePool:
         refs: list[PagedCacheTensorRef],
         *,
         host_to_device: bool,
+        layer_start: int | None = None,
+        layer_end: int | None = None,
     ) -> _PagedCopySummary | None:
         if transfer.page_count == 0 or not refs:
             return None
-        direction = "H2D" if host_to_device else "D2H"
         transfer_bytes = transfer.page_count * sum(ref.page_bytes for ref in refs)
         effective_copy_calls = int(transfer.span_count) * len(refs)
         buckets = len({ref.page_bytes for ref in refs})
@@ -400,25 +389,37 @@ class DeepseekV4CachePool:
         fallback_reason = ""
         kernel_launches = 0
         if host_to_device:
+            assert layer_start is not None and layer_end is not None
+            full_refs = self.tensor_refs_for_group(transfer.group_id)
             threshold_copy_calls = max(
                 effective_copy_calls,
-                int(transfer.span_count)
-                * len(self.tensor_refs_for_group(transfer.group_id)),
+                int(transfer.span_count) * len(full_refs),
             )
-            scatter_result = transfer_kv_direct_h2d_scatter(
-                src_layers=src_layers,
-                dst_layers=dst_layers,
-                src_indices=transfer.src_indices,
-                dst_indices=transfer.dst_indices,
-                page_size=1,
-                effective_copy_calls=threshold_copy_calls,
-            )
-            if scatter_result.used:
+            scatter_result = None
+            if threshold_copy_calls >= _H2D_SCATTER_MIN_COPY_CALLS:
+                plan, fallback_reason = self._h2d_scatter_plan(
+                    transfer.group_id,
+                    full_refs,
+                )
+                if plan is not None:
+                    src_indices_device, dst_indices_device = transfer.h2d_indices(
+                        torch.device(self.device)
+                    )
+                    scatter_result = transfer_kv_direct_h2d_scatter_prepared(
+                        plan,
+                        src_indices_device,
+                        dst_indices_device,
+                        layer_start,
+                        layer_end,
+                    )
+            else:
+                fallback_reason = "below_threshold"
+            if scatter_result is not None and scatter_result.used:
                 backend = "scatter"
                 buckets = int(scatter_result.buckets)
                 kernel_launches = int(scatter_result.kernel_launches)
-            else:
-                fallback_reason = str(scatter_result.fallback_reason)
+            elif scatter_result is not None:
+                fallback_reason = fallback_reason or str(scatter_result.fallback_reason)
 
         if backend == "direct":
             transfer_kv_direct(
@@ -428,12 +429,6 @@ class DeepseekV4CachePool:
                 dst_indices=transfer.dst_indices,
                 page_size=1,
             )
-        self._record_transfer_stats(
-            direction,
-            str(transfer.group_id),
-            pages=transfer.page_count,
-            transfer_bytes=transfer_bytes,
-        )
         return _PagedCopySummary(
             backend=backend,
             fallback_reason=fallback_reason,
@@ -480,18 +475,35 @@ class DeepseekV4CachePool:
             ",".join(fallback_reasons) if fallback_reasons else "none",
         )
 
-    def _record_transfer_stats(
+    def _h2d_scatter_plan(
         self,
-        direction: str,
         group_id: str,
-        *,
-        pages: int,
-        transfer_bytes: int,
-    ) -> None:
-        stats = self._transfer_stats[direction].setdefault(
-            group_id,
-            {"calls": 0, "pages": 0, "bytes": 0},
+        refs: list[PagedCacheTensorRef],
+    ) -> tuple[DirectH2DScatterPlan | None, str]:
+        device = torch.device(self.device)
+        stream_id = (
+            int(torch.cuda.current_stream(device).cuda_stream)
+            if device.type == "cuda"
+            else 0
         )
-        stats["calls"] += 1
-        stats["pages"] += int(pages)
-        stats["bytes"] += int(transfer_bytes)
+        signature = tuple(
+            (
+                ref.layer_id,
+                ref.page_bytes,
+                ref.host_tensor.data_ptr(),
+                ref.device_tensor.data_ptr(),
+            )
+            for ref in refs
+        )
+        cached = self._h2d_scatter_plans.get(group_id)
+        if cached is not None and cached[0] == stream_id and cached[1] == signature:
+            return cached[2], ""
+
+        plan, reason = prepare_kv_direct_h2d_scatter_plan(
+            [ref.host_tensor for ref in refs],
+            [ref.device_tensor for ref in refs],
+            [ref.layer_id for ref in refs],
+        )
+        if plan is not None:
+            self._h2d_scatter_plans[group_id] = (stream_id, signature, plan)
+        return plan, reason

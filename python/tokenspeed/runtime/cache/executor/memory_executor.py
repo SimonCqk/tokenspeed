@@ -406,6 +406,7 @@ class MemoryExecutor:
                 draft_host_pool=self.draft_host_pool,
                 draft_layer_num=draft_layer_num,
             )
+        self.emits_loadback_acks = self.host_exec.emits_loadback_acks
         self.storage_exec = StorageExecutor(
             page_size=config.page_size,
             device_pool=device_pool,
@@ -494,7 +495,7 @@ class MemoryExecutor:
                 )
                 if paged_transfers:
                     if logger.isEnabledFor(_DEBUG):
-                        pages, spans, groups = _paged_transfer_debug_summary(
+                        pages, spans, debug_groups = _paged_transfer_debug_summary(
                             paged_transfers
                         )
                         logger.debug(
@@ -503,7 +504,7 @@ class MemoryExecutor:
                             op_id,
                             pages,
                             spans,
-                            groups,
+                            debug_groups,
                             len(paged_transfers),
                             is_retract,
                         )
@@ -562,7 +563,7 @@ class MemoryExecutor:
                 )
                 if paged_transfers:
                     if logger.isEnabledFor(_DEBUG):
-                        pages, spans, groups = _paged_transfer_debug_summary(
+                        pages, spans, debug_groups = _paged_transfer_debug_summary(
                             paged_transfers
                         )
                         logger.debug(
@@ -571,7 +572,7 @@ class MemoryExecutor:
                             op_id,
                             pages,
                             spans,
-                            groups,
+                            debug_groups,
                             len(paged_transfers),
                         )
                     self.host_exec.enqueue_paged_cache_loadback(

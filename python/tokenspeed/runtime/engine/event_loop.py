@@ -114,6 +114,16 @@ def _paged_cache_host_group_pages_for_scheduler(
     return dict(getattr(host_pool, "paged_cache_group_page_counts", {}))
 
 
+def _validate_grouped_kvstore_draft_pool(
+    enable_kvstore: bool, paged_cache_groups: list, draft_token_to_kv_pool
+) -> None:
+    if enable_kvstore and paged_cache_groups and draft_token_to_kv_pool is not None:
+        raise NotImplementedError(
+            "KVStore does not support speculative draft KV for grouped paged "
+            "caches; pass --disable-kvstore."
+        )
+
+
 def calc_l3_query_hashes(scheduler, tokens: list[int]) -> list[str]:
     return scheduler.calc_rolling_hash(tokens, apply_match=True)
 
@@ -218,6 +228,12 @@ class EventLoop:
             draft_model_config,
             decode_input_tokens=decode_input_tokens,
             overlap_schedule_depth=self.overlap_schedule_depth,
+        )
+        paged_cache_groups = pool_to_paged_cache_groups(token_to_kv_pool)
+        _validate_grouped_kvstore_draft_pool(
+            server_args.enable_kvstore,
+            paged_cache_groups,
+            draft_token_to_kv_pool,
         )
 
         num_total_pages = self.max_total_num_tokens // server_args.block_size
@@ -357,8 +373,8 @@ class EventLoop:
                 server_args.enable_kvstore, self.memory_executor.host_pool
             )
 
-        # Flat host tier acks loadbacks (LoadBackDoneEvent), so they join the
-        # inflight accounting in _submit_cache_ops; radix loadbacks never ack.
+        # Executors that pin loadback resources acknowledge completion, so their
+        # operations join the inflight accounting in _submit_cache_ops.
         self._loadback_acks_expected = getattr(
             self.memory_executor, "emits_loadback_acks", False
         )
@@ -377,7 +393,6 @@ class EventLoop:
 
         # Adjunct is device-side prefix-cache metadata and must stay enabled
         # under --disable-kvstore to match the non-L2 DeepSeek V4 path.
-        paged_cache_groups = pool_to_paged_cache_groups(token_to_kv_pool)
         validate_flat_scheduler_config(
             flat_kvcache_ext=scheduler_ext_flat_kvcache(),
             paged_cache_groups=paged_cache_groups,
@@ -771,6 +786,10 @@ class EventLoop:
             KVEventBatch(ts=time.time(), events=events, attn_dp_rank=self.dp_rank)
         )
 
+    def _publish_scheduler_aborts(self, execution_plan) -> None:
+        for request_id, message in getattr(execution_plan, "scheduler_aborts", ()):
+            self.output_processor.publish_scheduler_abort(request_id, message)
+
     def _cache_group_has_work(self, local_has_work: bool) -> bool:
         """Whether ANY attn-tp rank has cache work this step (unanimous via a
         single-int MAX all_reduce, far cheaper than the payload gather it
@@ -1014,8 +1033,7 @@ class EventLoop:
             if isinstance(op, Cache.WriteBackOp):
                 self._num_inflight_cache_ops += len(op.op_ids)
             elif isinstance(op, Cache.LoadBackOp):
-                # Radix loadbacks are fire-and-forget (no ack, nothing in
-                # flight); the flat host tier acks one LoadBackDone per op_id.
+                # Resource-pinning host tiers ack one LoadBackDone per op_id.
                 if self._loadback_acks_expected:
                     self._num_inflight_cache_ops += len(op.op_ids)
             elif isinstance(op, (Cache.PrefetchOp, Cache.BackUpOp)):
@@ -1636,6 +1654,7 @@ class EventLoop:
                 self._paused_idle_step()
                 continue
             execution_plan = self.scheduler.next_execution_plan()
+            self._publish_scheduler_aborts(execution_plan)
             self._publish_scheduler_kv_events()
             self._handle_flat_oom_terminals(execution_plan)
             self._submit_cache_ops(execution_plan)
@@ -1788,6 +1807,7 @@ class EventLoop:
                 prev_forward_op = None
                 continue
             execution_plan = self.scheduler.next_execution_plan()
+            self._publish_scheduler_aborts(execution_plan)
             self._publish_scheduler_kv_events()
             self._handle_flat_oom_terminals(execution_plan)
 

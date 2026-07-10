@@ -182,6 +182,7 @@ class HostExecutor:
 
         self.pools = {CacheKind(pool.kind): pool for pool in pools}
         self.paged_pool = paged_pool
+        self.emits_loadback_acks = paged_pool is not None
         self.device = (
             next(iter(self.pools.values())).device
             if self.pools
@@ -705,6 +706,12 @@ class HostExecutor:
         for ack in self.ack_load_queue:
             if not ack.finish_event.query():
                 remaining.append(ack)
+            elif self.emits_loadback_acks:
+                for op_id in ack.op_ids:
+                    evt = Cache.LoadBackDoneEvent()
+                    evt.op_id = op_id
+                    evt.success = True
+                    results.append(evt)
         self.ack_load_queue[:] = remaining
         return results
 
