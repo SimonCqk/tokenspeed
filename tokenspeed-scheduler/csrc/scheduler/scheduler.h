@@ -99,6 +99,18 @@ public:
 #endif
 
 private:
+    enum class ScheduleFailure {
+        kNone,
+        kGenericResource,
+        kPagedCache,
+    };
+
+    template <typename Event>
+    struct ScheduleAttempt {
+        std::optional<Event> event;
+        ScheduleFailure failure{ScheduleFailure::kGenericResource};
+    };
+
     // Second element is LoadBackOperation list (normal path) or WriteBackOperation list (retract triggered).
     std::tuple<std::vector<ForwardOperation>,
                std::variant<std::vector<LoadBackOperation>, std::vector<WriteBackOperation>>>
@@ -111,7 +123,7 @@ private:
                                              std::vector<LoadBackOperation>& loadback_ops);
     PrefillOperation applyEventAndGenerateOp(Request* request, fsm::SchedulePrefillEvent event);
     DecodeOperation applyEventAndGenerateOp(Request* request, fsm::ScheduleDecodeEvent event);
-    DecodeOperation applyEventAndGenerateOp(Request* request, fsm::ScheduleDecodeFromRetractedEvent event);
+    DecodeOperation applyEventAndGenerateOp(Request* request, fsm::ScheduleDecodeFromRetractedEvent& event);
     std::optional<WriteBackOperation> applyEventAndGenerateOp(Request* request, fsm::ScheduleRetractEvent event);
     PrefetchOperation applyEventAndGenerateOp(Request* request, fsm::SchedulePrefetchEvent event);
 
@@ -127,11 +139,15 @@ private:
     std::optional<fsm::SchedulePrefillEvent> schedulePrefill(Request* request, std::int32_t remaining,
                                                              std::int32_t reserve_num_tokens_in_next_schedule_event,
                                                              std::map<std::string, std::int32_t>& simulated_free);
-    std::optional<fsm::ScheduleDecodeEvent> scheduleDecode(Request* request,
-                                                           std::map<std::string, std::int32_t>& simulated_free);
-    std::optional<fsm::ScheduleDecodeFromRetractedEvent> scheduleDecodeFromRetracted(
+    ScheduleAttempt<fsm::ScheduleDecodeEvent> scheduleDecode(Request* request,
+                                                             std::map<std::string, std::int32_t>& simulated_free);
+    ScheduleAttempt<fsm::ScheduleDecodeFromRetractedEvent> scheduleDecodeFromRetracted(
         Request* request, std::map<std::string, std::int32_t>& simulated_free);
     std::optional<fsm::ScheduleRetractEvent> scheduleRetract(Request* request);
+    LoadBackOperation newLoadBackOperation(const std::string& request_id, const std::vector<TreeNode*>& diff,
+                                           const std::vector<TreeNode*>& mamba_nodes,
+                                           std::vector<PagedCacheTransferPair> paged_cache_transfers,
+                                           TreeNode* paged_cache_host_node);
 
 #if TOKENSPEED_FLAT_KVCACHE
     // One hash pass before scheduling: non-owning device/host probes plus the
@@ -151,9 +167,19 @@ private:
     void resolveFlatStarvation(const std::vector<Request*>& candidates, bool made_progress);
 #endif
 
+    void abortRequest(Request* request, std::string message);
     void check_device_mem();
 
 private:
+    struct DeferredAbort {
+        bool discard_writeback{false};
+        std::string scheduler_message;
+    };
+
+    bool hasInFlightCacheOp(const std::string& request_id) const;
+    void deferAbort(const std::string& request_id, bool discard_writeback, std::string scheduler_message = {});
+    void tryFinalizeDeferredAbort(const std::string& request_id);
+
     void handleEvent(const cache::PrefetchDone& event);
     void handleEvent(const cache::WriteBackDone& event);
     void handleEvent(const cache::LoadBackDone& event);
@@ -192,6 +218,9 @@ private:
     KVPrefixCache kv_prefix_cache_;
     ReqPoolAllocator req_pool_allocator_;
     std::optional<HybridPrefixCache> hybrid_prefix_cache_{};
+    // Prefill-completing and decode operations still owed by the executor.
+    // Starvation recovery must not release their request-owned cache pages.
+    std::unordered_map<std::string, std::int32_t> pending_forward_results_;
 
 #if !TOKENSPEED_FLAT_KVCACHE
     struct RadixPageTableEmission {
@@ -214,10 +243,8 @@ private:
     std::vector<std::string> flat_group_ids_;  // group_id per cache group, index-aligned to coordinator groups
     // Fresh child pages accumulated while building the current execution plan.
     std::map<std::string, std::vector<std::int32_t>> new_flat_page_ids_;
-    // ExtendResults the executor still owes per request (erased on Finish/Abort/PD-success); non-empty means
-    // an in-flight forward can still free pool pages, which flatPoolWedged keys off.
-    std::unordered_map<std::string, std::int32_t> pending_forward_results_;
-    // Requests with an active P->D transfer must retain their cache blocks.
+    // Requests with an active P->D transfer stay out of OOM/retract selection.
+    // The normal success, failure, finish, and abort paths clear the pin.
     std::unordered_set<std::string> flat_pd_transfer_pins_;
     // Set only when exact LCM placement rejects an otherwise schedulable request
     // in the current round. Starvation recovery must not react to unrelated gates.
@@ -281,7 +308,9 @@ private:
 private:
     std::unordered_map<std::string, std::unique_ptr<Request>> requests_;
     std::unordered_map<cache_op_id, CacheOpSpec> cache_op_tracker_;
+    std::unordered_map<std::string, DeferredAbort> deferred_aborts_;
     std::vector<KvCacheEvent> kv_events_;
+    std::vector<SchedulerAbort> scheduler_aborts_;
     SchedulerStats stats_;
 };
 

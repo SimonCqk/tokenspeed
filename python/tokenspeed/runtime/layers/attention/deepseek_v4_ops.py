@@ -849,7 +849,6 @@ def deepseek_v4_hca_compress_kv_cache_insert(
     kv_cache_block_size: int,
     compress_ratio: int = 128,
     block_table_base_offsets: torch.Tensor | None = None,
-    active_token_indices: torch.Tensor | None = None,
 ) -> None:
     """Compress HCA state, normalize/RoPE/FP8-quantize, and insert KV cache.
 
@@ -912,7 +911,6 @@ def deepseek_v4_hca_compress_kv_cache_insert(
         compress_ratio=compress_ratio,
         overlap=False,
         block_table_base_offsets=block_table_base_offsets,
-        active_token_indices=active_token_indices,
     )
 
 

@@ -118,11 +118,6 @@ TreeNode* RadixTree::SplitAt(TreeNode* descendant, std::int32_t depth_in_tokens)
             return current;
         }
         if (depth_in_tokens > parent_depth && depth_in_tokens < this_depth) {
-            // Refuse to split a snapshot-bearing node (would dangle borrowed ids).
-            if (current->HasPagedCacheSnapshot() || current->HasPagedCacheHostSnapshot() ||
-                current->HasPagedCachePendingHostSnapshot()) {
-                return nullptr;
-            }
             TreeNode* parent = current->Parent();
             const token_vec_t child_key = getFirstPage(current->Tokens(), page_size_);
             const std::size_t prefix_pages = static_cast<std::size_t>((depth_in_tokens - parent_depth) / page_size_);
@@ -177,11 +172,6 @@ WalkResult RadixTree::WalkDownUtilMismatch(token_slice aligned_tokens, TreeNode:
             break;
         }
         if (matched_num_pages != static_cast<std::int32_t>(child->Tokens().size() / page_size_)) {
-            // Refuse to split a snapshot-bearing node; borrowed ids rely on it.
-            if (child->HasPagedCacheSnapshot() || child->HasPagedCacheHostSnapshot() ||
-                child->HasPagedCachePendingHostSnapshot()) {
-                break;
-            }
             SplitResult split = splitChild(current, walk_key_cache, matched_num_pages);
             child = split.prefix;
         }

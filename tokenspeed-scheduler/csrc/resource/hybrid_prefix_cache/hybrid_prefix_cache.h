@@ -214,11 +214,6 @@ private:
     void augmentMatch(MatchResult& match) const;
     void augmentMatchPagedCache(MatchResult& match, MatchIntent intent) const;
 
-    // Detach oldest evictable snapshot to free pool pages. State-only path is
-    // used only on kStateStarved; history/both go to full cascade.
-    bool tryPrunePagedCacheSnapshot(AdmissionFailureKind kind);
-    bool tryPrunePagedCacheHostSnapshot();
-
     bool admitPagedCacheChunk(const std::string& request_id, std::int32_t first_raw_position_of_op,
                               std::int32_t target_raw_tokens_exclusive,
                               std::map<std::string, std::int32_t>& simulated_free,
@@ -263,7 +258,6 @@ private:
     std::unordered_set<std::string> paged_cache_state_group_set_;
     std::unordered_set<std::string> paged_cache_continuation_state_group_set_;
 
-    // TODO(snapshot-lru-perf): O(N log N) per prune; swap in LRU index if profiling shows it matters.
     std::unordered_set<TreeNode*> paged_cache_snapshot_nodes_;
     std::unordered_set<TreeNode*> paged_cache_host_snapshot_nodes_;
     std::unordered_set<TreeNode*> paged_cache_pending_host_snapshot_nodes_;

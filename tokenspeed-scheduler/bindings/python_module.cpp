@@ -474,13 +474,22 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
         .def_ro("capacity_pages", &tokenspeed::FlatTerminalError::capacity_pages)
         .def_ro("message", &tokenspeed::FlatTerminalError::message);
 
+    auto collect_scheduler_aborts = [](const tokenspeed::ExecutionPlan& plan) -> nb::list {
+        nb::list result;
+        for (const auto& abort : plan.SchedulerAborts()) {
+            result.append(nb::make_tuple(abort.request_id, abort.message));
+        }
+        return result;
+    };
+
     nb::class_<tokenspeed::ExecutionPlan>(m, "ExecutionPlan")
         .def(nb::init<>())
         .def_prop_ro("forward", collect_forward)
         .def_prop_ro("cache", collect_cache)
         .def_ro("flat_oom_request_ids", &tokenspeed::ExecutionPlan::flat_oom_request_ids)
         .def_ro("flat_pages_to_zero", &tokenspeed::ExecutionPlan::flat_pages_to_zero)
-        .def_ro("flat_terminal_errors", &tokenspeed::ExecutionPlan::flat_terminal_errors);
+        .def_ro("flat_terminal_errors", &tokenspeed::ExecutionPlan::flat_terminal_errors)
+        .def_prop_ro("scheduler_aborts", collect_scheduler_aborts);
 
     nb::class_<tokenspeed::Scheduler>(m, "Scheduler")
         .def(nb::init<tokenspeed::SchedulerConfig>(), nb::arg("config") = tokenspeed::SchedulerConfig{})

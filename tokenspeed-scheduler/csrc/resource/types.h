@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -115,6 +116,7 @@ struct CacheOpSpec {
     TreeNode* last_node{nullptr};
     std::vector<TreeNode*> nodes;
     std::vector<TreeNode*> paged_cache_nodes;
+    std::unique_ptr<HostNodeRef> paged_loadback_host_pin;
 
     CacheOpSpec();
     ~CacheOpSpec();
