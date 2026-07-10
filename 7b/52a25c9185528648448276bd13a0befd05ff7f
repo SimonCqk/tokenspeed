@@ -1,0 +1,33 @@
+python/tokenspeed/runtime/cache/executor/memory_executor.py
+  s_6486291bb56ff3::t_1411cef3cbe44f 497,506,565,574
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_20109aa125157a 276,299,318-319,501,578,783
+tokenspeed-scheduler/csrc/fsm/forward_events.h
+  s_6486291bb56ff3::t_a3c629730f5f9c 77,91,93-96,104,176-180,249,261
+tokenspeed-scheduler/csrc/scheduler/execution_plan.h
+  s_6486291bb56ff3::t_14fbe9b0e6c068 34
+tokenspeed-scheduler/csrc/scheduler/operations/cache.h
+  s_6486291bb56ff3::t_7bc6c5413e51e4 135,137,162,194,196,221
+tokenspeed-scheduler/csrc/scheduler/scheduler.cpp
+  s_6486291bb56ff3::t_ba18dcec00b5cb 396,400
+tokenspeed-scheduler/csrc/scheduler/scheduler.h
+  s_6486291bb56ff3::t_b7ba6f026be731 96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "7b52a25c9185528648448276bd13a0befd05ff7f",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
