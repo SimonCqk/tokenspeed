@@ -1,0 +1,47 @@
+tokenspeed-scheduler/tests/cpp/test_paged_cache_replay.cpp
+  s_6486291bb56ff3::t_ee254c87ee7123 533,552-558
+tokenspeed-scheduler/tests/cpp/test_paged_cache_l2_offload.cpp
+  s_6486291bb56ff3::t_0eec9a645d26e5 290-311
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_6bebabf136f112 9,13,17-18,22-38
+python/tokenspeed/runtime/engine/event_loop.py
+  s_6486291bb56ff3::t_3f12b8b852c84a 1281-1285
+tokenspeed-kernel/test/test_kvcacheio_direct.py
+  s_6486291bb56ff3::t_4271314c83fa1e 5-9,36,151
+tokenspeed-scheduler/csrc/resource/page_container.h
+  s_6486291bb56ff3::t_7475578566256b 35
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
+  s_6486291bb56ff3::t_542bef5915e685 551,1267-1271
+  s_6486291bb56ff3::t_92edd91e65e1e3 548-550
+  s_6486291bb56ff3::t_2bf6083836b0bb 117-124,547,592-597,614,863,866,1441,1455,1458
+  s_6486291bb56ff3::t_2f39373698460c 552
+tokenspeed-scheduler/tests/cpp/test_retract.cpp
+  s_6486291bb56ff3::t_8e247589b780ea 71-79,100-110
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.h
+  s_6486291bb56ff3::t_73da9d09da0e17 103
+  s_6486291bb56ff3::t_dc80dce919d079 204,269
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_6486291bb56ff3::t_697544fec1c79a 63-110,294-298,300,545-548,554,556
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_6486291bb56ff3::t_ea1340c432800f 103-119,331-332,587-588,612-617,943
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_c22d704e740654 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "ba668e8ac713a58efbbc61aa1ce92c6bab1f9bc2",
+  "prompts": {},
+  "sessions": {
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
