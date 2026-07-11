@@ -1,0 +1,85 @@
+tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/triton/deepseek_v4.py
+  s_6486291bb56ff3::t_20109aa125157a 276,299,318-319,501,578,783
+tokenspeed-scheduler/csrc/scheduler/scheduler.h
+  s_6486291bb56ff3::t_b7ba6f026be731 108
+  s_6486291bb56ff3::t_a3d282ac9328ee 85-96,120-122,126,163
+tokenspeed-scheduler/csrc/fsm/forward_events.h
+  s_6486291bb56ff3::t_a3c629730f5f9c 77,91,93-96,104,176-180,249,261
+tokenspeed-scheduler/csrc/scheduler/execution_plan.h
+  s_6486291bb56ff3::t_14fbe9b0e6c068 41
+  s_6486291bb56ff3::t_fe14c38dc9c00a 23-24,32-36,53-57,59,63
+tokenspeed-scheduler/tests/cpp/test_paged_cache_replay.cpp
+  s_6486291bb56ff3::t_ee254c87ee7123 408,410-411,552,571-574
+  s_6486291bb56ff3::t_43cb833cd8479a 405-407
+  s_6486291bb56ff3::t_bcf004ef3067e3 409
+  s_6486291bb56ff3::t_6d431812b9bd09 412-413
+  s_6486291bb56ff3::t_046f5c47fee803 395-404,845,875
+tokenspeed-scheduler/csrc/scheduler/scheduler.cpp
+  s_6486291bb56ff3::t_ba18dcec00b5cb 396,400
+  s_6486291bb56ff3::t_9e442b0ec2d9e7 406
+tokenspeed-scheduler/csrc/scheduler/operations/cache.h
+  s_6486291bb56ff3::t_7bc6c5413e51e4 135,137,162,194,196,221
+python/tokenspeed/runtime/cache/executor/memory_executor.py
+  s_6486291bb56ff3::t_1411cef3cbe44f 497,506,565,574
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_6bebabf136f112 18-36,45,47,49,57-61,64-69,71-74,399
+  s_6486291bb56ff3::t_9b9aad178b31cb 15-17
+  s_6486291bb56ff3::t_098da837c6ee69 397-398
+  s_6486291bb56ff3::t_25383342a92d68 400-402
+docs/recipes/models.md
+  s_6486291bb56ff3::t_70d4beb78dad1b 206-208
+python/tokenspeed/runtime/cache/transfer/deepseek_v4_pool.py
+  s_6486291bb56ff3::t_3659118be83355 9-10,12,32,44,51-64,165-168,321-326,332,360-361,373-374,392-393,396,398-418,422-423,479,482-506,508-510
+python/tokenspeed/runtime/engine/event_loop.py
+  s_6486291bb56ff3::t_3735c0678085ab 110-119,225-230,755-758,1590,1742
+python/tokenspeed/runtime/engine/generation_output_processor.py
+  s_6486291bb56ff3::t_9381669d1bfc87 425,427-428,437-438,441-449
+test/runtime/test_generation_output_processor.py
+  s_6486291bb56ff3::t_b0c78c1864d513 137-156
+tokenspeed-kernel/python/tokenspeed_kernel/ops/kvcache/cuda.py
+  s_13c4bd3f519fea::t_05ef08c8302dc2 23-27,31-37,44-51,58-60,66-67,73-165,167-169,176
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/kvcacheio_transfer.cu
+  s_6486291bb56ff3::t_89acb8c9b599fa 683-684,695-696
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/kvcacheio.py
+  s_6486291bb56ff3::t_beed12f21db851 22,83-101,191-330,402,405,407-412,414-420,762,764,771
+tokenspeed-kernel/test/test_kvcacheio_direct.py
+  s_6486291bb56ff3::t_eca4f4b1c3ce20 81,83-85,91,111,119,123,154-171,175-185,189-198,201-203,205-208,210-215,220-231,247-256,259
+tokenspeed-scheduler/bindings/python_module.cpp
+  s_6486291bb56ff3::t_5056f02837a3fa 410-417,421-422
+tokenspeed-scheduler/csrc/resource/hybrid_prefix_cache/hybrid_prefix_cache.cpp
+  s_6486291bb56ff3::t_6871cb03567ceb 677,1000-1003,1007-1009,1013,1025,1029,1033-1038,1042-1044,1046-1049,1052-1053,1358-1412,1434,1702-1798,1801-1802
+tokenspeed-scheduler/csrc/resource/radix_tree/tree_node.cpp
+  s_6486291bb56ff3::t_1afcca9cc62916 24,44-49,103-104
+tokenspeed-scheduler/csrc/scheduler/outside_event_handler.cpp
+  s_6486291bb56ff3::t_c300998333f7a3 160-165
+tokenspeed-scheduler/tests/cpp/paged_cache_test_fixture.h
+  s_6486291bb56ff3::t_5c262f4a441eb5 148,150-151
+tokenspeed-scheduler/tests/cpp/test_retract_abort_pages.cpp
+  s_6486291bb56ff3::t_f3c8dbf9ad7503 92-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "32a2bf9581aefe7442581782ea1f2be7e2ca9a05",
+  "prompts": {},
+  "sessions": {
+    "s_13c4bd3f519fea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f49fc-8a4d-7690-9143-2ea6451f3acb",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
