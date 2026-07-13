@@ -1,0 +1,327 @@
+python/tokenspeed/runtime/configs/deepseek_v4_cache_spec.py
+  s_95fb3ee8a39051::t_d75877f8d9248b 22-26,31-44,195-238,258,260-273,286-291,306-311,323-332,345-350,357-358,369-373,375-378,380
+python/tokenspeed/runtime/configs/flat_memory_plan.py
+  s_b74c5ebdd7c524::t_2382282271c83d 15-16,19,21-24,263-1430
+python/tokenspeed/runtime/configs/paged_cache_spec.py
+  s_95fb3ee8a39051::t_4d694885e42bb8 25-33,38-39,47-111,321,572,579,607,635-731,733-734,738,741-743,750
+python/tokenspeed/runtime/deepseek_v4_cache_tables.py
+  s_39f9be92f82707::t_4b14faffe02d4a 1-231
+python/tokenspeed/runtime/engine/event_loop.py
+  s_96c5cd9c184397::t_66490834af1497 42,47-49,64,81,184-194,386,400-404,423,425,468-481,515,1439-1529,1535-1542,1553-1577,1638-1651,1654,1656-1657,1669-1670,1678,1680-1683,1685-1711,1724-1742,1749-1767
+python/tokenspeed/runtime/engine/generation_output_processor.py
+  s_46f87793fde292::t_caf857ab1ac091 548-580,595-606,663,681-686,693-695,702-707,712-717,825-829,839-843
+python/tokenspeed/runtime/engine/pause.py
+  s_96c5cd9c184397::t_421b48bbc48e9b 89-92,94,100-103
+python/tokenspeed/runtime/engine/request_handler.py
+  s_c1922f67325c3b::t_32e54ad2364462 89,115,204-211
+python/tokenspeed/runtime/execution/cuda_graph_wrapper.py
+  s_96c5cd9c184397::t_5a5865392f5bb3 34-36,232-236,246,249-255,265,268-271,277-279,282-290,292-294,302-303,311-315,567-705,710,715-724,729,732-734,736-774,782-785,792-798,810-815,819,829-831,847-853,889-928,972-973,975-1000,1030-1075,1077-1080,1084-1087,1107-1109,1112-1116,1118,1149-1174,1182,1186-1191,1201-1205,1222-1234,1362,1374-1380,1433,1441-1461,1475,1487-1491,1510-1514,1523,1535,1557,1561,1565-1568,1586-1597
+python/tokenspeed/runtime/execution/drafter/dflash.py
+  s_39f9be92f82707::t_0ea0c317b0779d 113-118
+python/tokenspeed/runtime/execution/drafter/eagle.py
+  s_39f9be92f82707::t_8214bb8a12182c 347-360
+python/tokenspeed/runtime/execution/input_buffer.py
+  s_536a3da3e72caa::t_235f301849e0b0 27,37,61-62,72-77,262,276-280,284-294
+python/tokenspeed/runtime/execution/model_executor.py
+  s_1488fcde94986e::t_836f514df9a039 37-40,42,283-329,370-371,685,688-695,699,702,704-708,1357-1365,1474-1488,1756-1792,2015
+python/tokenspeed/runtime/execution/prefill_graph.py
+  s_4f1e746efcf893::t_afc206582d1d7e 257,448-454,456-458,463-474,559-563,681-688
+python/tokenspeed/runtime/execution/types.py
+  s_46f87793fde292::t_1f23f9f8226d5a 25-27,37-264,291-297,303-436
+python/tokenspeed/runtime/layers/attention/backends/base.py
+  s_39f9be92f82707::t_df4550b201cd7b 73-77,161,169-173
+python/tokenspeed/runtime/layers/attention/backends/deepseek_v4.py
+  s_c046d13886f367::t_a68f057d0785a5 41-44,246-251,302-316,445-470,537,604-606,608-609,651,654-655,658-659,662-665,678-685,687-700,744-760,768,787,1303-1326,1332-1346,1496-1502,1514,1562,1684-1689,1738-1739,1742-1782,1790-1795,1797,1848,1850-1858,1861,1865-1889,1903,1910-1914,1939-1940,1944-1946,1952-1956,2027-2039,2082,2087,2106-2110,2114-2118,2128,2174-2176,2178-2179,2203,2218,2223,2246-2250,2262-2264
+python/tokenspeed/runtime/layers/attention/backends/flat_groups.py
+  s_51d1e2155d2303::t_735ca41c3fea23 4-17,32,116-188,205-209,230,232-237,239-244,250-254,270-277,317,324-327,330,333,335,349-356,369,373-374,376-378,382-387,399-401,403-406,410-415,426-431,451-456,466-470
+python/tokenspeed/runtime/layers/attention/backends/mha.py
+  s_51d1e2155d2303::t_1d892e1671eec6 97-98,111,184,191-193,208,221,273,284,311,319,391-400,410,430,446,452-454,486
+python/tokenspeed/runtime/layers/attention/backends/trtllm.py
+  s_46f87793fde292::t_f78dd9359c1d30 101,404,407-409,421,429,449,456-464,484,495,505,516,539,636,667,682,737,809-814,823-827,831-835,839-843,870,886,897,921,935,944-946,980
+python/tokenspeed/runtime/layers/attention/deepseek_v4/metadata.py
+  s_c046d13886f367::t_1951324d9c60aa 148-151
+python/tokenspeed/runtime/layers/attention/kv_cache/base.py
+  s_96c5cd9c184397::t_9e1edbf2c87346 43
+python/tokenspeed/runtime/layers/attention/kv_cache/deepseek_v4.py
+  s_536a3da3e72caa::t_e284061eda2809 26-27,41-54,57-58,160-314,404-951,1156,1162-1163,1189-1198,1231-1233,1252-1254,1263-1267,1295,1346-1349,1370-1375,1391,1398,1411,1417-1442,1449,1462,1490-1493,1552,1570-1571,1580-1584,1594-1607,1614-1622,1624-1689,1742-1748,1750-1755,1757-1765,1767-1773,1775-1785,1787-1793,1795-1811,1813,1817-1844,1846-1900,1915-1916,1919-1925,1936-1963,1976-1979,1989-1996,2006
+python/tokenspeed/runtime/layers/attention/registry.py
+  s_f964defa70a38e::t_d82ede918b0489 27-29,32,91-110,123-164,462-472,527-528,608-614,616-619,621-725,853-859,861-875,879,882-887,904-905,959-960
+python/tokenspeed/runtime/models/deepseek_v4.py
+  s_c046d13886f367::t_ec6ff2370376dd 2021-2024,2030-2034,2043,2809,2840-2851,2864,2874,2891-2892,2897-2904,2916,2923-2926,2944,3269,3286,3288-3294,3312,3324,3344-3345,3353,3371,3383
+python/tokenspeed/runtime/pd/factory.py
+  s_96c5cd9c184397::t_afa21f5aa13b83 23-25,52-56
+test/ci/ut/ut-deepseek-v4-flat-differential-flash.yaml
+  s_96c5cd9c184397::t_7404458cadee57 1-24
+test/ci/ut/ut-deepseek-v4-flat-differential-pro-tp8-ep.yaml
+  s_c1922f67325c3b::t_b1faf57f709a8d 1-24
+test/ci/ut/ut-deepseek-v4-flat-differential-pro-tp8.yaml
+  s_c1922f67325c3b::t_e4d5779e9c414e 1-24
+test/ci/ut/ut-deepseek-v4-flat-synthetic-b200.yaml
+  s_2efe010fdd6ad6::t_1c720546da85a2 1-24
+test/runtime/run_ci_suite.py
+  s_2efe010fdd6ad6::t_307a6aa5e7f982 43
+test/runtime/test_deepseek_v4_cache_capabilities.py
+  s_96c5cd9c184397::t_47e84cb1427f29 1-210
+test/runtime/test_deepseek_v4_cache_tables.py
+  s_0c00e84a92016b::t_c93a74db5ded91 1-201
+test/runtime/test_deepseek_v4_config.py
+  s_c046d13886f367::t_632cae80694eb2 84,2147,2175-2227,2236-2346,2387,2396,2435-2436,2473,2482,4057-4060,4066,4082-4087,4090-4160
+test/runtime/test_deepseek_v4_flat_arena.py
+  s_96c5cd9c184397::t_1f09d46db21a73 1-1007
+test/runtime/test_deepseek_v4_flat_memory_plan.py
+  s_b74c5ebdd7c524::t_cd0f971ab0ddcb 1-551
+test/runtime/test_deepseek_v4_flat_synthetic.py
+  s_2efe010fdd6ad6::t_363b241183aab5 1-879
+test/runtime/test_deepseek_v4_mtp_prefix_cache.py
+  s_96c5cd9c184397::t_ebb6a29d7ca66f 52-56,92-96,125-129,141-166,189-193,202,226-230
+test/runtime/test_flat_cudagraph_per_group.py
+  s_e2372d50b5be98::t_6b5d50d3d25517 122-281,286-292,316-319,330,340-341,351-353,358-359,364-367,434-554,559-564,593-595,613,628-632,635-638,647-744,755,778-786,816,832-837,842-843,861,894-899,904,913-921,964-965,988-989,1004-1005,1019-1023,1031-1039,1056-1106,1153-1156,1158,1164,1177-1178,1200-1203,1207,1215-1220,1228,1244,1247-1248
+test/runtime/test_flat_group_write_locs.py
+  s_51d1e2155d2303::t_24238d0a1e5225 81,83,103,105,112-149,230,252,265,267,270,281,294,297-303,318,430,446-452,463-464,501-512,532-533,549
+test/runtime/test_flat_kv_completion_bridge.py
+  s_c046d13886f367::t_0cc3d3250aab9e 1-517
+test/runtime/test_flat_scheduler_config_guard.py
+  s_96c5cd9c184397::t_5fc0b6c07f880b 4-5,58,64-71,162-170
+test/runtime/test_pause_controller.py
+  s_96c5cd9c184397::t_e9b7b677abed46 51-58,60-61,90-91
+test/runtime/test_trtllm_flat_groups.py
+  s_46f87793fde292::t_e4551187c006ba 104-107,114,120,136,139,151,157,168-170,173-174,178-179,181-183,197-198,208-221,235,243,248,287,294,316,325
+test/runtime/test_v4_flat_sleep_wake.py
+  s_96c5cd9c184397::t_8abfac05b81b00 1-211
+test/runtime/test_v4_group_keyed_cache_locs.py
+  s_536a3da3e72caa::t_259169b47a00c5 1-66
+test/runtime/test_v4_scheduler_plan_bridge.py
+  s_39f9be92f82707::t_058203ff2d1d08 1-442
+tokenspeed-scheduler/CMakeLists.txt
+  s_51d1e2155d2303::t_5f576033205d41 66,127,129,131,138-139
+tokenspeed-scheduler/bindings/python_module.cpp
+  s_4f70415d2989fd::t_60c2aa4fd6c198 22,31-37,62-87,203-228,236-239,242-244,249-252,261-265,267-268,319,327-328,344-358,362-363,429-441,468-469,471-485,549-550,585-590
+tokenspeed-scheduler/csrc/cache/block_pool.h
+  s_2d5e09967f3174::t_e60ddf68113f1a 26,28-29,34,47-49,83-85,87,94-104,107-108,111-117,119-130,134,147,152-153,158-162,167,174,179-185,187-188,190-194,197-207,209,213-215,219,224-225,227-244,247-252,254,256-257,260-293,297-351,353,359,366,370-375,384-392,396-400,403,407-409,413-415
+tokenspeed-scheduler/csrc/cache/block_pool_set.h
+  s_2d5e09967f3174::t_dc25434e228446 1-312
+tokenspeed-scheduler/csrc/cache/block_ref.h
+  s_2d5e09967f3174::t_7f87a1af30c729 58,73
+tokenspeed-scheduler/csrc/cache/cache_group.h
+  s_51d1e2155d2303::t_a9e03b2479a2ec 31-32,35-36,47-49,54-55
+tokenspeed-scheduler/csrc/cache/cache_types.h
+  s_95fb3ee8a39051::t_beaa5ae4f2e2fa 25,32,40-46,51-55,68-136,159,178-181
+tokenspeed-scheduler/csrc/cache/forward_cache_ops.cpp
+  s_b74c5ebdd7c524::t_c09b16ebc03ff4 23-26,32-98,136-189,194-203,225-234
+tokenspeed-scheduler/csrc/cache/forward_cache_ops.h
+  s_51d1e2155d2303::t_7c0843cf57427a 69-75,77,84-86
+tokenspeed-scheduler/csrc/cache/full_attn_manager.h
+  s_96c5cd9c184397::t_af6e2d5355398f 49
+tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.cpp
+  s_2d5e09967f3174::t_2410fa0cac9c00 24,27,37-98,102,106-126,128-129,131-142,147-148,152-176,235,240,247,253-254,257-260,262-264,267-268,272-274,278-295,304,306,312-429,437-440,442-464,477,494-512,522-530,540-574,576-598,601,612,614-616,637-646,648-649,652-733,741-749,756,761-772
+tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.h
+  s_2d5e09967f3174::t_6c142c171f9e67 24,31,45-46,49-50,53-56,75-119,129,136,139-148,156-165,177-182,191-194,196,198-200,202-206,210,217-218
+tokenspeed-scheduler/csrc/cache/kv_cache_manager.h
+  s_96c5cd9c184397::t_ee58b19b64c81a 23,25-27,61-76,79-81,84,86,112-137,170-173,175-177,200-230,242
+tokenspeed-scheduler/csrc/cache/mamba_state_manager.h
+  s_96c5cd9c184397::t_030e5e461712a5 34-35
+tokenspeed-scheduler/csrc/cache/scheduler_thread_mutation_domain.h
+  s_2d5e09967f3174::t_9724da55411907 1-61
+tokenspeed-scheduler/csrc/cache/swa_manager.h
+  s_96c5cd9c184397::t_95e1052347a6b8 25,40-42,55,61-65,81-86,91-112,115-121,188-191,193,197
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_0c00e84a92016b::t_ae4474a4485cc6 116,213-252,352-365,449-461,468-470,509-528,535-537
+tokenspeed-scheduler/csrc/fsm/forward_events.h
+  s_2d5e09967f3174::t_dbaeaad402c0c7 29,32,44,49,70-175,196-197,204,217-218,241,254
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.cpp
+  s_46f87793fde292::t_a331c37bd8457f 24,50-93
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.h
+  s_51d1e2155d2303::t_da7874d78c26ad 45-60,80-89,93-97
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_2d5e09967f3174::t_ef8aeac1e5df27 79-93,115-116,125-130,145-243,256-264,279-281,284,286-294,298-303,307-317,321-326,330-332,335-358,361-365,367-381,383-386,389-391,393-397,400-410,413-420,422-439,441-466,468-500,535-537,543-569,572-610,616-617,623-624,628-629,631-632,635,639-644,650-667,675,688,699-700,704,708-711,713,738,754-757,761,823-825,972-974,1119-1124,1134-1144,1146-1154,1224-1226,1246,1254-1259,1262,1264-1265,1267,1273-1289,1294,1304,1316,1324,1334
+tokenspeed-scheduler/csrc/scheduler/operations/forward.h
+  s_4f70415d2989fd::t_9031857f91559a 26,28-30,38-54,79-81,83-90,113-208,243-250,255-293,296,311-318,323-325,328,365-380,382-396
+tokenspeed-scheduler/csrc/scheduler/outside_event_handler.cpp
+  s_96c5cd9c184397::t_a8041f4a396f12 21-24,26-27,117,137-141,156-157,159-193,197-222,230-232,234-253,261-263,268-342,345-359,361,363-371
+tokenspeed-scheduler/csrc/scheduler/outside_events/forward.h
+  s_51d1e2155d2303::t_39124ed324560f 24,31-47,53-55
+tokenspeed-scheduler/csrc/scheduler/request.h
+  s_96c5cd9c184397::t_c69fdd70c50958 183-195
+tokenspeed-scheduler/csrc/scheduler/scheduler.cpp
+  s_2d5e09967f3174::t_7e7326692471ce 66-71,80-81,84-86,117-124,140-146,182-237,239,246,270,286,297,308,319,330,332-338,345-353,363,366-396,398-402,408-415,423-430,438,447-459,468-480,488,526,539-545,687
+tokenspeed-scheduler/csrc/scheduler/scheduler.h
+  s_2d5e09967f3174::t_9b9976f26ecc30 56,58,60,67,93-132,174,176-182,184-194,199-210,252-258,264-281,283-292,296-300,352-355
+tokenspeed-scheduler/csrc/scheduler/types.h
+  s_c046d13886f367::t_fe3714806b1701 32,91-96,130-133
+tokenspeed-scheduler/python/tests/test_paged_cache_group.py
+  s_51d1e2155d2303::t_4d5995bac9b10c 5,7,9,34-79
+tokenspeed-scheduler/python/tokenspeed_scheduler/__init__.py
+  s_95fb3ee8a39051::t_e7be60cb8a9a9f 28,33,35,87-88,93
+tokenspeed-scheduler/tests/cpp/flat_known_radix_failures.txt
+  s_96c5cd9c184397::t_c12c2c2c82a4f2 70-72
+tokenspeed-scheduler/tests/cpp/test_block_pool.cpp
+  s_2d5e09967f3174::t_6d0bcc6c86e266 23,26-27,38-40,130-204,273-322
+tokenspeed-scheduler/tests/cpp/test_block_pool_set.cpp
+  s_2d5e09967f3174::t_a89a42450d6803 1-251
+tokenspeed-scheduler/tests/cpp/test_block_ref.cpp
+  s_2d5e09967f3174::t_2aae8d9af93794 23-25,141-153
+tokenspeed-scheduler/tests/cpp/test_block_table.cpp
+  s_95fb3ee8a39051::t_88254406b717d1 1-326
+tokenspeed-scheduler/tests/cpp/test_flat_forward_operation.cpp
+  s_4f70415d2989fd::t_c1061f61f63c16 28,30,40-53,56,61-63,65,72,77-79,81,93,106-111,124-127,143-144,151-198,203-212,215-218,220-226,228,261-348
+tokenspeed-scheduler/tests/cpp/test_flat_kv_completion_scheduler.cpp
+  s_4f70415d2989fd::t_6cd1a9b434be51 1-782
+tokenspeed-scheduler/tests/cpp/test_flat_kvcache_lifecycle.cpp
+  s_4f70415d2989fd::t_86c53b64c52234 111,115,164-169,172,174-175
+tokenspeed-scheduler/tests/cpp/test_flat_kvcache_scenarios.cpp
+  s_4f70415d2989fd::t_145e36524faee5 55,65,67-68,114,121,326,409,422,426,443,446-447,560-562,623-624,626,670,683,686,2034-2035,2046-2047,2086-2087,2208-2209,2258,2263,2379-2380,2452-2453,2507-2508,2573,2576,2665-2666,2721-2722,2780-2782,2811-2812,2818,3277-3278,3282-3287,3555-3710
+tokenspeed-scheduler/tests/cpp/test_forward_cache_ops.cpp
+  s_b74c5ebdd7c524::t_14ff0f65635746 25,27,337-427,538-555
+tokenspeed-scheduler/tests/cpp/test_kv_cache_coordinator.cpp
+  s_2d5e09967f3174::t_767ea813389e5a 32,40-44,82,86-87,103-104,201-294,1634-1938
+tokenspeed-scheduler/tests/cpp/test_paged_cache_group_config.cpp
+  s_96c5cd9c184397::t_449deb50442ca0 1-122
+tokenspeed-scheduler/tests/cpp/test_paged_cache_replay.cpp
+  s_96c5cd9c184397::t_17291ce1e38987 711-714,749-751,898-901
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "8179aa6cdbde8c6f2a738693fc5519440f90563e",
+  "prompts": {},
+  "sessions": {
+    "s_0c00e84a92016b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bf4-5727-77c3-86e4-b969f94401b7",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_1488fcde94986e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c8f-0a16-7413-ade8-129eac92b282",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_2d5e09967f3174": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c21-ea84-7420-86a3-46c8e7164c79",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_2efe010fdd6ad6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c36-2807-7861-b2c9-a8aff2d3f72b",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_39f9be92f82707": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bf3-a847-7513-bb0e-d0ad170ba82d",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_46f87793fde292": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5af0-9369-7121-8e34-b9e31bd14a0e",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_4f1e746efcf893": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c8f-22e8-79d2-8d37-66511d20e590",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_4f70415d2989fd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c6a-f01b-7a01-a651-1f7d7c47c581",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_51d1e2155d2303": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5af0-480c-7fe2-90de-369814472a33",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_536a3da3e72caa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c05-5f88-7323-a5e2-c2d39b4a8ec3",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_95fb3ee8a39051": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5af0-6f1d-7280-8ad3-a0a468037bff",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_b74c5ebdd7c524": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bc9-3541-7b13-86e1-48395a0cc6ff",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_c046d13886f367": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bc9-1e87-7542-af12-6c3277c29268",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_c1922f67325c3b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c16-740c-7452-bb01-0214eada738c",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_e2372d50b5be98": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c2c-2d25-73f2-9ab7-04603dbc741e",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_f964defa70a38e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bc6-455c-7bd0-b75c-d8c04322228c",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
