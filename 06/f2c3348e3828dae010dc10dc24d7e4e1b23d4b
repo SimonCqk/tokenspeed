@@ -1,0 +1,25 @@
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.cpp
+  s_96c5cd9c184397::t_b6e5a018f753b4 71-72,83-84
+tokenspeed-scheduler/csrc/scheduler/flat_kv_completion_ledger.cpp
+  s_96c5cd9c184397::t_d640a7b1b30f3d 349
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_96c5cd9c184397::t_25d34193dccf17 193,339-340,354,496,706,1117-1118,1134-1137
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "06f2c3348e3828dae010dc10dc24d7e4e1b23d4b",
+  "prompts": {},
+  "sessions": {
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
