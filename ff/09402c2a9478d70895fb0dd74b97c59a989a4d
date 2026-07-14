@@ -1,0 +1,25 @@
+tokenspeed-scheduler/csrc/cache/forward_cache_ops.cpp
+  s_96c5cd9c184397::t_5ef50602ca103f 56-65
+tokenspeed-scheduler/python/tests/test_flat_kvcache.py
+  s_96c5cd9c184397::t_7cb3f1cc4e3a63 56-85,149-168
+tokenspeed-scheduler/tests/cpp/test_forward_cache_ops.cpp
+  s_96c5cd9c184397::t_4162cf9fd6a0fc 337,340,372-395
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "ff09402c2a9478d70895fb0dd74b97c59a989a4d",
+  "prompts": {},
+  "sessions": {
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
