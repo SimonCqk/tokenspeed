@@ -1,0 +1,43 @@
+docs/serving/deepseek-v4-flat-kv-cache-migration.md
+  s_96c5cd9c184397::t_eba027ad57b77c 391-392,659-660,668,671,680,682,687
+python/tokenspeed/runtime/configs/paged_cache_spec.py
+  s_96c5cd9c184397::t_104773b1efe686 577,583-588,594,607-611,623,634,650,658,675-677,708,711
+python/tokenspeed/runtime/layers/attention/kv_cache/deepseek_v4.py
+  s_96c5cd9c184397::t_84e8590eaa4ccd 461,472
+test/runtime/test_deepseek_v4_flat_arena.py
+  s_96c5cd9c184397::t_b685a662457786 260-267,271-275,290,292-294,442,453
+test/runtime/test_multi_window_page_counts.py
+  s_5b361d1af4241f::t_5a664f5a41b32e 73-74,187-230
+test/runtime/test_v4_sliding_window_groups_smoke.py
+  s_96c5cd9c184397::t_984d238036f9dc 132,144,159,165-169,249-252
+tokenspeed-scheduler/csrc/scheduler/outside_event_handler.cpp
+  s_96c5cd9c184397::t_886362387e8628 335-345,363-365
+tokenspeed-scheduler/tests/cpp/test_flat_kv_completion_scheduler.cpp
+  s_96c5cd9c184397::t_b28cc58f27630b 181-220,396-542
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "9713f64940228b0a235ac58d86ce7c9d29c90b12",
+  "prompts": {},
+  "sessions": {
+    "s_5b361d1af4241f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5e99-a609-77d0-bfe5-531b51aec50b",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
