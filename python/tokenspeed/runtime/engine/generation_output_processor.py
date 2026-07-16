@@ -545,39 +545,6 @@ class OutputProcesser:
             if rs := self.rid_to_state.get(rid):
                 rs.cached_tokens += max(0, prefix_len - rs.computed_length)
 
-    @staticmethod
-    def _materialize_ready_flat_kv_completions(
-        forward_op, model_execution_results: ModelExecutionResult
-    ):
-        """Materialize the host-POD completion side channel after sync.
-
-        The payload is created for every flat KV-writing row, including a
-        mid-chunk extend whose sampled token is intentionally suppressed.
-        """
-        materialize = getattr(
-            model_execution_results, "materialize_flat_kv_completions", None
-        )
-        if materialize is not None:
-            return materialize(forward_op)
-        if getattr(forward_op, "flat_kv_completion_inputs", None):
-            raise RuntimeError(
-                "forward op carries flat_kv_completion_inputs but the execution "
-                "result cannot materialize ready-only completions"
-            )
-        return ()
-
-    @staticmethod
-    def _make_extend_result_with_flat_kv_completion(
-        request_id, tokens, flat_kv_completion
-    ):
-        if flat_kv_completion is None:
-            return make_extend_result_event(request_id, tokens)
-        return make_extend_result_event(
-            request_id,
-            tokens,
-            flat_kv_completion=flat_kv_completion,
-        )
-
     def post_process_forward_op(
         self,
         forward_op,
@@ -592,17 +559,17 @@ class OutputProcesser:
         with nvtx_range("commit:sync", color="red"):
             model_execution_results.sync()
 
+        output_lengths_list = model_execution_results.output_lengths.tolist()
         # This must remain immediately after the execution-result fence. No
         # completion object exists before sync, and the POD produced here owns
         # no CUDA event, tensor, stream, or device pointer.
-        flat_kv_completions = self._materialize_ready_flat_kv_completions(
-            forward_op, model_execution_results
+        flat_kv_completions = model_execution_results.materialize_flat_kv_completions(
+            forward_op, accepted_lengths=output_lengths_list
         )
-        flat_kv_completion_by_rid = {
-            completion.request_id: completion for completion in flat_kv_completions
-        }
-        if len(flat_kv_completion_by_rid) != len(flat_kv_completions):
-            raise ValueError("flat KV completions contain duplicate request ids")
+        if flat_kv_completions and len(flat_kv_completions) != len(
+            forward_op.request_ids
+        ):
+            raise ValueError("flat KV completions must align with every forward row")
 
         self._emit_spec_decode_metrics(forward_op, model_execution_results)
 
@@ -642,6 +609,7 @@ class OutputProcesser:
         request_changes = []
         stream_out_rids = []
         stream_out_states = []
+        output_tokens_list = model_execution_results.output_tokens.tolist()
         output_logprobs_list = (
             model_execution_results.output_logprobs.tolist()
             if model_execution_results.output_logprobs is not None
@@ -660,11 +628,9 @@ class OutputProcesser:
         prefill_lengths = getattr(forward_op, "prefill_lengths", None)
         pt = 0
         for i, rid in enumerate(forward_op.request_ids):
-            flat_kv_completion = flat_kv_completion_by_rid.get(rid)
-            output_length = model_execution_results.output_lengths[i].item()
-            model_output_ids = model_execution_results.output_tokens.tolist()[
-                pt : pt + output_length
-            ]
+            flat_kv_completion = flat_kv_completions[i] if flat_kv_completions else None
+            output_length = output_lengths_list[i]
+            model_output_ids = output_tokens_list[pt : pt + output_length]
             model_output_logprobs = (
                 output_logprobs_list[pt : pt + output_length]
                 if output_logprobs_list is not None
@@ -680,8 +646,10 @@ class OutputProcesser:
                 # means it's delayed token, do not process
                 if flat_kv_completion is not None:
                     request_changes.append(
-                        self._make_extend_result_with_flat_kv_completion(
-                            rid, (), flat_kv_completion
+                        make_extend_result_event(
+                            rid,
+                            (),
+                            flat_kv_completion=flat_kv_completion,
                         )
                     )
                 continue
@@ -701,8 +669,10 @@ class OutputProcesser:
             ):
                 if flat_kv_completion is not None:
                     request_changes.append(
-                        self._make_extend_result_with_flat_kv_completion(
-                            rid, (), flat_kv_completion
+                        make_extend_result_event(
+                            rid,
+                            (),
+                            flat_kv_completion=flat_kv_completion,
                         )
                     )
                 continue
@@ -711,8 +681,10 @@ class OutputProcesser:
             if not request_state.prefill_finished:
                 if flat_kv_completion is not None:
                     request_changes.append(
-                        self._make_extend_result_with_flat_kv_completion(
-                            rid, (), flat_kv_completion
+                        make_extend_result_event(
+                            rid,
+                            (),
+                            flat_kv_completion=flat_kv_completion,
                         )
                     )
                 continue
@@ -829,8 +801,10 @@ class OutputProcesser:
             # passive client that still needs a terminating finish streamed.
             if request_state.to_abort and request_state.finished:
                 request_changes.append(
-                    self._make_extend_result_with_flat_kv_completion(
-                        rid, new_ids, flat_kv_completion
+                    make_extend_result_event(
+                        rid,
+                        new_ids,
+                        flat_kv_completion=flat_kv_completion,
                     )
                 )
                 request_changes.append(make_finish_event(rid))
@@ -855,8 +829,10 @@ class OutputProcesser:
                 # the suspect KV that triggered the numerical abort.
                 request_changes.append(make_abort_event(rid))
             request_changes.append(
-                self._make_extend_result_with_flat_kv_completion(
-                    rid, new_ids, flat_kv_completion
+                make_extend_result_event(
+                    rid,
+                    new_ids,
+                    flat_kv_completion=flat_kv_completion,
                 )
             )
             if is_prefill_instance:

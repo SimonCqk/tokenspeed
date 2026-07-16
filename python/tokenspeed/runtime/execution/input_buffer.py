@@ -282,7 +282,7 @@ class InputBuffers:
         # positions, and seq_lens in a single launch and reads
         # valid_cache_lengths[pool_idx] directly, so the indexSelect + cumsum
         # path + compute_position + seq_lens add are all gone.
-        if num_extends == 0 and batch_size > 0 and not self.uses_group_keyed_cache_locs:
+        if num_extends == 0 and batch_size > 0:
             fused_decode_input_prep(
                 out_cache_loc_ptr=self.out_cache_loc_buf[:total_tokens],
                 positions_ptr=self.positions_buf[:total_tokens],
@@ -292,21 +292,20 @@ class InputBuffers:
                 uniform_input_length=total_tokens // batch_size,
                 req_to_pages=req_to_page,
                 page_size=self.page_size,
+                use_dummy_cache_loc=self.uses_group_keyed_cache_locs,
+                dummy_kv_slot=self.dummy_kv_slot,
             )
             # Decode path's seq_lens / positions / out_cache_loc are done.
             valid_cache_lengths = None
         else:
-            # Mixed / pure-prefill and V4-flat decode keep the per-kernel
-            # position pipeline. V4 flat intentionally has no scalar page
-            # domain: out_cache_loc remains a page-0 compatibility sentinel,
-            # while every real KV writer consumes its group-keyed table/base
-            # metadata from the attention backend.
+            # Mixed / pure-prefill keep the per-kernel position pipeline. V4
+            # flat has no scalar page domain: its persistent out_cache_loc is
+            # already the page-0 sentinel, while every real KV writer consumes
+            # group-keyed table/base metadata from the attention backend.
             valid_cache_lengths = runtime_states.valid_cache_lengths.index_select(
                 0, req_pool_indices_device
             )
-            if self.uses_group_keyed_cache_locs:
-                self.out_cache_loc_buf[:total_tokens].fill_(self.dummy_kv_slot)
-            else:
+            if not self.uses_group_keyed_cache_locs:
                 compute_out_cache_loc(
                     out_cache_loc_ptr=self.out_cache_loc_buf[:total_tokens],
                     req_pool_indices=req_pool_indices_device,
@@ -428,7 +427,8 @@ class InputBuffers:
         # (cheap tail-only fills; the active prefix was written above).
         if total_tokens < self.max_num_tokens:
             self.input_ids_buf[total_tokens:].fill_(1)
-            self.out_cache_loc_buf[total_tokens:].fill_(self.dummy_kv_slot)
+            if not self.uses_group_keyed_cache_locs:
+                self.out_cache_loc_buf[total_tokens:].fill_(self.dummy_kv_slot)
             self.positions_buf[total_tokens:].fill_(0)
             self.mrope_positions_buf[:, total_tokens:].zero_()
         if batch_size < self.max_bs:
@@ -480,7 +480,8 @@ class InputBuffers:
         """Prepare padded decode graph inputs for a rank with no real tokens."""
         if total_tokens > 0:
             self.input_ids_buf[:total_tokens].fill_(1)
-            self.out_cache_loc_buf[:total_tokens].fill_(self.dummy_kv_slot)
+            if not self.uses_group_keyed_cache_locs:
+                self.out_cache_loc_buf[:total_tokens].fill_(self.dummy_kv_slot)
             self.positions_buf[:total_tokens].fill_(0)
             self.mrope_positions_buf[:, :total_tokens].zero_()
         if batch_size > 0:

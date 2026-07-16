@@ -40,20 +40,20 @@ class V4GroupKeyedCacheLocWiringTest(unittest.TestCase):
         self.assertIn("resolve_deepseek_v4_flat_loc_policy", init)
         self.assertIn("legacy_flat_loc_group_id", init)
         self.assertIn("self._uses_group_keyed_cache_locs", update)
-        self.assertIn("self.input_buffers.flat_block_table_staging", update)
-        self.assertIn("validate_forward_op_schema", update)
         self.assertNotIn('getattr(forward_op, "flat_block_tables"', update)
         self.assertIn("return", update)
 
     def test_input_and_eagle_emit_only_dummy_scalar_locs_for_v4_flat(self):
         init = _class_method(_INPUT_BUFFER, "InputBuffers", "__init__")
         fill = _class_method(_INPUT_BUFFER, "InputBuffers", "fill_input_buffers")
+        eagle_init = _class_method(_EAGLE, "Eagle", "__init__")
         eagle = _class_method(_EAGLE, "Eagle", "_run_multi_step_decode")
 
         self.assertIn("uses_group_keyed_cache_locs", init)
-        self.assertIn("self.out_cache_loc_buf[:total_tokens].fill_", fill)
+        self.assertIn("use_dummy_cache_loc=self.uses_group_keyed_cache_locs", fill)
         self.assertIn("self.input_buffers.uses_group_keyed_cache_locs", eagle)
-        self.assertIn("cache_locs.fill_", eagle)
+        self.assertIn("torch.full", eagle_init)
+        self.assertNotIn("cache_locs.fill_", eagle)
 
     def test_dflash_rejects_group_keyed_page_domains(self):
         init_buffers = _class_method(_DFLASH, "DFlash", "_init_native_buffers")

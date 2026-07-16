@@ -340,7 +340,10 @@ class ModelExecutionResult:
         return self._is_synchronized
 
     def materialize_flat_kv_completions(
-        self, forward_op: Any
+        self,
+        forward_op: Any,
+        *,
+        accepted_lengths: list[int] | None = None,
     ) -> tuple[FlatKVCompletion, ...]:
         """Build ready-only flat KV completions from dispatch metadata.
 
@@ -367,24 +370,25 @@ class ModelExecutionResult:
             self.flat_kv_completions = ()
             return self.flat_kv_completions
 
-        request_ids = list(forward_op.request_ids)
+        request_ids = forward_op.request_ids
         if len(completion_inputs) != len(request_ids):
             raise ValueError(
                 "flat_kv_completion_inputs row count differs from forward op: "
                 f"{len(completion_inputs)} != {len(request_ids)}"
             )
 
-        if self.output_lengths is None:
-            raise RuntimeError(
-                "output_lengths is required to materialize flat KV completions"
-            )
-        accepted_lengths = self.output_lengths.tolist()
+        if accepted_lengths is None:
+            if self.output_lengths is None:
+                raise RuntimeError(
+                    "output_lengths is required to materialize flat KV completions"
+                )
+            accepted_lengths = self.output_lengths.tolist()
         if len(accepted_lengths) != len(request_ids):
             raise ValueError(
                 "output_lengths row count differs from forward op: "
                 f"{len(accepted_lengths)} != {len(request_ids)}"
             )
-        input_lengths = list(forward_op.input_lengths)
+        input_lengths = forward_op.input_lengths
         if len(input_lengths) != len(request_ids):
             raise ValueError(
                 "input_lengths row count differs from forward op: "
