@@ -1,0 +1,81 @@
+python/tokenspeed/runtime/configs/deepseek_v4_cache_spec.py
+  s_9014bb72b1dafa::t_91d19eefcb6665 22-27
+python/tokenspeed/runtime/configs/flat_kv_contract.py
+  s_9014bb72b1dafa::t_589f718f2f02af 1-52
+python/tokenspeed/runtime/execution/flat_kv_progress.py
+  s_9014bb72b1dafa::t_8ba70ac04d4856 43-49
+test/runtime/test_deepseek_v4_flat_arena.py
+  s_9014bb72b1dafa::t_50147ca2ce6423 207-210
+test/runtime/test_flat_kv_progress.py
+  s_3f78954b9781a3::t_6ef03dd126e57d 55-64
+test/runtime/test_flat_scheduler_config_guard.py
+  s_3f78954b9781a3::t_863621062bd42c 45-61
+test/runtime/test_v4_scheduler_plan_bridge.py
+  s_9014bb72b1dafa::t_5d6863fd71e01a 99-105,152-155,346,426-451
+tokenspeed-scheduler/bindings/python_module.cpp
+  s_9014bb72b1dafa::t_45c6b511dc1f9f 330
+tokenspeed-scheduler/csrc/cache/forward_cache_ops.h
+  s_3e079b6d867ddf::t_f62be20e296e80 35-36
+tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.cpp
+  s_3e079b6d867ddf::t_1dbfc11cf4dd31 677-684,720,829,869,899-901
+tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.h
+  s_3e079b6d867ddf::t_01848aea496529 127-129,160-166,208,211,213-214
+tokenspeed-scheduler/csrc/cache/kv_cache_manager.h
+  s_3e079b6d867ddf::t_eab8555c316f21 139
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_3e079b6d867ddf::t_88c9138158e811 249,352-353,449,516-517,597,770,781,792,816
+tokenspeed-scheduler/csrc/scheduler/operations/forward.h
+  s_96c5cd9c184397::t_17fff4f1b58176 248,258-259,265,270-275,287-289,293,313-315,362-365,367-374,376
+tokenspeed-scheduler/python/tests/test_paged_cache_group.py
+  s_9014bb72b1dafa::t_2ac502d0a8ec21 3-4,12,37-55
+tokenspeed-scheduler/tests/cpp/test_flat_forward_operation.cpp
+  s_96c5cd9c184397::t_2b3cb333910628 27,29,31,34,43-94,96-97,99-104,111-112,122,131-145,157,159-162,171-173,179,181-184,190-191,197,199-202,212-213,222,231,252,262,268-269,271-272,274,278,280-283,292-295,299,304,306,322,324-327,333-334,369,371-372,394,396-399,411
+tokenspeed-scheduler/tests/cpp/test_flat_kvcache_scenarios.cpp
+  s_3e079b6d867ddf::t_b902411565c3b7 78,2378,2537,3766-3767,3787,3793
+tokenspeed-scheduler/tests/cpp/test_forward_cache_ops.cpp
+  s_96c5cd9c184397::t_20cccfa703d08d 47-52,62,72,93,97,105,111-112,117,138,143-144,160-161,168-169,198,207-208,230-231,265-266,286-288,302,312-313,326,335-336
+tokenspeed-scheduler/tests/cpp/test_kv_cache_coordinator.cpp
+  s_3e079b6d867ddf::t_853e0deff7b3bc 198-200,218,533,834-835,838,946,1069-1070,1072-1073
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "2d6a8984a938f26f9fc526eb7ce6ba1fa60cadc5",
+  "prompts": {},
+  "sessions": {
+    "s_3e079b6d867ddf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a34-7657-7981-b3e4-c3b99581b215",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_3f78954b9781a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a34-9185-7270-a932-4448e8c4c041",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_9014bb72b1dafa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f69e7-ed5a-7ea0-9be1-0e81d419d486",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
