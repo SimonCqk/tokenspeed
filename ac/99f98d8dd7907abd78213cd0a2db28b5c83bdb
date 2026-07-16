@@ -1,0 +1,41 @@
+python/tokenspeed/runtime/execution/flat_kv_progress.py
+  s_96c5cd9c184397::t_6e11125c754bcf 75,189,288,310,340,345
+test/runtime/test_flat_kv_progress.py
+  s_52245d299f840b::t_cf907ff1b690fb 274-276
+tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.cpp
+  s_96c5cd9c184397::t_47d1315fab38be 51,101,106,111,116,175-176,214,293,941,949
+tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.h
+  s_96c5cd9c184397::t_b0c51e1faa0c22 58,62,66-67,69,258
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_96c5cd9c184397::t_7f9a9432954f57 208-210,212-217,219-226,229-236,238-242,459-460,514,547,590,593-595,599-613,698,829,892
+tokenspeed-scheduler/csrc/fsm/forward_events.h
+  s_96c5cd9c184397::t_6c142a05509c82 78,164-185,207,226,268-269,272-278,289-290,298-302,312-313,317,353-359,361-373,378,383,405,452,476
+tokenspeed-scheduler/tests/cpp/test_kv_cache_coordinator.cpp
+  s_96c5cd9c184397::t_cb4dc23206bf6f 218,380-382,1602,1627
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "ac99f98d8dd7907abd78213cd0a2db28b5c83bdb",
+  "prompts": {},
+  "sessions": {
+    "s_52245d299f840b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f69b2-fe4b-7180-af92-fd5bda565894",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
