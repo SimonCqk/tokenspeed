@@ -792,7 +792,7 @@ pressure = max_pool(
 
 ### 6.5 Forward bridge 和 V4 backend
 
-- `ForwardOperationBase` 的 production flat hot path 只携带 request-owned、config-index-aligned 的短生命周期 `BlockTable` row view，不再为每个 request 构造 `map<group, vector<page>> + map<group, base>`。`FlatForwardOperation` 先按 group 求 batch width，每 group 只分配一次连续 row-major table/base owner，再从 live table 一次 fill；direct/unit 构造保留 owned-map compatibility seam，但 scheduler 不使用。每个 V4 request row 仍原子发布全部 group tables/bases，full-history 显式发布 0；nanobind 到 Python pinned tensor 的一次有界 copy 保留，因此 C++ export 与 pinned staging 两份 host peak 都进 plan。
+- `ForwardOperationBase` 的 production flat hot path 只携带 request-owned、config-index-aligned 的短生命周期 `BlockTable` row view，不再为每个 request 构造 `map<group, vector<page>> + map<group, base>`。`FlatForwardOperation` 先按 group 求 batch width，每 group 只分配一次连续 row-major table/base owner，再从 live table 一次 fill；direct/unit 构造也使用真实 `BlockTable` row view，不保留另一套 owned-map ABI。每个 V4 request row 仍原子发布全部 group tables/bases，full-history 显式发布 0；nanobind 到 Python pinned tensor 的一次有界 copy 保留，因此 C++ export 与 pinned staging 两份 host peak 都进 plan。
 - V4 backend 新增 canonical radix/flat table adapter，两者都显式消费各自的 base offsets。
 - 只复用 generic flat graph 的 persistent-buffer/fresh-fill/tail-clear/stale-guard discipline；V4 专用 adapter 必须保留全部 state groups 和 per-group geometry，不继承 `_shed_state_groups` 或 uniform-page slot policy。
 - 所有 SWA、compressed、state、indexer slot helper 使用各组几何和 `page_id > 0` mask。
@@ -958,6 +958,16 @@ Full-model differential runner 与三种 topology CI wiring 已完成；runtime 
 
 ### 8.7 当前分支的实现与 release 定性
 
+启动可观测性分成两层，不能混为同一个结论：每个进入 LM EventLoop 的非 encode scheduler
+rank 在加载模型权重前输出
+`KV cache scheduler backend=flat (TOKENSPEED_FLAT_KVCACHE=ON)`，该值直接来自已加载 native
+extension 的编译期 `FLAT_KVCACHE` 标志，只证明 Flat binary identity；完成 V4 arena/profile 后，
+`Scheduler config` 继续输出 `kv_backend`、`admission_path` 和 `flat_block_pools`，其中
+`admission_path` 直接读取 native `SchedulerConfig::UsesStructuredFlatAdmission()`，不在 Python
+重复推导 admission predicate。DeepSeek V4
+structured L1 的期望值是 `kv_backend=flat admission_path=structured-flat` 且 pools 非空；
+`legacy-flat-compat` 只表示 Flat binary 内的兼容 lane，不能当作 V4 structured admission 已生效。
+
 | 工作面 | 当前分支状态 | 合并/发布前仍需的外部证据 |
 |---|---|---|
 | Heterogeneous allocator/scheduler | 已实现：canonical `BlockPoolSet`、逐 pool admission/reservation/reclaim/starvation、exact prefix transaction、structured completion、sleep/reset generation | 对应 CPU/C++ suite 必须持续全绿 |
@@ -966,7 +976,7 @@ Full-model differential runner 与三种 topology CI wiring 已完成；runtime 
 | CPU-GPU ownership seam | 已实现：persistent pinned staging ring、direct-copy binding、fence-ready POD completion；C++ 不等待也不持有 CUDA event | 1-GPU synthetic gate 的真实 CUDA 执行结果 |
 | Differential CI | synthetic gate 与 Flash/Pro 三种 full-model topology runner/manifest 已接线；`implemented/wired` 不等于 hardware passed | synthetic B200 产出的 table/slot/sentinel/lifecycle 证据，加上 full-model B200 的 radix/flat token、cache-hit、plan/reset/wake differential |
 | PD/L2 边界 | 已实现 fail-fast；没有把 baseline generic PD buffer enumeration 误定性为 V4 transfer support | group-aware PD 若要支持，另立 descriptor/wire 设计；不阻塞本 device-only 交付 |
-| Observability | 已实现逐 pool/byte/bottleneck metrics 与 Prometheus wiring；hot-path snapshot 必须保持 `O(pool_count)` | 线上压测确认采样成本和 label cardinality 符合预算 |
+| Observability | 已实现权重加载前的 native Flat/Radix build identity 日志、scheduler 构造前的实际 admission path/pool 日志，以及逐 pool/byte/bottleneck metrics 与 Prometheus wiring；hot-path snapshot 必须保持 `O(pool_count)` | 线上压测确认采样成本和 label cardinality 符合预算 |
 
 因此本分支可以被定性为“一步到位的 device-side implementation”，但在上述 B200 targets 产生通过证据前，不能定性为“hardware accepted”或直接解除 merge/release gate。
 
@@ -1003,7 +1013,7 @@ Full-model differential runner 与三种 topology CI wiring 已完成；runtime 
 | Coordinator | `tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.*` | group binding、vector transaction、exact `Share/Adopt` prefix bundle |
 | Scheduler | `tokenspeed-scheduler/csrc/scheduler/scheduler.*` | pools、metrics、reservation、wedge/retract |
 | Forward gates | `tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp` | vector admission/slide/claim |
-| Forward bridge | `tokenspeed-scheduler/csrc/scheduler/operations/forward.h`、`tokenspeed-scheduler/csrc/cache/forward_cache_ops.*` 与 Python op binding | 完整 group tables、显式 per-group bases、row-count 原子性 |
+| Forward bridge | `tokenspeed-scheduler/csrc/scheduler/operations/forward.h`、`tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.*` 与 Python op binding | 完整 group tables、显式 per-group bases、row-count 原子性 |
 | FSM compatibility | `tokenspeed-scheduler/csrc/fsm/forward_states.h`、`forward_events.h` | structured/legacy first-event 分型、coordinator-only Flat finish、accepted-only publication；Flat build 裁除 radix retract recovery |
 | Completion bridge | `python/tokenspeed/runtime/engine/generation_output_processor.py`、`scheduler_utils.py`、`tokenspeed-scheduler/bindings/python_module.cpp`、`csrc/scheduler/outside_event_handler.cpp` | fence-ready POD group progress 传播；C++ 不接收 CUDA ticket |
 | V4 backend | `python/tokenspeed/runtime/layers/attention/backends/deepseek_v4.py` | flat adapter、eager/graph/MTP |

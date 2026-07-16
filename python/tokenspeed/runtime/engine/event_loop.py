@@ -65,6 +65,8 @@ from tokenspeed.runtime.engine.scheduler_utils import (
     pool_to_paged_cache_groups,
     pool_to_prefix_cache_adjunct_spec,
     pop_common_cache_event_payloads,
+    scheduler_admission_path,
+    scheduler_backend_identity,
     should_use_overlap_schedule,
 )
 from tokenspeed.runtime.execution.distributed_initializer import (
@@ -171,6 +173,7 @@ class EventLoop:
         self.port_args = port_args
         self.gpu_id = gpu_id
         self.global_rank = global_rank
+        flat_kvcache_ext = scheduler_ext_flat_kvcache()
 
         self.model_config = self._load_model_config(server_args.model)
         if server_args.speculative_draft_model_path is not None:
@@ -188,7 +191,7 @@ class EventLoop:
                 and is_deepseek_v4(draft_model_config.hf_config)
             ),
             disaggregation_mode=server_args.disaggregation_mode,
-            flat_kvcache_ext=scheduler_ext_flat_kvcache(),
+            flat_kvcache_ext=flat_kvcache_ext,
             enable_kvstore=server_args.enable_kvstore,
         )
 
@@ -332,7 +335,7 @@ class EventLoop:
             mamba_l2_layout=server_args.mamba_l2_layout,
             mamba_l2_io_backend=server_args.mamba_l2_io_backend,
         )
-        if scheduler_ext_flat_kvcache() and server_args.enable_kvstore:
+        if flat_kvcache_ext and server_args.enable_kvstore:
             if server_args.kvstore_storage_backend is not None:
                 raise NotImplementedError(
                     "flat scheduler build (TOKENSPEED_FLAT_KVCACHE) has no L3 "
@@ -385,7 +388,7 @@ class EventLoop:
         paged_cache_groups = pool_to_paged_cache_groups(token_to_kv_pool)
         flat_block_pools = pool_to_flat_block_pools(token_to_kv_pool)
         validate_flat_scheduler_config(
-            flat_kvcache_ext=scheduler_ext_flat_kvcache(),
+            flat_kvcache_ext=flat_kvcache_ext,
             paged_cache_groups=paged_cache_groups,
             attn_backend=attn_backend,
             kv_pool=token_to_kv_pool,
@@ -425,13 +428,22 @@ class EventLoop:
             enable_structured_flat_kv_completion=bool(flat_block_pools),
             prefix_cache_adjunct=prefix_cache_adjunct,
         )
+        scheduler_backend, _ = scheduler_backend_identity(flat_kvcache_ext)
+        admission_path = scheduler_admission_path(
+            flat_kvcache_ext=flat_kvcache_ext,
+            config=scheduler_cfg,
+        )
         logger.info(
-            "Scheduler config: block_size=%s num_device_pages=%s "
+            "Scheduler config: kv_backend=%s admission_path=%s "
+            "block_size=%s num_device_pages=%s "
             "max_scheduled_tokens=%s decode_input_tokens=%s "
             "overlap_schedule_depth=%s disable_l2_cache=%s "
             "max_batch_size=%s (global max_num_seqs=%s, dp_size=%s) "
             "mamba_pool_total_chunks=%s enable_mamba=%s "
-            "disable_prefix_cache=%s paged_cache_groups=%s",
+            "disable_prefix_cache=%s flat_block_pools=%s "
+            "paged_cache_groups=%s",
+            scheduler_backend,
+            admission_path,
             scheduler_cfg.block_size,
             scheduler_cfg.num_device_pages,
             scheduler_cfg.max_scheduled_tokens,
@@ -444,6 +456,7 @@ class EventLoop:
             mamba_pool_total_chunks,
             has_mamba,
             scheduler_cfg.disable_prefix_cache,
+            [pool.pool_id for pool in flat_block_pools],
             [group.group_id for group in paged_cache_groups],
         )
         self.scheduler = Scheduler(scheduler_cfg)
@@ -2113,6 +2126,15 @@ def run_event_loop(
             run_encode_loop(server_args, port_args, pipe_writer, gpu_id, global_rank)
             return
 
+        flat_kvcache_ext = scheduler_ext_flat_kvcache()
+        scheduler_backend, flat_build_option = scheduler_backend_identity(
+            flat_kvcache_ext
+        )
+        logger.info(
+            "KV cache scheduler backend=%s (TOKENSPEED_FLAT_KVCACHE=%s)",
+            scheduler_backend,
+            flat_build_option,
+        )
         event_loop = EventLoop(
             server_args,
             port_args,
