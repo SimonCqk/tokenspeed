@@ -1,0 +1,31 @@
+docs/serving/deepseek-v4-flat-kv-cache-migration.md
+  s_96c5cd9c184397::t_1c51bfb14d825a 795,961-970,979,1016
+python/tokenspeed/runtime/engine/event_loop.py
+  s_9014bb72b1dafa::t_dcde40d561857d 68-69,176,194,338,391,431-435,437-438,443-446,459,2129-2137
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "3052461dc03570afdf3945678749fd3241f1d449",
+  "prompts": {},
+  "sessions": {
+    "s_9014bb72b1dafa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f69e7-ed5a-7ea0-9be1-0e81d419d486",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
