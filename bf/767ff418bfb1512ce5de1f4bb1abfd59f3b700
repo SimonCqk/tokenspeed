@@ -1,0 +1,580 @@
+python/tokenspeed/runtime/configs/deepseek_v4_cache_spec.py
+  s_95fb3ee8a39051::t_d75877f8d9248b 28-32,37-43,194-237,257,259-272,285-290,305-310,322-331,344-349,356-357,368-372,374-377,379
+  s_9014bb72b1dafa::t_91d19eefcb6665 22-27
+python/tokenspeed/runtime/configs/flat_memory_plan.py
+  s_b74c5ebdd7c524::t_2382282271c83d 35-36,39,41-42,49-50,283-296,297-1282,1284-1287,1289-1444
+python/tokenspeed/runtime/configs/paged_cache_spec.py
+  s_95fb3ee8a39051::t_4d694885e42bb8 32-34,35,40-41,51-68,79-125,360,640,648,684,713-717,719-725,727-742,746-775,777-778,780-813,815-816,820,823-825,832
+  s_96c5cd9c184397::t_104773b1efe686 645,651-656,662,675-679,691,702,718,726,743-745,776,779
+python/tokenspeed/runtime/deepseek_v4_cache_tables.py
+  s_39f9be92f82707::t_4b14faffe02d4a 1-231
+python/tokenspeed/runtime/engine/event_loop.py
+  s_96c5cd9c184397::t_66490834af1497 42,47-49,64,81,184-194,386,400-404,423,425,468-481,515,1448-1538,1544-1551,1562-1586,1647-1660,1663,1665-1666,1678-1679,1687,1689-1692,1694-1720,1733-1751,1758-1776
+  s_61d355ed95c8be::t_b14ce41233d8f3 1022,1830,1981
+  s_96c5cd9c184397::t_65819f2104405d 841-842,857-861,883-885,916-918,948-950
+python/tokenspeed/runtime/engine/generation_output_processor.py
+  s_46f87793fde292::t_caf857ab1ac091 548-580,595-606,663,681-686,693-695,702-707,712-717,831-835,857-861
+  s_96c5cd9c184397::t_cc72b52d56486e 820-825,845-856,873-878
+python/tokenspeed/runtime/engine/pause.py
+  s_96c5cd9c184397::t_421b48bbc48e9b 89-92,94,100-103
+python/tokenspeed/runtime/engine/request_handler.py
+  s_c1922f67325c3b::t_32e54ad2364462 113,144,233-240
+python/tokenspeed/runtime/execution/cuda_graph_wrapper.py
+  s_96c5cd9c184397::t_5a5865392f5bb3 34-36,245-249,259,262-268,278,290-293,299-301,304-312,314-316,324-325,333-337,594-732,744,756,758,785-788,795-798,811-816,820,830-831,848-854,890-929,973-974,976-980,983-990,992-996,1026-1056,1074,1083,1095-1098,1123,1128,1159-1173,1180-1181,1184-1186,1194,1203-1206,1233-1245,1377,1390-1393,1446,1454-1469,1483,1495-1499,1518-1522,1531,1543,1565,1569,1573-1576,1594-1605
+  s_96c5cd9c184397::t_aaf9b16e057e79 237-244,733-734,738,740,742,745-755,757,759-777,799,832,981-982,991,1084-1091,1118-1122,1126,1174-1179,1182-1183,1198-1202,1216,1389
+python/tokenspeed/runtime/execution/drafter/dflash.py
+  s_39f9be92f82707::t_0ea0c317b0779d 121-126
+python/tokenspeed/runtime/execution/drafter/eagle.py
+  s_39f9be92f82707::t_8214bb8a12182c 1179-1192
+  s_96c5cd9c184397::t_48e0a3a7833476 33,314-323,409-416
+python/tokenspeed/runtime/execution/input_buffer.py
+  s_536a3da3e72caa::t_235f301849e0b0 27,37,61-62,72-77,285,299-303,307-317
+python/tokenspeed/runtime/execution/model_executor.py
+  s_1488fcde94986e::t_836f514df9a039 37-40,42,288-334,401-402,736,739-746,750,753,755-759,1424-1432,1541,1542-1544,1547,1823-1827,1831-1841,1848-1856,2079
+  s_e887598776ba44::t_5d50c3ec83c5ab 52-55,359-374,472-486,1545-1546,1802-1804,1816-1820,1828-1830,1842-1847,2082-2090,2119-2128,2222
+python/tokenspeed/runtime/execution/prefill_graph.py
+  s_4f1e746efcf893::t_afc206582d1d7e 257,480-486,488-490,495-506,603-607,725-732
+python/tokenspeed/runtime/execution/types.py
+  s_46f87793fde292::t_1f23f9f8226d5a 27,38-71,72-73,75-76,80-84,86-87,88-101,107-116,122-126,127-131,138-141,143-144,145-149,151-153,155-156,163,180,182-184,186-248,292,324-330,336-346,353-360,363-364,367-370,372-373,375-400,405-413,418-419,422,423-429,431,433-438,440-441,455-467
+  s_96c5cd9c184397::t_8cae023efa8199 26,249-291
+  s_96c5cd9c184397::t_b3767f7af24ec3 25,32,74,77-79,85,102-106,117-121,132-137,142,150,154,157-162,164-179,181,185,319-323,347-352,361-362,365-366,371,374,401-404,414-417,420-421,430,432,439,442-454
+python/tokenspeed/runtime/layers/attention/backends/base.py
+  s_39f9be92f82707::t_df4550b201cd7b 73-77,161,169-173
+python/tokenspeed/runtime/layers/attention/backends/deepseek_v4.py
+  s_c046d13886f367::t_a68f057d0785a5 41-44,246-251,302-316,445-470,537,604-606,608-609,651,654-655,658-659,662-665,678-685,687-700,744-760,768,787,1303-1326,1332-1346,1496-1502,1514,1562,1684-1689,1738-1739,1742-1782,1790-1795,1797,1850,1852-1860,1863,1867-1891,1905,1912-1916,1972-1973,1977-1979,1984-1988,2067-2079,2122,2127,2146-2150,2154-2158,2168,2214-2216,2218-2219,2243,2258,2263,2286-2290,2302-2304
+  s_23e4a9432cd828::t_9e1453334fc86e 1848-1849,1917-1955,1957-1962,1989-2003
+python/tokenspeed/runtime/layers/attention/backends/flat_groups.py
+  s_51d1e2155d2303::t_735ca41c3fea23 24-37,62,177-249,285-289,313,315-320,322-327,333-337,354-361,447,549,552,554,574-575,579,592,596-597,645-647,651-654,655,667-669,671-674,678-683,705-708,709
+python/tokenspeed/runtime/layers/attention/backends/mha.py
+  s_51d1e2155d2303::t_1d892e1671eec6 98-99,112,196,203-205,220,238,290,301,328,336,408-411,414,416-417,427,447,463,469-471,508
+python/tokenspeed/runtime/layers/attention/backends/trtllm.py
+  s_46f87793fde292::t_f78dd9359c1d30 104,414,417-419,431,439,459,466-474,494,505,515,526,549,646,677,692,747,819-824,833-837,841-845,849-853,880,896,907,931,945,954-956,990
+python/tokenspeed/runtime/layers/attention/deepseek_v4/metadata.py
+  s_c046d13886f367::t_1951324d9c60aa 148-151
+python/tokenspeed/runtime/layers/attention/kv_cache/base.py
+  s_96c5cd9c184397::t_9e1edbf2c87346 43
+python/tokenspeed/runtime/layers/attention/kv_cache/deepseek_v4.py
+  s_536a3da3e72caa::t_e284061eda2809 26-27,41-54,57-58,160-314,404-460,462-471,473-953,1158,1164-1165,1191-1200,1233-1235,1254-1256,1265-1269,1297,1348-1351,1372-1377,1393,1400,1413,1419-1444,1451,1464,1492-1495,1554,1572-1573,1582-1586,1596-1609,1616-1624,1626-1691,1744-1750,1752-1757,1759-1767,1769-1775,1777-1787,1789-1795,1797-1813,1815,1819-1846,1848-1902,1917-1918,1921-1927,1938-1965,1978-1981,1991-1998,2008
+  s_96c5cd9c184397::t_84e8590eaa4ccd 461,472
+python/tokenspeed/runtime/layers/attention/registry.py
+  s_f964defa70a38e::t_d82ede918b0489 30-32,35,94-113,126-167,713-723,778-779,859-865,867-870,872-976,1104-1110,1112-1126,1130,1133-1138,1155-1156,1245-1246
+python/tokenspeed/runtime/models/deepseek_v4.py
+  s_c046d13886f367::t_ec6ff2370376dd 2021-2024,2030-2034,2043,2809,2840-2851,2864,2874,2891-2892,2897-2904,2916,2923-2926,2944,3269,3286,3288-3294,3312,3324,3344-3345,3353,3371,3383
+python/tokenspeed/runtime/pd/factory.py
+  s_96c5cd9c184397::t_afa21f5aa13b83 23-25,52-56
+test/ci/ut/ut-deepseek-v4-flat-differential-flash.yaml
+  s_96c5cd9c184397::t_7404458cadee57 1-24
+test/ci/ut/ut-deepseek-v4-flat-differential-pro-tp8-ep.yaml
+  s_c1922f67325c3b::t_b1faf57f709a8d 1-24
+test/ci/ut/ut-deepseek-v4-flat-differential-pro-tp8.yaml
+  s_c1922f67325c3b::t_e4d5779e9c414e 1-24
+test/ci/ut/ut-deepseek-v4-flat-synthetic-b200.yaml
+  s_2efe010fdd6ad6::t_1c720546da85a2 1-24
+test/runtime/run_ci_suite.py
+  s_2efe010fdd6ad6::t_307a6aa5e7f982 43
+test/runtime/test_deepseek_v4_cache_capabilities.py
+  s_96c5cd9c184397::t_47e84cb1427f29 1-210
+test/runtime/test_deepseek_v4_cache_tables.py
+  s_0c00e84a92016b::t_c93a74db5ded91 1-201
+test/runtime/test_deepseek_v4_config.py
+  s_c046d13886f367::t_632cae80694eb2 85,2302,2330-2382,2391-2501,2542,2551,2590-2591,2628,2637,4212-4215,4221,4237-4242,4245-4315
+  s_96c5cd9c184397::t_91e8cb915f2aaf 51,206-236,1309-1336,1892-1986
+test/runtime/test_deepseek_v4_flat_arena.py
+  s_96c5cd9c184397::t_1f09d46db21a73 1-206,211-263,272-274,280-293,295,299-445,447-456,458-1027
+  s_96c5cd9c184397::t_b685a662457786 264-271,275-279,294,296-298,446,457
+  s_9014bb72b1dafa::t_50147ca2ce6423 207-210
+test/runtime/test_deepseek_v4_flat_memory_plan.py
+  s_b74c5ebdd7c524::t_cd0f971ab0ddcb 1-44,46-552
+test/runtime/test_deepseek_v4_flat_synthetic.py
+  s_2efe010fdd6ad6::t_363b241183aab5 1-402,404,415-460,462-757,759-839,841-885
+  s_96c5cd9c184397::t_10afe2897922da 403,405-414,461,758,840
+test/runtime/test_deepseek_v4_mtp_prefix_cache.py
+  s_96c5cd9c184397::t_ebb6a29d7ca66f 52-56,92-96,125-129,141-166,189-193,202,226-230
+test/runtime/test_flat_cudagraph_per_group.py
+  s_e2372d50b5be98::t_6b5d50d3d25517 123-143,146-149,150,152-163,177,179,184-187,189-193,197-295,300-306,330-333,346,356-357,367-369,374-375,380-383,448-493,496-537,540-572,577-582,613-615,633,648-652,655-658,667-706,711-768,779,802-810,840,856-861,866-867,885,918-923,928,937-945,988-989,1012-1013,1028-1029,1043-1047,1055-1063,1080-1130,1177-1180,1182,1188,1201-1202,1224-1227,1231,1239-1244,1252,1268,1271-1272
+test/runtime/test_flat_group_write_locs.py
+  s_51d1e2155d2303::t_24238d0a1e5225 83,85,105,107,146-154,156-163,165-176,178-183,272,294,307,309,312,323,336,339-345,360,491-497,508-509,550-561,583-584,600
+test/runtime/test_flat_kv_completion_bridge.py
+  s_c046d13886f367::t_0cc3d3250aab9e 1-88,90-114,116-139,140,148,151-154,156-157,158-187,216-221,223-284,288-300,322-364,366-405,407-408,409-411,426-429,431-439,441-512,652-705,707-710
+  s_96c5cd9c184397::t_e60c2a8bf00a96 301-321,513-651
+  s_96c5cd9c184397::t_9d4db0af14472f 89,115,141-147,149-150,155,188-215,222,285-287,365,406,412-425,430,440,706
+test/runtime/test_flat_scheduler_config_guard.py
+  s_96c5cd9c184397::t_5fc0b6c07f880b 4-5,75,81-88,179-187
+  s_3f78954b9781a3::t_863621062bd42c 45-61
+test/runtime/test_pause_controller.py
+  s_96c5cd9c184397::t_e9b7b677abed46 51-58,60-61,90-91
+test/runtime/test_trtllm_flat_groups.py
+  s_46f87793fde292::t_e4551187c006ba 113-116,123,129,145,148,160,166,179-181,184-185,189-190,192-194,208-209,219-232,246,254,259,308,315,337,346
+test/runtime/test_v4_flat_sleep_wake.py
+  s_96c5cd9c184397::t_8abfac05b81b00 1-211
+test/runtime/test_v4_group_keyed_cache_locs.py
+  s_536a3da3e72caa::t_259169b47a00c5 1-66
+test/runtime/test_v4_scheduler_plan_bridge.py
+  s_39f9be92f82707::t_058203ff2d1d08 1-98,106-151,156-345,347-425,452-480
+  s_9014bb72b1dafa::t_5d6863fd71e01a 99-105,152-155,346,426-451
+tokenspeed-scheduler/CMakeLists.txt
+  s_51d1e2155d2303::t_5f576033205d41 66,127,129,132,139-140
+  s_80d11b00f50d36::t_00783e47df64aa 130
+tokenspeed-scheduler/bindings/python_module.cpp
+  s_4f70415d2989fd::t_60c2aa4fd6c198 22,32-38,63-69,75-85,87-88,204-229,237-240,243-245,250-253,262-266,268-269,320,328-329,346-349,351-360,364-365,431-434,436,438,465-466,468-478,491-494,562-563,598-603
+  s_61d355ed95c8be::t_99c336c91a537e 70-74,86,350,435,437,532,534,536,542,544,546-550
+  s_6486291bb56ff3::t_18062a91cf611b 24
+  s_9014bb72b1dafa::t_45c6b511dc1f9f 330
+tokenspeed-scheduler/csrc/cache/block_pool.h
+  s_2d5e09967f3174::t_e60ddf68113f1a 28,30-31,39,52-54,88-90,92,185-195,198-199,202-208,210-221,225,238,253-254,259-263,270,277,282-288,290-291,293-297,300-310,312,316-318,322,327-328,330-347,413-418,420,426-427,430-463,524-578,580,586,593,597-602,611-619,623-627,630,634-636,640-642
+  s_e887598776ba44::t_c2c6c2305bb486 24,26,33,35-36,98-183,239-248,266-267,350-412,421-424,467-523
+tokenspeed-scheduler/csrc/cache/block_pool_set.h
+  s_2d5e09967f3174::t_dc25434e228446 1-23,25-55,57-58,63,65-67,88,89,109-112,114-117,119-124,126-129,131-136,138-144,146-147,151-152,187-192,195-198,202-387
+  s_33304cf9a67d05::t_b958d93a32b02d 24,56,59-62,64,68-87,90-108,113,118,125,130,137,145,148-150,153-186,193-194,199-201
+tokenspeed-scheduler/csrc/cache/block_ref.h
+  s_2d5e09967f3174::t_7f87a1af30c729 63,78
+  s_711704f74466dc::t_484c6c53cd7525 43-47
+tokenspeed-scheduler/csrc/cache/cache_group.h
+  s_51d1e2155d2303::t_a9e03b2479a2ec 31-32,35-36,47-49,54-55
+tokenspeed-scheduler/csrc/cache/cache_types.h
+  s_95fb3ee8a39051::t_beaa5ae4f2e2fa 25,32,40-46,51-55,68-120,135-142,145-152,189,208-211
+  s_e887598776ba44::t_d830053afe5270 121-134,143-144,163-178
+tokenspeed-scheduler/csrc/cache/forward_cache_ops.cpp
+  s_b74c5ebdd7c524::t_c09b16ebc03ff4 23-26,32-55,66-108,109-162,163-167
+  s_96c5cd9c184397::t_5ef50602ca103f 56-65
+tokenspeed-scheduler/csrc/cache/forward_cache_ops.h
+  s_51d1e2155d2303::t_7c0843cf57427a 31-34,37
+  s_3e079b6d867ddf::t_f62be20e296e80 35-36
+tokenspeed-scheduler/csrc/cache/full_attn_manager.h
+  s_96c5cd9c184397::t_af6e2d5355398f 49
+tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.cpp
+  s_2d5e09967f3174::t_2410fa0cac9c00 24,27,38-50,52-99,103,107-110,112-115,117-119,167-174,177-178,180-191,196-197,201-213,215-225,284,289,296,302-303,306-309,311-313,316-317,321-323,327-344,353,355,361-478,486-489,491-513,526,531-549,550-558,559-593,595-617,620,631,633-635,656-665,667-668,671,673-676,688-690,693-695,701-710,744-784,786-788,790,792-793,796-797,798,886-890,892-894,904,909-911,913-919
+  s_96c5cd9c184397::t_db35a8e40f1283 28,120-166,672,685-687,691-692,696-700,711-719,721-743,785,789,791,794-795,799-825,828,830-868,870-882,883,891,898
+  s_96c5cd9c184397::t_47d1315fab38be 51,101,106,111,116,175-176,214,293,912,920
+  s_3e079b6d867ddf::t_1dbfc11cf4dd31 677-684,720,829,869,899-901
+tokenspeed-scheduler/csrc/cache/kv_cache_coordinator.h
+  s_2d5e09967f3174::t_6c142c171f9e67 25,32,46-47,55-56,59-61,79-123,134,140,142-151,202-207,224-229,238-241,243,247-249,251-255,259,267-268
+  s_e887598776ba44::t_74b7fd277205b0 24,50-54,159,167-201,209-210,212,215,217-220,244-245,261
+  s_96c5cd9c184397::t_b0c51e1faa0c22 58,62,66-67,69,258
+  s_3e079b6d867ddf::t_01848aea496529 127-129,160-166,208,211,213-214
+tokenspeed-scheduler/csrc/cache/kv_cache_manager.h
+  s_96c5cd9c184397::t_ee58b19b64c81a 23,26-28,62-77,80-82,85,87,113-138,171-174,176-178,202-206,209,211-213,215-219,221-223,229-230,231-233,244
+  s_e887598776ba44::t_f0c827bfb0e46d 25,193-194,207-208,210,214,220,224-228,235-242
+  s_3e079b6d867ddf::t_eab8555c316f21 139
+tokenspeed-scheduler/csrc/cache/mamba_state_manager.h
+  s_96c5cd9c184397::t_030e5e461712a5 34-35
+tokenspeed-scheduler/csrc/cache/scheduler_thread_mutation_domain.h
+  s_2d5e09967f3174::t_9724da55411907 1-61
+tokenspeed-scheduler/csrc/cache/swa_manager.h
+  s_96c5cd9c184397::t_95e1052347a6b8 26,41-43,56,62-66,82-87,92-113,118-120,122-124,196-199,201,205
+  s_b4c79bbb4b951b::t_d2dda9c4f9d238 25,114-117,121,125,127,130-137
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_0c00e84a92016b::t_ae4474a4485cc6 115,226-227,236,341-351,354-355,439-448,450-451,458,461,500-513,515,518-519,526-528
+  s_4dc500f426a103::t_043a995220f9fe 766,777,788
+  s_96c5cd9c184397::t_7f9a9432954f57 207-209,211-216,218-225,228-235,237-241,459-460,514,547,590,593-595,599-613,698,829,892
+  s_3e079b6d867ddf::t_88c9138158e811 249,352-353,449,516-517,597,770,781,792,816
+tokenspeed-scheduler/csrc/fsm/forward_events.h
+  s_2d5e09967f3174::t_dbaeaad402c0c7 29,43,49,70-77,79,82-83,84-91,92-105,106-126,127-149,151-158,159-160,162-163,186-187,214,249
+  s_96c5cd9c184397::t_f3a2796a407459 47,80-81,150,161,417-419
+  s_96c5cd9c184397::t_6c142a05509c82 78,164-185,207,226,268-269,272-278,289-290,298-302,312-313,317,353-359,361-373,378,383,405,452,476
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.cpp
+  s_46f87793fde292::t_a331c37bd8457f 24,50-70,73-82,85-93
+  s_96c5cd9c184397::t_b6e5a018f753b4 71-72,83-84
+tokenspeed-scheduler/csrc/resource/allocator/paged_cache_group.h
+  s_51d1e2155d2303::t_da7874d78c26ad 45-60,80-89,93-97
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_2d5e09967f3174::t_ef8aeac1e5df27 81-95,130-135,171,174,176-177,185,186-187,206-228,230-233,234-235,238-240,253-261,276-277,282,284-290,296-300,304-305,312-313,319-323,328,335,338-350,353-358,362,364-365,371,374-375,389,391,401,414-421,424-431,433-436,438-439,441-443,446-450,452-477,479-480,484-495,499,501-510,532,635-637,643-669,676,682-683,696,698-699,702,712-715,724,746-747,751,755-756,758,785,802-805,809,873-875,1196-1197,1200,1210-1214,1219,1221-1225,1227,1229,1333,1343,1346,1360-1376,1382,1401,1413,1422
+  s_96c5cd9c184397::t_25d34193dccf17 336-337,351,757,1198-1199,1215-1218
+  s_96c5cd9c184397::t_aa84a15c9994f9 25-26,116-121,150-170,172-173,175,178-184,188-205,229,236-237,278-279,291,295,306-311,314,318,327,331-334,352,359-361,366-370,376-388,390,394-400,402-413,437,440,444-445,481-483,496-498,500,511-533,601,689-691,716,742,760-761,786,799-801,812,1042-1051,1053-1055,1158-1164,1166-1168,1220,1226,1228,1315-1318,1320-1328,1330,1341,1345,1348,1351-1352,1354-1359,1380-1381,1398,1412,1433-1434
+tokenspeed-scheduler/csrc/scheduler/operations/forward.h
+  s_4f70415d2989fd::t_9031857f91559a 28,30-32,42-48,50-51,52-53,83-86,109-114,115-167,168-173,174-183,185-201,236-237,240-244,247-248,250-251,256-258,268,292,301-303,311-313,317-321,339-341,372,385-387,424-439
+  s_4dc500f426a103::t_65a25473c2e8fb 24,27,34,39,41,49,77-83,184,252-255,261-265,267-270,277-287,291,296-301,304-310,322-338,342-349,351,367,379-383,388-396,399-407,411-416
+  s_96c5cd9c184397::t_17fff4f1b58176 249,259-260,266,271-276,288-290,294,314-316,363-366,368-375,377
+tokenspeed-scheduler/csrc/scheduler/outside_event_handler.cpp
+  s_96c5cd9c184397::t_a8041f4a396f12 21-22,24,26-27,117,136-140,155-156,158-164,169-172,185-189,191,196-197,199-221,229-231,233-234,242,243-257,265,269,277,279,284,298,421,426,430,432,455,458,461-462,464,467-473,477-482,484,486-494
+  s_96c5cd9c184397::t_886362387e8628 446,455,474-476
+  s_96c5cd9c184397::t_a331dca5d6f4bd 23,118,165-168,173-184,190,198,235-241,266-268,274-276,278,280-289,292-293,295-297,299-351,353-378,380-429,431,433-457,459-460,463
+tokenspeed-scheduler/csrc/scheduler/outside_events/forward.h
+  s_51d1e2155d2303::t_39124ed324560f 24,31-33,37-49,55-57
+  s_451d2533b2035f::t_ee6afbbf70ffc9 34-36
+tokenspeed-scheduler/csrc/scheduler/request.h
+  s_96c5cd9c184397::t_c69fdd70c50958 232-244
+  s_e887598776ba44::t_5f5f9dc879b4bd 55,97-129
+tokenspeed-scheduler/csrc/scheduler/scheduler.cpp
+  s_2d5e09967f3174::t_7e7326692471ce 112-117,126,132-134,170-172,193-199,235-249,251-256,258-265,267-290,292,299,329,377,388,399,410,421,423-429,436-437,441-447,459,462-464,466-488,490-494,500-507,515-522,530,539-551,560-572,580,618,649-652,654-656,885
+  s_96c5cd9c184397::t_131fd0a07cd84a 34,57-58,85-102,127-129,250,266,330-345,351,357-370,372,465,620-637,653,669-675,677-680,720,722,724,727,730-753,757-804,806
+tokenspeed-scheduler/csrc/scheduler/scheduler.h
+  s_2d5e09967f3174::t_9b9976f26ecc30 57,60,62,69,95-109,112-135,193,195-196,199-200,212-218,223-234,283-289,295-306,327-328,333-341,346,403-404
+  s_96c5cd9c184397::t_6d7b7b0da77cc6 25,58,110-111,166,174-175,177-178,197-198,201-211,249,307-326,329-331,342,350-354,405-406
+tokenspeed-scheduler/csrc/scheduler/types.h
+  s_c046d13886f367::t_fe3714806b1701 31,90-95,118-121
+tokenspeed-scheduler/python/tests/test_paged_cache_group.py
+  s_51d1e2155d2303::t_4d5995bac9b10c 7,9,11,56-101
+  s_9014bb72b1dafa::t_2ac502d0a8ec21 3-4,12,37-55
+tokenspeed-scheduler/python/tokenspeed_scheduler/__init__.py
+  s_95fb3ee8a39051::t_e7be60cb8a9a9f 28,33,35,87-88,93
+tokenspeed-scheduler/tests/cpp/flat_known_radix_failures.txt
+  s_96c5cd9c184397::t_c12c2c2c82a4f2 70-72
+tokenspeed-scheduler/tests/cpp/test_block_pool.cpp
+  s_2d5e09967f3174::t_6d0bcc6c86e266 23,26-27,38-40,130-204,273-322
+tokenspeed-scheduler/tests/cpp/test_block_pool_set.cpp
+  s_2d5e09967f3174::t_a89a42450d6803 1-28,30-58,111-304
+  s_33304cf9a67d05::t_32eb91318e8493 29,59-110
+tokenspeed-scheduler/tests/cpp/test_block_ref.cpp
+  s_2d5e09967f3174::t_2aae8d9af93794 23-25,141-153
+tokenspeed-scheduler/tests/cpp/test_block_table.cpp
+  s_95fb3ee8a39051::t_88254406b717d1 1-326
+tokenspeed-scheduler/tests/cpp/test_flat_forward_operation.cpp
+  s_4f70415d2989fd::t_c1061f61f63c16 30,32,95,98,105-109,153,169-170,174,192-193,220-221,223-226,228-229,230,232-235,237-238,239-251,253-256,258-259,260-261,263-267,275-277,279,284,287-290,296-297,366-368,370,373-388,389-393,395,400-410,412-449
+  s_4dc500f426a103::t_50a09d2e161a26 37,227,236,257,337-353,354-367
+  s_96c5cd9c184397::t_2b3cb333910628 27,29,31,34,43-94,96-97,99-104,111-112,122,131-145,157,159-162,171-173,179,181-184,190-191,197,199-202,212-213,222,231,252,262,268-269,271-272,274,278,280-283,292-295,299,304,306,322,324-327,333-334,369,371-372,394,396-399,411
+tokenspeed-scheduler/tests/cpp/test_flat_kv_completion_scheduler.cpp
+  s_4f70415d2989fd::t_6cd1a9b434be51 1-34,36-95,96-101,130-143,155-188,296-317,464-638,786-960,963-990,1072-1207,1249-1300,1331-1365
+  s_96c5cd9c184397::t_2fa1fb4a98640b 1208-1248
+  s_96c5cd9c184397::t_b28cc58f27630b 424-463,639-675,677-746,748-768,770-785
+  s_96c5cd9c184397::t_a51d55ed58aab9 102-129,144-154,392-423,676,747,769,961-962,991-1071,1301-1330
+tokenspeed-scheduler/tests/cpp/test_flat_kvcache_lifecycle.cpp
+  s_4f70415d2989fd::t_86c53b64c52234 111,115,164-169,172,174-175
+tokenspeed-scheduler/tests/cpp/test_flat_kvcache_scenarios.cpp
+  s_4f70415d2989fd::t_145e36524faee5 55,65,67-68,118,125,330,413,426,430,447,450-451,564-566,627-628,630,674,687,690,2050-2051,2062-2063,2102-2103,2224-2225,2274,2279,2395-2396,2468-2469,2523-2524,2589,2592,2681-2682,2737-2738,2796-2798,2827-2828,2834,3293-3294,3298-3303,3571-3695,3700-3713,3734-3737,3740,3746-3747
+  s_b4c79bbb4b951b::t_b34b304fe8a0bc 114-117,145-146,1458-1475,2096-2097,2099-2100,2144,2185,2220,2272,2463,2518,2586,3289
+  s_3e079b6d867ddf::t_b902411565c3b7 78,2378,2537,3766-3767,3787,3793
+tokenspeed-scheduler/tests/cpp/test_forward_cache_ops.cpp
+  s_b74c5ebdd7c524::t_14ff0f65635746 25,345-346,348-378,403-459
+  s_96c5cd9c184397::t_4162cf9fd6a0fc 344,347,379-402
+  s_96c5cd9c184397::t_20cccfa703d08d 47-52,62,72,93,97,105,111-112,117,138,143-144,160-161,168-169,198,207-208,230-231,265-266,286-288,302,312-313,326,335-336
+tokenspeed-scheduler/tests/cpp/test_kv_cache_coordinator.cpp
+  s_2d5e09967f3174::t_767ea813389e5a 34,42-46,84,88-89,214-215,312-370,374-375,376-380,384-387,390-392,1720-1733,1734-2023
+  s_b4c79bbb4b951b::t_27177cd73245ba 24,26,92-181,192-197,201-210,371-373,388-389
+  s_96c5cd9c184397::t_cb4dc23206bf6f 219,381-383,1591,1616
+  s_3e079b6d867ddf::t_853e0deff7b3bc 198-200,218,533,834-835,838,946,1069-1070,1072-1073
+tokenspeed-scheduler/tests/cpp/test_paged_cache_group_config.cpp
+  s_96c5cd9c184397::t_449deb50442ca0 1-122
+tokenspeed-scheduler/tests/cpp/test_paged_cache_replay.cpp
+  s_96c5cd9c184397::t_17291ce1e38987 711-714,749-751,898-901
+tokenspeed-scheduler/python/tests/test_flat_kvcache.py
+  s_96c5cd9c184397::t_7cb3f1cc4e3a63 59-88,191-210
+  s_61d355ed95c8be::t_e09dc60ff948c7 20-21,171-190
+  s_6486291bb56ff3::t_02443a74e60574 19,152-170
+docs/serving/deepseek-v4-flat-kv-cache-migration.md
+  s_96c5cd9c184397::t_6cb73ddf2a642d 662-663,802
+  s_96c5cd9c184397::t_eba027ad57b77c 392-393,668-669,677,680,689,691,696
+  s_96c5cd9c184397::t_c9be6139610d3c 643,664,666,788-790,795
+  s_40f29d2b0f1564::t_df0e660a97cace 957
+test/runtime/test_generation_output_processor.py
+  s_96c5cd9c184397::t_8b799500d4fffa 165-173
+test/runtime/test_multi_window_page_counts.py
+  s_5b361d1af4241f::t_5a664f5a41b32e 74-75,188-231
+test/runtime/test_v4_sliding_window_groups_smoke.py
+  s_96c5cd9c184397::t_984d238036f9dc 133,145,160,166-170,250-253
+tokenspeed-scheduler/csrc/scheduler/flat_kv_completion_ledger.cpp
+  s_96c5cd9c184397::t_d640a7b1b30f3d 594
+  s_e887598776ba44::t_af8ddb1a581b43 25,38-58,61-63,67-77,88-114,116-120,128-129,133-135,137-162,166-173,186,200-235,240,246,251,259,264-265,267-276,283,288-335,348-351,358-359,363-385,392-408,410-432,435-444,446-447,449-450,454,458,460,462-463,465-466,468-470,502-516,559-562
+python/tokenspeed/runtime/engine/scheduler_utils.py
+  s_96c5cd9c184397::t_9d0a4cde337a8d 307,623,655,659,662,694,745-746,760
+python/tokenspeed/runtime/execution/flat_kv_progress.py
+  s_96c5cd9c184397::t_c662735bd5b0ae 1-42,50-57,58-74,76-188,190-287,289-309,311-339,341-344,346-398
+  s_96c5cd9c184397::t_6e11125c754bcf 75,189,288,310,340,345
+  s_9014bb72b1dafa::t_8ba70ac04d4856 43-49
+test/runtime/test_execution_plan_views.py
+  s_61d355ed95c8be::t_1ae2e428ce65a4 1-76
+test/runtime/test_flat_block_tables_bridge.py
+  s_4dc500f426a103::t_db8c380a5236d7 203,214-216,233,260,329-350
+test/runtime/test_flat_kv_progress.py
+  s_96c5cd9c184397::t_624821313065c6 1-54,65-283,287-349
+  s_52245d299f840b::t_cf907ff1b690fb 284-286
+  s_3f78954b9781a3::t_6ef03dd126e57d 55-64
+tokenspeed-scheduler/csrc/cache/flat_reservation_ledger.h
+  s_b4c79bbb4b951b::t_e1afa0c3c9b965 1-124
+tokenspeed-scheduler/csrc/core/token_container.cpp
+  s_e887598776ba44::t_0c05c4a40740ab 24-26,34-53
+tokenspeed-scheduler/csrc/core/token_container.h
+  s_33304cf9a67d05::t_592bd9e7c11ede 23,46-47
+tokenspeed-scheduler/csrc/scheduler/execution_plan.h
+  s_4dc500f426a103::t_7211597dedb88e 23-26,36,39-42,44,55-58
+tokenspeed-scheduler/csrc/scheduler/flat_kv_completion_ledger.h
+  s_96c5cd9c184397::t_72d1376676131b 23,27,31,39-44,59-61,81-129,144-148,152,180-181,185,199-202,209-217,222,225-226
+tokenspeed-scheduler/csrc/scheduler/page_hasher.h
+  s_96c5cd9c184397::t_68ba40c3fdafb2 23,28,66-71,79,81-87,91-97,107-110,114-127,130-134,153-157,209,264-265
+tokenspeed-scheduler/python/tests/test_fsm_and_scheduling.py
+  s_61d355ed95c8be::t_7a86584762f7f6 33-34,694-711
+tokenspeed-scheduler/tests/cpp/test_flat_kv_completion_ledger.cpp
+  s_96c5cd9c184397::t_3556ecb37f9918 23,27-28,39-71,73,76,78,81,88-89,93-94,107-123,135-201,206,209,215,219-307,309,315,320,328,333-335,341,348-349,358,362-368,370,378-382,386,392,399,410,422,427,437,443-446,448,456,460-461,465-466,472-500,502,507,517-663,666,670-673,679,689
+tokenspeed-scheduler/tests/cpp/test_flat_reservation_ledger.cpp
+  s_b4c79bbb4b951b::t_a1a4ce5a127204 1-60
+tokenspeed-scheduler/tests/cpp/test_page_hasher.cpp
+  s_96c5cd9c184397::t_ed45ca557a8f65 121-154
+test/runtime/test_flat_kv_metrics.py
+  s_96c5cd9c184397::t_8652376de447a1 42-57,95,126-130,484-599
+python/tokenspeed/runtime/configs/flat_kv_contract.py
+  s_9014bb72b1dafa::t_589f718f2f02af 1-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "bf767ff418bfb1512ce5de1f4bb1abfd59f3b700",
+  "prompts": {},
+  "sessions": {
+    "s_0c00e84a92016b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bf4-5727-77c3-86e4-b969f94401b7",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_1488fcde94986e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c8f-0a16-7413-ade8-129eac92b282",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_23e4a9432cd828": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f52-ed44-7921-b7e9-e4c3c62e116b",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_2d5e09967f3174": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c21-ea84-7420-86a3-46c8e7164c79",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_2efe010fdd6ad6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c36-2807-7861-b2c9-a8aff2d3f72b",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_33304cf9a67d05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5fdd-1999-7580-b264-e82a2689872a",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_39f9be92f82707": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bf3-a847-7513-bb0e-d0ad170ba82d",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_3e079b6d867ddf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a34-7657-7981-b3e4-c3b99581b215",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_3f78954b9781a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a34-9185-7270-a932-4448e8c4c041",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_40f29d2b0f1564": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f690d-d3d1-7d33-b8a4-fb8ce13c2f9d",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_451d2533b2035f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f6c-494c-7f42-805d-3eac920a26c1",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_46f87793fde292": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5af0-9369-7121-8e34-b9e31bd14a0e",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_4dc500f426a103": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5fce-83a2-76b1-ba1e-350d3628f8d1",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_4f1e746efcf893": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c8f-22e8-79d2-8d37-66511d20e590",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_4f70415d2989fd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c6a-f01b-7a01-a651-1f7d7c47c581",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_51d1e2155d2303": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5af0-480c-7fe2-90de-369814472a33",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_52245d299f840b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f69b2-fe4b-7180-af92-fd5bda565894",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_536a3da3e72caa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c05-5f88-7323-a5e2-c2d39b4a8ec3",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_5b361d1af4241f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5e99-a609-77d0-bfe5-531b51aec50b",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_61d355ed95c8be": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5fc8-dce3-7203-b5c1-2085ed8e7fad",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_711704f74466dc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5fc3-9b82-7be1-809a-742fa7908685",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_80d11b00f50d36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f60-6606-7943-be63-2d8d1a24308d",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_9014bb72b1dafa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f69e7-ed5a-7ea0-9be1-0e81d419d486",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_95fb3ee8a39051": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5af0-6f1d-7280-8ad3-a0a468037bff",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_b4c79bbb4b951b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5fe2-2986-7483-9d80-1ae5ad26ac1f",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_b74c5ebdd7c524": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bc9-3541-7b13-86e1-48395a0cc6ff",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_c046d13886f367": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bc9-1e87-7542-af12-6c3277c29268",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_c1922f67325c3b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c16-740c-7452-bb01-0214eada738c",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_e2372d50b5be98": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5c2c-2d25-73f2-9ab7-04603dbc741e",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_e887598776ba44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5fba-f2a7-7803-ba78-7661101fd900",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_f964defa70a38e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5bc6-455c-7bd0-b75c-d8c04322228c",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

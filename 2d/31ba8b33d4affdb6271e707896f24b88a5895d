@@ -1,0 +1,121 @@
+test/runtime/test_deepseek_v4_flat_synthetic.py
+  s_96c5cd9c184397::t_dc44b5155c14f3 22-23,37-43,217,224-225,230,233,251-280,284,740
+test/runtime/test_gdn_flat_assembly.py
+  s_403dc671975db2::t_49365cf95c009e 51-55
+test/runtime/test_flat_block_tables_bridge.py
+  s_96c5cd9c184397::t_5a73bdf2f51b65 122-138,286-333,335-337
+test/runtime/test_multi_window_page_counts.py
+  s_c29d5e6c4201fb::t_4235226758575c 34,72-74,191-202,204-213,215-224,228-232
+tokenspeed-scheduler/tests/cpp/test_flat_kvcache_scenarios.cpp
+  s_a07a452ba768b8::t_0851e8e39de335 32,3641-3648,3650-3664,3666-3667,3670-3691,3693,3697-3698,3700
+test/runtime/test_deepseek_v4_flat_arena.py
+  s_403dc671975db2::t_64ea587aed74e6 28,203-247
+tokenspeed-scheduler/python/tests/test_paged_cache_group.py
+  s_403dc671975db2::t_3fea264e50400c 37-39,41-44,47-48,64-85,87-102,104
+tokenspeed-scheduler/tests/cpp/test_flat_kv_completion_ledger.cpp
+  s_a07a452ba768b8::t_d16408ab5f6e45 46-49,63-65,378-413,434,438,444-446
+tokenspeed-scheduler/tests/cpp/flat_known_radix_failures.txt
+  s_96c5cd9c184397::t_48a63ed00847d5 78-79,103-116
+tokenspeed-scheduler/tests/cpp/test_block_table.cpp
+  s_a07a452ba768b8::t_4b0e996aa9de1d 55
+test/runtime/test_unified_kv_slab_pool.py
+  s_403dc671975db2::t_d575b84c78be9c 49-53
+test/runtime/test_v4_sliding_window_groups_smoke.py
+  s_403dc671975db2::t_37a07a666dcd56 44-54
+test/runtime/test_flat_kv_completion_bridge.py
+  s_96c5cd9c184397::t_5c6c658fe1a252 210-214,220,471-545,555-562,564-565,567,570-580
+test/runtime/test_flat_kv_progress.py
+  s_96c5cd9c184397::t_bb05106c6bc0d7 28,34-70,217-223,231-232
+test/runtime/test_deepseek_v4_flat_memory_plan.py
+  s_96c5cd9c184397::t_85304bc6323f0f 26,46-54,351-352,356,358,361-384
+docs/serving/deepseek-v4-flat-kv-cache-migration.md
+  s_96c5cd9c184397::t_f0de6ea3e94734 5,16,31,49,58,198,876,878,895,898-904,924,941,943,947,950,967,969-970,974,983,990
+test/runtime/test_flat_scheduler_config_guard.py
+  s_403dc671975db2::t_cd6117f5f8aba6 18,54-65,67-71
+test/runtime/test_deepseek_v4_cache_tables.py
+  s_a07a452ba768b8::t_41e00c75106bde 8,16-21,40-58,60-69,100-104,107-120,122-149
+test/runtime/test_group_specs_from_layer_types.py
+  s_403dc671975db2::t_00255c7e0828fc 8,36-40
+test/runtime/test_fused_decode_input_prep.py
+  s_403dc671975db2::t_40b98276a202b9 9,27-44,63,67-68,76-90,115,118
+test/runtime/test_flat_memory_plan.py
+  s_403dc671975db2::t_2d4942c406c8b6 8,36-40
+test/runtime/test_deepseek_v4_config.py
+  s_c29d5e6c4201fb::t_855dcb79b86800 1310-1314,1316-1324,2262-2286,2289-2300,2302-2327,2330-2361,2363-2367,2369-2374
+test/runtime/test_flat_cudagraph_per_group.py
+  s_c29d5e6c4201fb::t_1bf36647d3ff22 498,521,534,567-589,591-606,915,918-943
+test/runtime/test_v4_scheduler_plan_bridge.py
+  s_c29d5e6c4201fb::t_c09379f8d3011f 25,106-121,197-215,218,241,247-253,257-264,266-268
+tokenspeed-scheduler/tests/cpp/test_block_pool_set.cpp
+  s_a07a452ba768b8::t_cb432da7d9bed8 33,42-66,118-144
+tokenspeed-scheduler/tests/cpp/test_flat_forward_operation.cpp
+  s_403dc671975db2::t_d887fca6319461 348,370-397
+tokenspeed-scheduler/tests/cpp/test_flat_kv_completion_scheduler.cpp
+  s_403dc671975db2::t_b4eea2ab4e068b 24,26,162-164,167,177,191,193,195,197,199,201-202,254-255,258-260,298,310-311,331,337-354,356-357,464-468,554-594,701-712,716,719-725,728-731,734,750,756,759-772,774-782,784-786,788-790
+tokenspeed-scheduler/tests/cpp/test_forward_cache_ops.cpp
+  s_a07a452ba768b8::t_5fd3a99d6e43f0 345-349,351-353,356-399
+python/tokenspeed/runtime/execution/drafter/eagle.py
+  s_96c5cd9c184397::t_35fedde54ea500 313,324
+python/tokenspeed/runtime/layers/attention/backends/flat_groups.py
+  s_edfdcd214e9b87::t_4e2b2783fd6244 737
+test/runtime/test_flat_group_write_locs.py
+  s_cb8b21ceb155b9::t_63912272ffd119 146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "2d31ba8b33d4affdb6271e707896f24b88a5895d",
+  "prompts": {},
+  "sessions": {
+    "s_403dc671975db2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a5a-c7f0-7211-951b-098c6ce4abbf",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_a07a452ba768b8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a5a-9398-7d03-98d1-1e5e83d74f6f",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_c29d5e6c4201fb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a5a-aac4-71c3-83ba-0654ff1898ab",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_cb8b21ceb155b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6f01-b096-7ba3-9161-88facfdc0e5a",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_edfdcd214e9b87": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6f01-7a9f-7f02-877d-7f81718de32e",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
