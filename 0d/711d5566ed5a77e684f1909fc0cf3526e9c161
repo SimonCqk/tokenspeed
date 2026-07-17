@@ -1,0 +1,55 @@
+python/tokenspeed/runtime/execution/cache_loc_kernel.py
+  s_3f78954b9781a3::t_b344f62e28bb02 259-260,274-275,293-309,332-334,352-353
+python/tokenspeed/runtime/execution/drafter/eagle.py
+  s_3f78954b9781a3::t_74d6a240850765 386,388,1178,1187-1189
+python/tokenspeed/runtime/execution/input_buffer.py
+  s_3f78954b9781a3::t_9c2fc4a09edc28 285,295-296,301-304,308,430-431,483-484
+python/tokenspeed/runtime/execution/types.py
+  s_96c5cd9c184397::t_52afd9118d3966 343-346,373,380-385,391
+test/runtime/test_flat_retract_readmit.py
+  s_3e079b6d867ddf::t_fa788f88d27b48 99-103
+test/runtime/test_fused_decode_input_prep.py
+  s_3f78954b9781a3::t_3169dab1fd9f3b 1-121
+test/runtime/test_generation_output_processor.py
+  s_3e079b6d867ddf::t_562b9cdeec30d9 85-89,528-532
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_96c5cd9c184397::t_bdfbab3fe5e8ae 150,156,165,170-172,179-180,255-257,277,304,324,356-357,377,382,517,578,666-667,718,776,1028-1029,1141-1142,1295-1300,1330-1332,1334,1356,1369,1371-1381,1406-1413,1418
+tokenspeed-scheduler/csrc/scheduler/scheduler.cpp
+  s_96c5cd9c184397::t_86c7a87b730db4 43,678-687,689-712,714-717,721-723,725-728,730-750,752,755-757,759-766,771-777,780-791,793-798,800-802
+tokenspeed-scheduler/csrc/scheduler/scheduler.h
+  s_96c5cd9c184397::t_ca347e3fb766f7 165,168,173,176,195,198-200,401
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "0d711d5566ed5a77e684f1909fc0cf3526e9c161",
+  "prompts": {},
+  "sessions": {
+    "s_3e079b6d867ddf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a34-7657-7981-b3e4-c3b99581b215",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_3f78954b9781a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6a34-9185-7270-a932-4448e8c4c041",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
