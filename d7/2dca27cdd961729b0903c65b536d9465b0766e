@@ -1,0 +1,21 @@
+python/tokenspeed/runtime/layers/attention/backends/flat_groups.py
+  s_96c5cd9c184397::t_4c016ad49d496d 441-444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "d72dca27cdd961729b0903c65b536d9465b0766e",
+  "prompts": {},
+  "sessions": {
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
