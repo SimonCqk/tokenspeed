@@ -1,0 +1,31 @@
+python/tokenspeed/runtime/execution/drafter/eagle.py
+  s_96c5cd9c184397::t_35fedde54ea500 313,324
+python/tokenspeed/runtime/layers/attention/backends/flat_groups.py
+  s_edfdcd214e9b87::t_4e2b2783fd6244 737
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "1430b2057843a78354bd53876460a981e84a1d3c",
+  "prompts": {},
+  "sessions": {
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_edfdcd214e9b87": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6f01-7a9f-7f02-877d-7f81718de32e",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
