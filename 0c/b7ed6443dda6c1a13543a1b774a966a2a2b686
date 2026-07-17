@@ -1,0 +1,21 @@
+test/runtime/test_flat_group_write_locs.py
+  s_cb8b21ceb155b9::t_63912272ffd119 146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "0cb7ed6443dda6c1a13543a1b774a966a2a2b686",
+  "prompts": {},
+  "sessions": {
+    "s_cb8b21ceb155b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6f01-b096-7ba3-9161-88facfdc0e5a",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
