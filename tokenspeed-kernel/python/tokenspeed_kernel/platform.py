@@ -161,6 +161,10 @@ class PlatformInfo:
         return self.is_amd and self.arch_version == ArchVersion(9, 5)
 
     @property
+    def is_cdna5(self) -> bool:
+        return self.is_amd and self.arch_version == ArchVersion(12, 5)
+
+    @property
     def is_ampere_plus(self) -> bool:
         return self.is_nvidia and self.arch_version >= ArchVersion(8, 0)
 
@@ -179,6 +183,10 @@ class PlatformInfo:
     @property
     def is_cdna4_plus(self) -> bool:
         return self.is_amd and self.arch_version >= ArchVersion(9, 5)
+
+    @property
+    def is_cdna5_plus(self) -> bool:
+        return self.is_amd and self.arch_version >= ArchVersion(12, 5)
 
     @property
     def arch(self) -> str:
@@ -237,6 +245,7 @@ class PlatformInfo:
             names = {
                 (9, 4): "CDNA3",  # MI300
                 (9, 5): "CDNA4",  # MI350
+                (12, 5): "CDNA5",
             }
             return names.get(arch_version, f"GFX{arch_version[0]}.{arch_version[1]}")
         return f"{self.vendor}:{arch_version[0]}.{arch_version[1]}"
