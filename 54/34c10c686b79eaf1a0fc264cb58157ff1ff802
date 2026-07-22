@@ -1,0 +1,73 @@
+python/tokenspeed/runtime/engine/event_loop.py
+  s_6b0032aaf4986a::t_974c43d7a7b029 405,415
+python/tokenspeed/runtime/engine/scheduler_utils.py
+  s_549b05a877ad06::t_af45f5310082d9 27,87-103,130,159-163,197-199
+python/tokenspeed/runtime/execution/model_executor.py
+  s_549b05a877ad06::t_394845b80ca182 359-362,854-862
+python/tokenspeed/runtime/flat_cache_tables.py
+  s_96c5cd9c184397::t_782909eb66d53c 364,367-369,372-390
+python/tokenspeed/runtime/layers/attention/backends/flat_groups.py
+  s_471ef2cdaab9f2::t_4c0d8c8af422fd 219-222
+test/runtime/test_deepseek_v4_cache_tables.py
+  s_549b05a877ad06::t_cbed5373cf596f 29-47,65-106
+test/runtime/test_deepseek_v4_config.py
+  s_6b0032aaf4986a::t_1330ba010f6d45 1879
+test/runtime/test_deepseek_v4_flat_synthetic.py
+  s_6b0032aaf4986a::t_e3ab3267524132 126
+test/runtime/test_flat_group_write_locs.py
+  s_471ef2cdaab9f2::t_05617a6a351298 92-135,676-679
+test/runtime/test_group_specs_from_layer_types.py
+  s_96c5cd9c184397::t_366741271e736c 364,366,369,372-401,406-408,428-430,440-503
+tokenspeed-scheduler/python/tests/test_paged_cache_group.py
+  s_6bd9f09350a224::t_ab9198432af98e 34-47,51-52,54,56-72,87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "5434c10c686b79eaf1a0fc264cb58157ff1ff802",
+  "prompts": {},
+  "sessions": {
+    "s_471ef2cdaab9f2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87e1-3373-7ad0-ab82-4466908d3fbf",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_549b05a877ad06": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87d4-69b9-7020-afb1-02a06b66cdb5",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_6b0032aaf4986a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87d4-3b4d-7d42-96fc-fcf281a2456c",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_6bd9f09350a224": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87d2-f469-7cd3-a56c-a75c98f9228c",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
