@@ -1876,6 +1876,7 @@ class TestDeepseekV4Config(unittest.TestCase):
                     retention="sliding_window",
                     rows_per_page=64,
                     entry_stride_tokens=1,
+                    block_size=64,
                     sliding_window_tokens=128,
                 ),
             ),

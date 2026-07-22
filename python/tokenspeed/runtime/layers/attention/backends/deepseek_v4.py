@@ -661,7 +661,6 @@ class DeepseekV4AttentionBackend(AttentionBackend):
             require_source=bool(self._uses_flat_cache_tables and bs > 0),
         )
         paged_cache_block_tables = table_source.tables
-        paged_cache_block_table_base_offsets = table_source.base_offsets
         num_tokens_arg = kwargs.pop("num_tokens", None)
         positions = kwargs.get("positions")
         num_extends_arg = kwargs.pop("num_extends", None)
@@ -2164,8 +2163,6 @@ class DeepseekV4AttentionBackend(AttentionBackend):
                     f"plan: capture={sorted(captured_group_ids)}, "
                     f"plan={sorted(planned_capture_cols)}"
                 )
-        paged_cache_block_tables = table_source.tables
-        paged_cache_block_table_base_offsets = table_source.base_offsets
         num_tokens_arg = kwargs.pop("num_tokens", None)
         del kwargs
         if forward_mode is not None and not forward_mode.is_decode_or_idle():
@@ -2299,8 +2296,6 @@ class DeepseekV4AttentionBackend(AttentionBackend):
             kwargs,
             require_source=self._uses_flat_cache_tables,
         )
-        paged_cache_block_tables = table_source.tables
-        paged_cache_block_table_base_offsets = table_source.base_offsets
         actual_bs = max(0, min(int(kwargs.pop("actual_bs", bs)), bs))
         num_tokens_arg = kwargs.pop("num_tokens", None)
         del kwargs

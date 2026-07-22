@@ -111,7 +111,7 @@ class FlatBlockTablesBridgeTest(unittest.TestCase):
 
     def test_flat_base_offsets_preserve_nonzero_compact_origins(self):
         op = self._make_op(
-            {"full": [[11], [12]], "state": [[21, 22], [31]]},
+            {"full": [[11], [12]], "state": [[21, 22], [31, 0]]},
             {"full": [0, 0], "state": [7, 19]},
         )
         out, maxima = self.base_bridge(op, device="cpu", num_reqs=2)

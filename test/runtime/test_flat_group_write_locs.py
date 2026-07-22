@@ -89,6 +89,50 @@ class _MHACase(_TorchCase):
 
 
 class ComputeFlatOutCacheLocsTest(_MHACase):
+    def test_group_page_size_falls_back_only_without_flat_specs(self):
+        backend = self.MHAAttnBackend.__new__(self.MHAAttnBackend)
+        backend.page_size = PAGE
+
+        cases = (
+            ("empty group", "", PAGE),
+            ("radix layer label", "sliding_attention", PAGE),
+        )
+        for name, group_id, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(backend._group_page_size(group_id), expected)
+
+        backend._learn_flat_state_groups(_flat_specs({"full_attention": 4}))
+        self.assertEqual(backend._group_page_size("full_attention"), 4)
+        for group_id in ("", "sliding_attention"):
+            with self.subTest(unknown_group_id=group_id), self.assertRaisesRegex(
+                RuntimeError, "absent from.*cache specs"
+            ):
+                backend._group_page_size(group_id)
+
+        from tokenspeed.runtime.configs.paged_cache_spec import PagedCacheGroupSpec
+
+        state_only_backend = self.MHAAttnBackend.__new__(self.MHAAttnBackend)
+        state_only_backend.page_size = PAGE
+        state_only_backend._learn_flat_state_groups(
+            (
+                PagedCacheGroupSpec(
+                    group_id="state",
+                    retention="sliding_window",
+                    rows_per_page=4,
+                    entry_stride_tokens=1,
+                    sliding_window_tokens=8,
+                    family="state",
+                    prefix_role="continuation_state",
+                    table_layout="bounded_window",
+                ),
+            )
+        )
+        for group_id in ("", "unknown"):
+            with self.subTest(state_only_group_id=group_id), self.assertRaisesRegex(
+                RuntimeError, "absent from.*cache specs"
+            ):
+                state_only_backend._group_page_size(group_id)
+
     def test_decode_locs_formula(self):
         torch = self.torch
         # 2 reqs, page_size=2. r0: seq_len 5 -> pos 4 -> page_idx 2, off 0.
@@ -629,7 +673,10 @@ class GraphLocBuffersTest(_MHACase):
                 device=self.backend.device,
             ),
         }
-        bases = {gid: torch.zeros(3, dtype=torch.int32) for gid in tables}
+        bases = {
+            gid: torch.zeros(3, dtype=torch.int32, device=self.backend.device)
+            for gid in tables
+        }
         self._replay(3, tables, bases, seq_lens=[5, 4, 1])
         locs = self.backend.cuda_graph_flat_out_cache_locs
         # sliding: r0 seq 5 -> pos 4 -> page_idx 2 -> page 7 -> 7*2+0=14;

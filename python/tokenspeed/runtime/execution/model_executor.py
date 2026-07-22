@@ -356,9 +356,10 @@ class ModelExecutor:
         ):
             raise RuntimeError(
                 "flat speculative cache locations require either a group-keyed "
-                "backend or exactly one stride-1 full-history cache group whose "
-                "block span equals the legacy page size; refusing to mirror an "
-                "arbitrary group into req_to_page"
+                "backend or exactly one mirror-compatible stride-1 full-history "
+                "cache group whose block span equals the legacy page size; "
+                "refusing to mirror an arbitrary group into "
+                "req_to_page"
             )
 
         if self._uses_group_keyed_cache_locs:
@@ -398,12 +399,9 @@ class ModelExecutor:
         )
         spec_num_tokens = config.spec_num_tokens if config.spec_algo is not None else 1
         # Stride for indexing req_to_page when building drafter caller-side
-        # write locs. These locs are live on the radix arm only: on flat,
-        # every KV write (target and draft) takes the backend metadata's
-        # per-group out_cache_locs, and req_to_page is a verbatim mirror of
-        # the full-attention group's table kept for the non-flat fallbacks —
-        # the caller locs computed from it are never consumed there (the
-        # Inkling rel path asserts loc/row agreement).
+        # write locs. Radix and the exact-geometry legacy Flat fallback consume
+        # these scalar locations. Group-keyed Flat backends keep them on the
+        # page-0 sentinel and route every real write through per-group metadata.
         self._draft_page_size = int(
             getattr(draft_token_to_kv_pool, "page_size", 0) or config.block_size
         )
@@ -850,13 +848,12 @@ class ModelExecutor:
     def _mirror_legacy_flat_table_into_req_to_page(
         self, forward_op, flat_block_tables
     ) -> None:
-        """Restore the scalar radix ABI for its one safe legacy flat shape.
+        """Populate the legacy scalar scratch table from one safe Flat group.
 
-        The selected group is proven to be the only owner group, stride 1,
-        absolute full-history, and byte-for-byte aligned with the configured
-        scalar page size. Group-keyed flat caches never enter this path: their local page ids
-        require a group identity and are delivered directly to owner-local
-        backend metadata.
+        The selected group is the unique stride-1, absolute full-history
+        candidate whose block span exactly equals the scalar page size. Other
+        groups continue through per-group metadata. Group-keyed caches never
+        enter this path because their local page ids require a group identity.
         """
         if (
             self.drafter is None

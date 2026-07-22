@@ -26,6 +26,25 @@ _tables = _load_module()
 _SPECS = tuple(SimpleNamespace(group_id=group_id) for group_id in ("a", "b"))
 
 
+def _legacy_spec(
+    group_id,
+    *,
+    family="history",
+    retention="full_history",
+    table_layout="absolute",
+    entry_stride_tokens=1,
+    block_size=64,
+):
+    return SimpleNamespace(
+        group_id=group_id,
+        family=family,
+        retention=retention,
+        table_layout=table_layout,
+        entry_stride_tokens=entry_stride_tokens,
+        block_size=block_size,
+    )
+
+
 def _backend(*, flat=True, paged=True, group_keyed=True):
     return SimpleNamespace(
         uses_flat_cache_groups=flat,
@@ -43,6 +62,44 @@ def _pool(*, plan=None, owner_specs=_SPECS, scheduler_specs=_SPECS):
 
 
 class DeepseekV4CacheTableSourceTest(unittest.TestCase):
+    def test_legacy_flat_loc_selects_the_only_compatible_group(self):
+        compatible = _legacy_spec("full_attention")
+        cases = (
+            ("single", (compatible,), "full_attention"),
+            (
+                "sliding and state extras",
+                (
+                    _legacy_spec("sliding", retention="sliding_window"),
+                    compatible,
+                    _legacy_spec("state", family="state"),
+                ),
+                "full_attention",
+            ),
+            ("wider block", (_legacy_spec("wide", block_size=128),), None),
+            ("zero block", (_legacy_spec("zero", block_size=0),), None),
+            ("different block", (_legacy_spec("odd", block_size=96),), None),
+            (
+                "bounded layout",
+                (_legacy_spec("bounded", table_layout="bounded_window"),),
+                None,
+            ),
+            ("non-unit stride", (_legacy_spec("stride", entry_stride_tokens=2),), None),
+            (
+                "ambiguous full history",
+                (compatible, _legacy_spec("other")),
+                None,
+            ),
+        )
+        for name, specs, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    _tables.legacy_flat_loc_group_id(
+                        specs,
+                        legacy_page_size=64,
+                    ),
+                    expected,
+                )
+
     def test_binding_is_selected_once_from_scheduler_and_pool(self):
         cases = (
             ("radix build", False, _backend(), object(), "radix", (), False),
@@ -206,6 +263,50 @@ class DeepseekV4CacheTableSourceTest(unittest.TestCase):
                     draft_binding=draft_binding,
                     speculative_algorithm="MTP",
                 )
+
+    def test_planless_speculative_owner_groups_are_scheduler_subsets(self):
+        full = SimpleNamespace(group_id="full_attention")
+        sliding = SimpleNamespace(group_id="sliding_attention")
+        outside = SimpleNamespace(group_id="draft_only")
+        cases = (
+            ("owner subsets", (full,), (sliding,), None),
+            ("target outside scheduler union", (outside,), (full,), "target"),
+            ("draft outside scheduler union", (full,), (outside,), "draft"),
+        )
+        for name, target_specs, draft_specs, error in cases:
+            target_pool = _pool(
+                owner_specs=target_specs,
+                scheduler_specs=(full, sliding),
+            )
+            target_binding = _tables.resolve_cache_table_binding(
+                backend=_backend(paged=False),
+                pool=target_pool,
+                flat_scheduler_active=True,
+            )
+            draft_pool = _pool(
+                owner_specs=draft_specs,
+                scheduler_specs=draft_specs,
+            )
+            draft_binding = _tables.resolve_cache_table_binding(
+                backend=_backend(paged=False),
+                pool=draft_pool,
+                flat_scheduler_active=True,
+            )
+            kwargs = dict(
+                target_pool=target_pool,
+                target_binding=target_binding,
+                draft_pool=draft_pool,
+                draft_binding=draft_binding,
+                speculative_algorithm="MTP",
+            )
+            with self.subTest(name=name):
+                if error is None:
+                    _tables.validate_speculative_flat_bindings(**kwargs)
+                else:
+                    with self.assertRaisesRegex(
+                        RuntimeError, rf"flat {error} cache groups"
+                    ):
+                        _tables.validate_speculative_flat_bindings(**kwargs)
 
 
 if __name__ == "__main__":

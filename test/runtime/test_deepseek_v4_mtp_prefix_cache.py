@@ -217,6 +217,7 @@ def test_deepseek_v4_swa_slot_mapping_falls_back_for_incompatible_draft_metadata
                 dtype=torch.int32,
             ),
             swa_base_logical_page=None,
+            has_legacy_block_table=True,
         ),
     )
     ctx = SimpleNamespace(

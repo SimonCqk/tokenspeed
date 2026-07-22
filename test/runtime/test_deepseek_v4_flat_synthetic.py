@@ -123,6 +123,7 @@ def _scheduler(plan):
         max_scheduled_tokens=256,
         max_batch_size=1,
         page_size=PAGE_SIZE,
+        scheduler_backend="flat",
         num_host_pages=0,
         disable_l2_cache=True,
         enable_l3_storage=False,

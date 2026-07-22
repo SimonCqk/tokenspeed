@@ -402,6 +402,7 @@ class EventLoop:
         required_groups = token_to_kv_pool.prefix_cache_required_group_ids
         if required_groups is not None and server_args.enable_prefix_caching:
             prefix_cache_adjunct = pool_to_prefix_cache_adjunct_spec(required_groups)
+        scheduler_backend, _ = scheduler_backend_identity(flat_kvcache_ext)
         scheduler_cfg = make_config(
             num_device_pages=(
                 0
@@ -411,6 +412,7 @@ class EventLoop:
             max_scheduled_tokens=server_args.chunked_prefill_size,
             max_batch_size=per_rank_max_batch,
             page_size=server_args.block_size,
+            scheduler_backend=scheduler_backend,
             num_host_pages=num_host_pages,
             disable_l2_cache=not server_args.enable_kvstore,
             enable_l3_storage=server_args.kvstore_storage_backend is not None,
@@ -430,7 +432,6 @@ class EventLoop:
             enable_mixed_prefill_decode=server_args.enable_mixed_batch,
             prefix_cache_adjunct=prefix_cache_adjunct,
         )
-        scheduler_backend, _ = scheduler_backend_identity(flat_kvcache_ext)
         admission_path = scheduler_admission_path(
             flat_kvcache_ext=flat_kvcache_ext,
             config=scheduler_cfg,

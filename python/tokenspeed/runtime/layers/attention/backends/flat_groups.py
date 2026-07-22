@@ -216,9 +216,10 @@ class FlatCacheGroupsMixin:
         )
 
     def _group_page_size(self, gid: str) -> int:
-        if not gid:
-            # Empty group ids are the legacy/radix ABI. Explicit flat groups
-            # must be present in the immutable construction-time spec view.
+        if not self.flat_group_specs and not self.flat_state_group_ids:
+            # Radix never publishes flat group specs, even when model layers
+            # carry group labels. Once flat specs exist, however, every
+            # id must resolve through that immutable geometry view.
             return self.page_size
         spec = self.flat_group_specs.get(gid)
         if spec is None:

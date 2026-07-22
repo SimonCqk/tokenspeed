@@ -221,7 +221,8 @@ TEST(MakeCoordinatorTest, AcceptsDivisibleBlockSizesAndFoldsGcdLcm) {
     BlockPool pool(16);
     std::vector<KvCacheSpec> specs = {
         {AttnKind::kFull, 4, 0},
-        {AttnKind::kSlidingWindow, 8, 10},  // per-group block_size (multiple of base)
+        // Per-group block_size is a multiple of the base.
+        {AttnKind::kSlidingWindow, 8, 10},
     };
     KvCacheCoordinator coord = MakeCoordinator(specs, pool);
     EXPECT_EQ(coord.BaseBlockSize(), 4);  // gcd(4,8)

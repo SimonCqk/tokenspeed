@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import torch
 
+from tokenspeed.runtime.flat_cache_tables import resolve_cache_table_binding
 from tokenspeed.runtime.layers.attention.backends.inkling import InklingAttnBackend
 
 
@@ -20,6 +21,30 @@ def _acts(start: int, count: int) -> torch.Tensor:
 
 
 class TestInklingConvLookback(unittest.TestCase):
+    def test_flat_binding_preserves_group_identity(self):
+        backend = InklingAttnBackend.__new__(InklingAttnBackend)
+        backend.inner = SimpleNamespace(
+            uses_paged_cache_groups=False,
+            uses_flat_cache_groups=True,
+        )
+        group_ids = ("full_attention", "sliding_attention")
+        pool = SimpleNamespace(
+            flat_memory_plan=None,
+            paged_cache_group_specs=tuple(
+                SimpleNamespace(group_id=group_id) for group_id in group_ids
+            ),
+        )
+
+        binding = resolve_cache_table_binding(
+            backend=backend,
+            pool=pool,
+            flat_scheduler_active=True,
+        )
+
+        self.assertEqual(binding.kind, "flat")
+        self.assertEqual(binding.group_ids, group_ids)
+        self.assertTrue(binding.group_keyed_cache_locs)
+
     def test_decode_window_recurrence_tracks_both_windows(self):
         # w1=3, D=2, k=4: chunk rows cover positions [vc-D, vc+k) per round.
         w1, lookback, k = 3, 2, 4

@@ -24,7 +24,7 @@ import math
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
@@ -84,16 +84,25 @@ _TABLE_LAYOUT_MAP = {
 }
 
 
-def resolve_scheduler_block_size(page_size: int, paged_cache_groups) -> int:
-    """Scheduler block_size = hash-grain BASE: gcd of group block sizes, not the KV page geometry."""
+def resolve_scheduler_block_size(
+    page_size: int,
+    paged_cache_groups,
+    *,
+    scheduler_backend: Literal["radix", "flat"],
+) -> int:
+    """Resolve the scheduler's logical block grain for its selected backend."""
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size <= 0:
+        raise ValueError("scheduler page_size must be a positive integer")
+    if scheduler_backend == "radix":
+        return page_size
+    if scheduler_backend != "flat":
+        raise ValueError(
+            f"unsupported scheduler backend {scheduler_backend!r}; "
+            "expected 'radix' or 'flat'"
+        )
+
     groups = tuple(paged_cache_groups or ())
     if not groups:
-        if (
-            isinstance(page_size, bool)
-            or not isinstance(page_size, int)
-            or page_size <= 0
-        ):
-            raise ValueError("scheduler page_size must be a positive integer")
         return page_size
     base = 0
     for group in groups:
@@ -118,6 +127,7 @@ def make_config(
     max_scheduled_tokens: int,
     max_batch_size: int,
     page_size: int,
+    scheduler_backend: Literal["radix", "flat"],
     num_host_pages: int,
     disable_l2_cache: bool,
     enable_l3_storage: bool,
@@ -146,7 +156,11 @@ def make_config(
     cfg.num_device_pages = num_device_pages
     cfg.max_scheduled_tokens = max_scheduled_tokens
     cfg.max_batch_size = max_batch_size
-    cfg.block_size = resolve_scheduler_block_size(page_size, paged_cache_groups)
+    cfg.block_size = resolve_scheduler_block_size(
+        page_size,
+        paged_cache_groups,
+        scheduler_backend=scheduler_backend,
+    )
 
     cfg.num_host_pages = num_host_pages
     cfg.enable_l3_storage = enable_l3_storage
@@ -180,7 +194,9 @@ def make_config(
     return cfg
 
 
-def scheduler_backend_identity(flat_kvcache_ext: bool) -> tuple[str, str]:
+def scheduler_backend_identity(
+    flat_kvcache_ext: bool,
+) -> tuple[Literal["radix", "flat"], Literal["OFF", "ON"]]:
     """Return the loaded scheduler backend name and its compile-option value."""
 
     return ("flat", "ON") if flat_kvcache_ext else ("radix", "OFF")

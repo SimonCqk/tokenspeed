@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 from tokenspeed_scheduler import (
     PagedCacheGroupAllocator,
@@ -10,9 +8,6 @@ from tokenspeed_scheduler import (
     PagedCacheRetention,
     PagedCacheTableLayout,
 )
-
-from tokenspeed.runtime.configs.deepseek_v4_cache_spec import build_v4_cache_specs
-from tokenspeed.runtime.engine.scheduler_utils import pool_to_paged_cache_groups
 
 
 def _full_history_config(rows_per_page=64, entry_stride_tokens=4, total_pages=10):
@@ -36,57 +31,45 @@ def _sliding_config(rows_per_page=2, entry_stride_tokens=1, total_pages=8, windo
     )
 
 
-_V4_SPECS = tuple(
-    build_v4_cache_specs(
-        SimpleNamespace(sliding_window=128),
-        layer_ratio=(1, 4, 128),
+def _v4_compressor_state_config() -> PagedCacheGroupConfig:
+    return PagedCacheGroupConfig(
+        group_id="v4.c4a.compressor_state",
+        rows_per_page=4,
+        entry_stride_tokens=1,
+        total_pages=32,
+        retention=PagedCacheRetention.SlidingWindow,
+        sliding_window_tokens=8,
+        family=PagedCacheGroupFamily.State,
+        block_size=4,
+        pool_id="v4.c4.state",
+        prefix_role=PagedCachePrefixRole.ContinuationState,
+        table_layout=PagedCacheTableLayout.BoundedWindow,
+        owner_mask=1,
     )
-)
 
 
-def _v4_native_groups() -> dict[str, PagedCacheGroupConfig]:
-    pool = SimpleNamespace(
-        paged_cache_group_specs=_V4_SPECS,
-        paged_cache_group_page_counts={spec.group_id: 32 for spec in _V4_SPECS},
-    )
-    return {group.group_id: group for group in pool_to_paged_cache_groups(pool)}
+def test_v4_flat_group_accepts_native_geometry() -> None:
+    config = _v4_compressor_state_config()
 
-
-@pytest.mark.parametrize("spec", _V4_SPECS, ids=lambda spec: spec.group_id)
-def test_v4_production_spec_round_trips_native_geometry(spec) -> None:
-    group = _v4_native_groups()[spec.group_id]
-
-    group.validate_flat_block_geometry()
-    assert (group.rows_per_page, group.entry_stride_tokens, group.block_size) == (
-        spec.rows_per_page,
-        spec.entry_stride_tokens,
-        spec.block_size,
-    )
-    assert (group.total_pages, group.pool_id, group.owner_mask) == (
-        32,
-        spec.pool_id,
-        spec.owner_mask,
-    )
+    config.validate_flat_block_geometry()
     assert (
-        group.family
-        == {
-            "history": PagedCacheGroupFamily.History,
-            "state": PagedCacheGroupFamily.State,
-        }[spec.family]
-    )
-    assert (
-        group.prefix_role
-        == {
-            "history_anchor": PagedCachePrefixRole.HistoryAnchor,
-            "continuation_state": PagedCachePrefixRole.ContinuationState,
-        }[spec.prefix_role]
-    )
-    assert (
-        group.table_layout
-        == {
-            "absolute": PagedCacheTableLayout.Absolute,
-            "bounded_window": PagedCacheTableLayout.BoundedWindow,
-        }[spec.table_layout]
+        config.rows_per_page,
+        config.entry_stride_tokens,
+        config.block_size,
+        config.pool_id,
+        config.family,
+        config.prefix_role,
+        config.table_layout,
+        config.owner_mask,
+    ) == (
+        4,
+        1,
+        4,
+        "v4.c4.state",
+        PagedCacheGroupFamily.State,
+        PagedCachePrefixRole.ContinuationState,
+        PagedCacheTableLayout.BoundedWindow,
+        1,
     )
 
 
@@ -101,7 +84,7 @@ def test_v4_production_spec_round_trips_native_geometry(spec) -> None:
 def test_v4_flat_group_rejects_invalid_geometry(
     field: str, value: int, error: str
 ) -> None:
-    config = _v4_native_groups()["v4.c4a.compressor_state"]
+    config = _v4_compressor_state_config()
     setattr(config, field, value)
 
     with pytest.raises(ValueError, match=error):

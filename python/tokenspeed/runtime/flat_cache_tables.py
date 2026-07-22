@@ -276,7 +276,7 @@ def validate_speculative_flat_bindings(
     draft_binding: CacheTableBinding | None,
     speculative_algorithm: str | None,
 ) -> None:
-    """Validate the one cross-owner invariant not owned by either binding."""
+    """Validate speculative owners share one plan and the scheduler's groups."""
 
     if (
         speculative_algorithm is None
@@ -299,6 +299,25 @@ def validate_speculative_flat_bindings(
     if draft_plan is not target_plan:
         raise RuntimeError(
             "flat target and draft cache views must share one canonical plan object"
+        )
+    scheduler_specs = tuple(
+        getattr(target_pool, "scheduler_group_specs", None)
+        or getattr(target_pool, "paged_cache_group_specs", ())
+    )
+    scheduler_group_ids = set(_canonical_group_ids(scheduler_specs, owner="scheduler"))
+    missing_target_groups = set(target_binding.group_ids) - scheduler_group_ids
+    if missing_target_groups:
+        raise RuntimeError(
+            "flat target cache groups are absent from the scheduler union: "
+            f"missing={sorted(missing_target_groups)}, "
+            f"scheduler={sorted(scheduler_group_ids)}"
+        )
+    missing_draft_groups = set(draft_binding.group_ids) - scheduler_group_ids
+    if missing_draft_groups:
+        raise RuntimeError(
+            "flat draft cache groups are absent from the scheduler union: "
+            f"missing={sorted(missing_draft_groups)}, "
+            f"scheduler={sorted(scheduler_group_ids)}"
         )
 
 
@@ -361,22 +380,32 @@ def resolve_cache_table_binding(
 def legacy_flat_loc_group_id(
     group_specs: Sequence[Any], *, legacy_page_size: int
 ) -> str | None:
-    """Return the sole flat group compatible with the scalar radix location ABI."""
+    """Return the sole group safe to mirror into the legacy scalar scratch ABI."""
 
-    specs = tuple(group_specs)
-    if len(specs) != 1:
-        return None
-    spec = specs[0]
     if (
-        getattr(spec, "family", "history") != "history"
-        or getattr(spec, "retention", None) != "full_history"
-        or getattr(spec, "table_layout", "absolute") != "absolute"
-        or getattr(spec, "entry_stride_tokens", None) != 1
-        or getattr(spec, "block_size", None) != legacy_page_size
+        isinstance(legacy_page_size, bool)
+        or not isinstance(legacy_page_size, int)
+        or legacy_page_size <= 0
     ):
         return None
-    group_id = str(getattr(spec, "group_id", ""))
-    return group_id or None
+
+    candidates: list[str] = []
+    for spec in group_specs:
+        block_size = getattr(spec, "block_size", None)
+        if (
+            getattr(spec, "family", "history") != "history"
+            or getattr(spec, "retention", None) != "full_history"
+            or getattr(spec, "table_layout", "absolute") != "absolute"
+            or getattr(spec, "entry_stride_tokens", None) != 1
+            or isinstance(block_size, bool)
+            or not isinstance(block_size, int)
+            or block_size != legacy_page_size
+        ):
+            continue
+        group_id = str(getattr(spec, "group_id", ""))
+        if group_id:
+            candidates.append(group_id)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def resolve_cache_table_source(
