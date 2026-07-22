@@ -1,0 +1,106 @@
+test/runtime/test_deepseek_v4_flat_synthetic.py
+  s_6b0032aaf4986a::t_e3ab3267524132 126
+python/tokenspeed/runtime/layers/attention/backends/flat_groups.py
+  s_471ef2cdaab9f2::t_4c0d8c8af422fd 219-222
+test/runtime/test_deepseek_v4_cache_tables.py
+  s_549b05a877ad06::t_cbed5373cf596f 29-47,65-102,271,275,302
+  s_549b05a877ad06::t_fcf6a99391fab2 268-270
+  s_549b05a877ad06::t_c3019893a1baa3 272-274
+  s_549b05a877ad06::t_2d62f5fb7aebde 276-278,299-301
+  s_549b05a877ad06::t_e70201335d3137 303-305
+  s_96c5cd9c184397::t_5175f4838e32c8 267,279-298,306-310
+test/runtime/test_flat_group_write_locs.py
+  s_471ef2cdaab9f2::t_05617a6a351298 92-135,676-679
+test/runtime/test_group_specs_from_layer_types.py
+  s_96c5cd9c184397::t_366741271e736c 364,366,369,372-401,406-408,428-430,440-503
+python/tokenspeed/runtime/engine/event_loop.py
+  s_6b0032aaf4986a::t_974c43d7a7b029 405,415
+python/tokenspeed/runtime/engine/scheduler_utils.py
+  s_549b05a877ad06::t_af45f5310082d9 27,87-103,130,159-163,197-199
+tokenspeed-scheduler/python/tests/test_paged_cache_group.py
+  s_6bd9f09350a224::t_ab9198432af98e 34-47,51-52,54,56-72,87
+test/runtime/test_deepseek_v4_config.py
+  s_6b0032aaf4986a::t_1330ba010f6d45 1879
+python/tokenspeed/runtime/execution/model_executor.py
+  s_549b05a877ad06::t_394845b80ca182 359-362,402-404,851,853-856
+python/tokenspeed/runtime/flat_cache_tables.py
+  s_157757d84c59a7::t_99f113e590a8c1 279
+  s_96c5cd9c184397::t_782909eb66d53c 383,386-388,391-408
+  s_96c5cd9c184397::t_841dc40c0aa2fe 303-321
+python/tokenspeed/runtime/layers/attention/backends/inkling.py
+  s_96c5cd9c184397::t_97a02e7d7964ef 170-173,178-182
+test/runtime/test_deepseek_v4_mtp_prefix_cache.py
+  s_2a9af3cecf7755::t_672790ce0d4215 220
+test/runtime/test_flat_block_tables_bridge.py
+  s_2a9af3cecf7755::t_4c1fecfa73bf52 114
+test/runtime/test_inkling_conv_lookback.py
+  s_96c5cd9c184397::t_7400ec371b2d55 15,24-47
+tokenspeed-scheduler/tests/cpp/test_kv_cache_coordinator.cpp
+  s_2a9af3cecf7755::t_48b7777488ddba 104-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "442495c4352a658d74836dde332e8bd1b41cca87",
+  "prompts": {},
+  "sessions": {
+    "s_157757d84c59a7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f7a9d-c3fc-7721-ba2b-8da07afc287f",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_2a9af3cecf7755": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8871-fb96-7c70-b407-4cea25a816d6",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_471ef2cdaab9f2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87e1-3373-7ad0-ab82-4466908d3fbf",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_549b05a877ad06": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87d4-69b9-7020-afb1-02a06b66cdb5",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_6b0032aaf4986a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87d4-3b4d-7d42-96fc-fcf281a2456c",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_6bd9f09350a224": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87d2-f469-7cd3-a56c-a75c98f9228c",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_96c5cd9c184397": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a17-df52-79a1-8ede-d14fae85d796",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
