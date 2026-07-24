@@ -51,7 +51,11 @@ from tokenspeed.runtime.execution.drafter.eagle import (
 )
 from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
 from tokenspeed.runtime.execution.model_runner import ModelRunner
-from tokenspeed.runtime.flat_cache_tables import FlatCacheTableOwnerView
+from tokenspeed.runtime.flat_cache_tables import (
+    CacheTableSource,
+    FlatCacheTableOwnerView,
+    FlatPackedTableOwnerSource,
+)
 from tokenspeed.runtime.layers.attention.backends import (
     deepseek_v4 as deepseek_v4_backend,
 )
@@ -157,6 +161,13 @@ def _bind_wrapper_cache_contracts(
     wrapper._draft_accepts_bound_source = bool(
         draft_backend is not None
         and getattr(draft_backend, "accepts_bound_cache_table_source", False)
+    )
+    wrapper._flat_graph_consumers_self_pad = bool(
+        getattr(target_backend, "flat_tables_self_padding", False)
+        and (
+            not wrapper._draft_uses_flat_source
+            or getattr(draft_backend, "flat_tables_self_padding", False)
+        )
     )
     wrapper._draft_metadata_sequence = getattr(
         draft_backend,
@@ -1893,6 +1904,145 @@ class TestDeepseekV4Config(unittest.TestCase):
         self.assertTrue(torch.equal(table[:, :2], compact))
         self.assertTrue(torch.equal(table[:, 2:], torch.full_like(table[:, 2:], -1)))
 
+    def test_deepseek_v4_flat_graph_tables_use_exact_packed_widths(self):
+        backend = DeepseekV4AttentionBackend(
+            SimpleNamespace(
+                page_size=64,
+                device="cpu",
+                num_attention_heads=64,
+                num_kv_heads=1,
+                attn_tp_size=1,
+                dtype=torch.bfloat16,
+                is_draft=False,
+                speculative_num_draft_tokens=1,
+                head_dim=512,
+                context_len=4096,
+            )
+        )
+        specs = tuple(
+            SimpleNamespace(
+                group_id=group_id,
+                retention="full_history",
+                rows_per_page=64,
+                entry_stride_tokens=1,
+                block_size=64,
+                sliding_window_tokens=None,
+            )
+            for group_id in ("narrow", "wide")
+        )
+        backend.init_cuda_graph_state(
+            2,
+            paged_cache_group_specs=specs,
+            flat_capture_cols_by_group={"narrow": 2, "wide": 5},
+            flat_graph_batch_rows=2,
+            max_tokens_per_req=1,
+        )
+
+        storage = backend._cuda_graph_flat_packed_storage
+        self.assertIsNotNone(storage)
+        self.assertEqual(storage.numel(), 2 * ((2 + 1) + (5 + 1)))
+        self.assertEqual(
+            tuple(backend._cuda_graph_paged_cache_block_tables["narrow"].shape),
+            (2, 2),
+        )
+        self.assertEqual(
+            tuple(backend._cuda_graph_paged_cache_block_tables["wide"].shape),
+            (2, 5),
+        )
+        storage_ptr = storage.untyped_storage().data_ptr()
+        for tensor in (
+            *backend._cuda_graph_paged_cache_block_tables.values(),
+            *backend._cuda_graph_paged_cache_base_offsets.values(),
+        ):
+            self.assertEqual(tensor.untyped_storage().data_ptr(), storage_ptr)
+
+    def test_deepseek_v4_packed_replay_rechecks_reused_slot_width(self):
+        backend = DeepseekV4AttentionBackend(
+            SimpleNamespace(
+                page_size=64,
+                device="cpu",
+                num_attention_heads=64,
+                num_kv_heads=1,
+                attn_tp_size=1,
+                dtype=torch.bfloat16,
+                is_draft=False,
+                speculative_num_draft_tokens=1,
+                head_dim=512,
+                context_len=4096,
+            )
+        )
+        backend.init_cuda_graph_state(
+            2,
+            paged_cache_group_specs=(
+                SimpleNamespace(
+                    group_id="history",
+                    retention="full_history",
+                    rows_per_page=64,
+                    entry_stride_tokens=1,
+                    block_size=64,
+                    sliding_window_tokens=None,
+                ),
+            ),
+            flat_capture_cols_by_group={"history": 2},
+            flat_graph_batch_rows=2,
+            max_tokens_per_req=1,
+        )
+
+        buffer = torch.zeros(10, dtype=torch.int32)
+        unpack_meta = buffer[:6].view(1, 6)
+        table = buffer[6:7].view(1, 1)
+        base = buffer[7:8]
+        source = CacheTableSource(
+            kind="flat",
+            tables={"history": table},
+            base_offsets={"history": base},
+            planned=True,
+            packed=FlatPackedTableOwnerSource(
+                buffer=buffer,
+                unpack_meta=unpack_meta,
+                group_ids=("history",),
+            ),
+        )
+
+        def retarget(width):
+            base_offset = 6 + width
+            table.set_(
+                buffer.untyped_storage(),
+                6,
+                (1, width),
+                (width, 1),
+            )
+            base.set_(
+                buffer.untyped_storage(),
+                base_offset,
+                (1,),
+                (1,),
+            )
+            unpack_meta[0].copy_(
+                torch.tensor(
+                    [6, width, 0, 2, base_offset, 4],
+                    dtype=torch.int32,
+                )
+            )
+
+        with patch.object(deepseek_v4_backend, "flat_tables_unpack") as unpack:
+            for width in (1, 2):
+                retarget(width)
+                backend._refresh_cuda_graph_flat_packed(
+                    source,
+                    bs=2,
+                    actual_bs=1,
+                )
+            retarget(3)
+            with self.assertRaisesRegex(RuntimeError, "width exceeds capture"):
+                backend._refresh_cuda_graph_flat_packed(
+                    source,
+                    bs=2,
+                    actual_bs=1,
+                )
+
+        self.assertEqual(unpack.call_count, 2)
+
     def test_deepseek_v4_metadata_splits_named_cache_groups(self):
         backend = DeepseekV4AttentionBackend(
             SimpleNamespace(
@@ -3530,7 +3680,7 @@ class TestDeepseekV4Config(unittest.TestCase):
 
         self.assertIs(_deepseek_v4_forward_metadata(ctx), decode_metadata)
 
-    def test_deepseek_v4_eager_draft_decode_refreshes_stale_graph_metadata(self):
+    def test_deepseek_v4_eager_draft_decode_does_not_reuse_graph_metadata(self):
         backend = DeepseekV4AttentionBackend(
             SimpleNamespace(
                 page_size=64,
@@ -3553,22 +3703,23 @@ class TestDeepseekV4Config(unittest.TestCase):
             seq_lens=torch.ones(4, dtype=torch.int32),
             forward_mode=ForwardMode.DECODE,
         )
-        self.assertEqual(backend._draft_decode_metadata.token_to_req_indices.numel(), 4)
+        graph_metadata = backend._cuda_graph_draft_decode_metadata[4]
+        graph_seq_lens = graph_metadata.seq_lens.clone()
 
-        req_pool_indices = torch.tensor([0], dtype=torch.int32)
-        seq_lens = torch.tensor([6], dtype=torch.int32)
-        req_to_page = torch.tensor([[10]], dtype=torch.int32)
+        req_pool_indices = torch.arange(4, dtype=torch.int32)
+        seq_lens = torch.full((4,), 6, dtype=torch.int32)
+        req_to_page = torch.tensor([[10], [20], [30], [40]], dtype=torch.int32)
         backend.init_forward_metadata(
-            bs=1,
-            num_tokens=6,
+            bs=4,
+            num_tokens=24,
             req_pool_indices=req_pool_indices,
             seq_lens=seq_lens,
             forward_mode=ForwardMode.EXTEND,
             req_to_page=req_to_page,
         )
         backend.init_forward_metadata(
-            bs=1,
-            num_tokens=1,
+            bs=4,
+            num_tokens=4,
             req_pool_indices=req_pool_indices,
             seq_lens=seq_lens,
             forward_mode=ForwardMode.DECODE,
@@ -3577,13 +3728,16 @@ class TestDeepseekV4Config(unittest.TestCase):
         backend.advance_draft_forward_metadata()
 
         metadata = backend.forward_metadata
+        self.assertIsNot(metadata, graph_metadata)
+        self.assertIs(metadata, backend._eager_draft_decode_metadata)
+        self.assertTrue(torch.equal(graph_metadata.seq_lens, graph_seq_lens))
         self.assertEqual(metadata.forward_mode, ForwardMode.DECODE)
-        self.assertEqual(metadata.token_to_req_indices.numel(), 1)
-        self.assertEqual(metadata.decode_token_count(), 1)
+        self.assertEqual(metadata.token_to_req_indices.numel(), 4)
+        self.assertEqual(metadata.decode_token_count(), 4)
         self.assertTrue(
             torch.equal(
                 metadata.token_to_req_indices,
-                torch.tensor([0], dtype=torch.int32),
+                torch.arange(4, dtype=torch.int32),
             )
         )
 

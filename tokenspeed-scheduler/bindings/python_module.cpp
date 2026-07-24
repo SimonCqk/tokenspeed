@@ -21,10 +21,8 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
-#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/map.h>
-#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
@@ -33,7 +31,6 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <tuple>
 #include <vector>
 
 #include "scheduler/outside_events/inc.h"
@@ -61,29 +58,58 @@ namespace nb = nanobind;
 namespace {
 
 using WritableHostInt32Vector = nb::ndarray<nb::pytorch, std::int32_t, nb::ndim<1>, nb::c_contig>;
+using HostInt64Vector = nb::ndarray<nb::pytorch, std::int64_t, nb::ndim<1>, nb::c_contig>;
+using WritableHostInt64Matrix = nb::ndarray<nb::pytorch, std::int64_t, nb::ndim<2>, nb::c_contig>;
 
 bool IsHostArray(const auto& array) {
     const int device_type = array.device_type();
     return device_type == nb::device::cpu::value || device_type == nb::device::cuda_host::value;
 }
 
-std::pair<std::size_t, std::size_t> CopyFlatBlockTableTo(const tokenspeed::FlatForwardOperation& op,
-                                                         const std::string& group_id,
-                                                         WritableHostInt32Vector table_destination,
-                                                         WritableHostInt32Vector base_destination,
-                                                         std::int64_t page_id_upper_bound) {
-    if (!IsHostArray(table_destination) || !IsHostArray(base_destination)) {
-        throw std::invalid_argument("flat block table staging destinations must be host tensors");
+std::size_t CopyFlatBlockTablesTo(const tokenspeed::FlatForwardOperation& op, WritableHostInt32Vector destination,
+                                  HostInt64Vector page_id_upper_bounds, WritableHostInt64Matrix copy_metadata,
+                                  std::size_t payload_offset) {
+    if (!IsHostArray(destination) || !IsHostArray(page_id_upper_bounds) || !IsHostArray(copy_metadata)) {
+        throw std::invalid_argument("flat block table packed staging inputs must be host tensors");
     }
-    const auto table_it = op.flat_block_tables.find(group_id);
-    if (table_it == op.flat_block_tables.end()) {
-        throw std::invalid_argument("flat block table staging group is missing from the atomic table/base export: " +
-                                    group_id);
+    if (page_id_upper_bounds.shape(0) != op.flat_block_tables.size()) {
+        throw std::invalid_argument("flat block table packed staging bounds must match the exported groups");
     }
-    const tokenspeed::FlatBlockTableExport::CopyResult copied = table_it->second.CopyTo(
-        std::span<std::int32_t>{table_destination.data(), table_destination.shape(0)},
-        std::span<std::int32_t>{base_destination.data(), base_destination.shape(0)}, page_id_upper_bound);
-    return {copied.rows, copied.cols};
+    if (copy_metadata.shape(0) != op.flat_block_tables.size() || copy_metadata.shape(1) != 4) {
+        throw std::invalid_argument("flat block table packed staging metadata must have shape [groups, 4]");
+    }
+
+    const std::size_t capacity = destination.shape(0);
+    if (payload_offset > capacity) {
+        throw std::invalid_argument("flat block table packed staging payload offset exceeds the destination");
+    }
+    std::size_t cursor = payload_offset;
+    std::size_t group_index = 0;
+    for (const auto& [group_id, table] : op.flat_block_tables) {
+        const std::size_t table_offset = cursor;
+        if (table.values.size() > capacity - cursor) {
+            throw std::invalid_argument("flat block table packed staging table capacity exceeded for group: " +
+                                        group_id);
+        }
+        cursor += table.values.size();
+        const std::size_t base_offset = cursor;
+        if (table.rows > capacity - cursor) {
+            throw std::invalid_argument("flat block table packed staging base capacity exceeded for group: " +
+                                        group_id);
+        }
+        cursor += table.rows;
+        const tokenspeed::FlatBlockTableExport::CopyResult copied =
+            table.CopyTo(std::span<std::int32_t>{destination.data() + table_offset, table.values.size()},
+                         std::span<std::int32_t>{destination.data() + base_offset, table.rows},
+                         page_id_upper_bounds.data()[group_index]);
+        std::int64_t* metadata = copy_metadata.data() + group_index * 4;
+        metadata[0] = static_cast<std::int64_t>(copied.rows);
+        metadata[1] = static_cast<std::int64_t>(copied.cols);
+        metadata[2] = static_cast<std::int64_t>(table_offset);
+        metadata[3] = static_cast<std::int64_t>(base_offset);
+        ++group_index;
+    }
+    return cursor;
 }
 
 template <typename Op, typename Cls>
@@ -478,9 +504,9 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
                  }
                  return out;
              })
-        .def("copy_flat_block_table_to", &CopyFlatBlockTableTo, nb::arg("group_id"),
-             nb::arg("table_destination").noconvert(), nb::arg("base_destination").noconvert(),
-             nb::arg("page_id_upper_bound"))
+        .def("copy_flat_block_tables_to", &CopyFlatBlockTablesTo, nb::arg("destination").noconvert(),
+             nb::arg("page_id_upper_bounds").noconvert(), nb::arg("copy_metadata").noconvert(),
+             nb::arg("payload_offset"))
         .def_ro("flat_kv_completion_inputs", &tokenspeed::FlatForwardOperation::flat_kv_completion_inputs)
         .def("num_extends", &tokenspeed::FlatForwardOperation::num_extends)
         .def_ro("mamba_pool_indices", &tokenspeed::FlatForwardOperation::mamba_working_indices)

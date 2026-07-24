@@ -44,9 +44,8 @@
 #include "utils.h"
 
 #if TOKENSPEED_FLAT_KVCACHE
-#include "cache/flat_reservation_ledger.h"
+#include "cache/flat_reservation_tracker.h"
 #include "cache/kv_cache_coordinator.h"
-#include "cache/scheduler_thread_mutation_domain.h"
 #endif
 
 namespace tokenspeed {
@@ -72,41 +71,30 @@ void InsertHybridCache(HybridPrefixCache* hybrid_prefix_cache,
 // device-only flat admission has already committed. It contains no raw prefix
 // observers and exposes only ownership moves. If an event is abandoned or an
 // invalid transition throws, destruction returns both the request slot and all
-// BlockRefs, and removes the pre-registered decode reservation.
+// BlockRefs, and clears the request-owned decode reservation.
 class FlatCommittedAdmission {
 public:
     FlatCommittedAdmission(std::unique_ptr<ReqPoolIndex> req_pool_index, std::vector<BlockTable> tables,
-                           std::int32_t hit_tokens, const SchedulerThreadMutationDomain& mutation_domain,
-                           FlatReservationLedger* reservation_ledger = nullptr,
-                           std::string reservation_id = {}) noexcept
-        : mutation_domain_{CheckedMutationDomain(mutation_domain)},
-          req_pool_index_{std::move(req_pool_index)},
+                           std::int32_t hit_tokens,
+                           FlatReservationTracker::Account* reservation_account = nullptr) noexcept
+        : req_pool_index_{std::move(req_pool_index)},
           tables_{std::move(tables)},
           hit_tokens_{hit_tokens},
-          reservation_ledger_{reservation_ledger},
-          reservation_id_{std::move(reservation_id)} {}
+          reservation_account_{reservation_account} {}
 
     FlatCommittedAdmission(FlatCommittedAdmission&& other) noexcept
-        : mutation_domain_{CheckedMutationDomain(other)},
-          req_pool_index_{std::move(other.req_pool_index_)},
+        : req_pool_index_{std::move(other.req_pool_index_)},
           tables_{std::move(other.tables_)},
           hit_tokens_{other.hit_tokens_},
-          reservation_ledger_{std::exchange(other.reservation_ledger_, nullptr)},
-          reservation_id_{std::move(other.reservation_id_)} {}
+          reservation_account_{std::exchange(other.reservation_account_, nullptr)} {}
 
     FlatCommittedAdmission& operator=(FlatCommittedAdmission&& other) noexcept {
         if (this != &other) {
-            mutation_domain_->AssertOwnerThreadNoexcept();
-            other.mutation_domain_->AssertOwnerThreadNoexcept();
-            if (mutation_domain_ != other.mutation_domain_) {
-                std::terminate();
-            }
-            rollbackReservationInDomain();
+            rollbackReservation();
             req_pool_index_ = std::move(other.req_pool_index_);
             tables_ = std::move(other.tables_);
             hit_tokens_ = other.hit_tokens_;
-            reservation_ledger_ = std::exchange(other.reservation_ledger_, nullptr);
-            reservation_id_ = std::move(other.reservation_id_);
+            reservation_account_ = std::exchange(other.reservation_account_, nullptr);
         }
         return *this;
     }
@@ -114,52 +102,25 @@ public:
     FlatCommittedAdmission(const FlatCommittedAdmission&) = delete;
     FlatCommittedAdmission& operator=(const FlatCommittedAdmission&) = delete;
 
-    ~FlatCommittedAdmission() noexcept {
-        mutation_domain_->AssertOwnerThreadNoexcept();
-        rollbackReservationInDomain();
-    }
+    ~FlatCommittedAdmission() noexcept { rollbackReservation(); }
 
     std::int32_t HitTokens() const noexcept { return hit_tokens_; }
-    std::unique_ptr<ReqPoolIndex> TakeReqPoolIndex() noexcept {
-        mutation_domain_->AssertOwnerThreadNoexcept();
-        return std::move(req_pool_index_);
-    }
-    std::vector<BlockTable> TakeTables() noexcept {
-        mutation_domain_->AssertOwnerThreadNoexcept();
-        return std::move(tables_);
-    }
-    void MarkConsumed() noexcept {
-        mutation_domain_->AssertOwnerThreadNoexcept();
-        reservation_ledger_ = nullptr;
-    }
+    std::unique_ptr<ReqPoolIndex> TakeReqPoolIndex() noexcept { return std::move(req_pool_index_); }
+    std::vector<BlockTable> TakeTables() noexcept { return std::move(tables_); }
+    void MarkConsumed() noexcept { reservation_account_ = nullptr; }
 
 private:
-    static const SchedulerThreadMutationDomain* CheckedMutationDomain(
-        const SchedulerThreadMutationDomain& mutation_domain) noexcept {
-        mutation_domain.AssertOwnerThreadNoexcept();
-        return &mutation_domain;
-    }
-
-    static const SchedulerThreadMutationDomain* CheckedMutationDomain(FlatCommittedAdmission& admission) noexcept {
-        admission.mutation_domain_->AssertOwnerThreadNoexcept();
-        return admission.mutation_domain_;
-    }
-
-    void rollbackReservationInDomain() noexcept {
-        if (reservation_ledger_ != nullptr) {
-            reservation_ledger_->ClearPrepared(reservation_id_);
-            reservation_ledger_ = nullptr;
+    void rollbackReservation() noexcept {
+        if (reservation_account_ != nullptr) {
+            reservation_account_->Clear();
+            reservation_account_ = nullptr;
         }
     }
 
-    // Checked first in constructors/destruction, before any RAII-owned table or
-    // request-slot member can mutate its scheduler-owned backing storage.
-    const SchedulerThreadMutationDomain* mutation_domain_{};
     std::unique_ptr<ReqPoolIndex> req_pool_index_{};
     std::vector<BlockTable> tables_{};
     std::int32_t hit_tokens_{0};
-    FlatReservationLedger* reservation_ledger_{};
-    std::string reservation_id_{};
+    FlatReservationTracker::Account* reservation_account_{};
 };
 
 // Explicit-pool Flat first admission. Its type cannot carry a radix
@@ -353,10 +314,10 @@ private:
 #endif
 
 #if TOKENSPEED_FLAT_KVCACHE
-struct FlatFinishEvent : InvalidTransitionHandler<FlatFinishEvent> {
-    using InvalidTransitionHandler<FlatFinishEvent>::operator();
+struct FinishEvent : InvalidTransitionHandler<FinishEvent> {
+    using InvalidTransitionHandler<FinishEvent>::operator();
 
-    explicit FlatFinishEvent(KvCacheCoordinator* coordinator) : coordinator_(coordinator) {}
+    explicit FinishEvent(KvCacheCoordinator* coordinator) : coordinator_(coordinator) {}
 
     Finished operator()(Decoding&& state);
     Finished operator()(PrefillDone&& state);

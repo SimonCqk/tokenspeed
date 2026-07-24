@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 CacheTableSourceKind = Literal["none", "radix", "flat"]
+FLAT_PACKED_META_MAX_OFFSET = (1 << 31) - 1
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,107 @@ class CacheTableSource:
     # Immutable wrappers keep pre-wake sources stale even when a ring slot is
     # later reused; tables/base mappings remain persistent and allocation-free.
     generation: int | None = None
+    # Planned sources carry one packed device upload plus owner-local unpack
+    # metadata. Unplanned/radix sources leave this unset.
+    packed: "FlatPackedTableUnion | FlatPackedTableOwnerSource | None" = None
+
+
+@dataclass(frozen=True)
+class FlatPackedTableOwnerSource:
+    """One owner's view of a planned packed table/base upload."""
+
+    buffer: Any
+    unpack_meta: Any
+    group_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FlatPackedTableUnion:
+    """Scheduler-union packed upload with owner-local unpack metadata."""
+
+    buffer: Any
+    unpack_meta_by_owner: Mapping[str, Any]
+    group_ids_by_owner: Mapping[str, tuple[str, ...]]
+
+    def bind(
+        self, owner: str, expected_group_ids: Sequence[str]
+    ) -> FlatPackedTableOwnerSource:
+        try:
+            unpack_meta = self.unpack_meta_by_owner[owner]
+            group_ids = self.group_ids_by_owner[owner]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"{owner} flat cache input has no packed owner layout"
+            ) from exc
+        expected_group_ids = tuple(expected_group_ids)
+        expected = frozenset(expected_group_ids)
+        if len(expected) != len(expected_group_ids):
+            raise RuntimeError(
+                f"{owner} flat cache binding has duplicate expected groups"
+            )
+        actual = frozenset(group_ids)
+        if len(actual) != len(group_ids) or actual != expected:
+            raise RuntimeError(
+                f"{owner} flat packed groups disagree with owner binding: "
+                f"packed={sorted(actual)}, expected={sorted(expected)}"
+            )
+        return FlatPackedTableOwnerSource(
+            buffer=self.buffer,
+            unpack_meta=unpack_meta,
+            group_ids=group_ids,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FlatPackedTableDestination:
+    """Stable offsets for one group in an exact-width packed graph buffer."""
+
+    group_id: str
+    table_offset: int
+    table_cols: int
+    base_offset: int
+
+
+def make_flat_packed_table_destinations(
+    capture_cols_by_group: Mapping[str, int],
+    *,
+    batch_rows: int,
+) -> tuple[tuple[FlatPackedTableDestination, ...], int]:
+    """Return deterministic exact-width table/base spans and total int32s."""
+
+    if (
+        isinstance(batch_rows, bool)
+        or not isinstance(batch_rows, int)
+        or batch_rows < 0
+    ):
+        raise ValueError("flat packed batch_rows must be an integer >= 0")
+    offset = 0
+    destinations = []
+    for group_id, raw_cols in sorted(capture_cols_by_group.items()):
+        if not group_id:
+            raise ValueError("flat packed destination group_id must be non-empty")
+        if isinstance(raw_cols, bool) or not isinstance(raw_cols, int) or raw_cols <= 0:
+            raise ValueError(
+                f"flat packed destination {group_id!r} columns must be positive"
+            )
+        table_offset = offset
+        offset += batch_rows * raw_cols
+        base_offset = offset
+        offset += batch_rows
+        if offset > FLAT_PACKED_META_MAX_OFFSET:
+            raise OverflowError(
+                "flat packed destination exceeds int32 metadata offsets: "
+                f"group={group_id!r}, elements={offset}"
+            )
+        destinations.append(
+            FlatPackedTableDestination(
+                group_id=str(group_id),
+                table_offset=table_offset,
+                table_cols=raw_cols,
+                base_offset=base_offset,
+            )
+        )
+    return tuple(destinations), offset
 
 
 @dataclass(frozen=True)
@@ -133,6 +235,11 @@ class FlatCacheTableOwnerView:
             base_offsets=_CacheTableProjection(source.base_offsets, self.group_ids),
             planned=source.planned,
             generation=source.generation,
+            packed=(
+                source.packed.bind(owner, self.group_ids)
+                if isinstance(source.packed, FlatPackedTableUnion)
+                else source.packed
+            ),
         )
         if source.planned:
             # The mapping object identifies one stable ring slot. Replacing the
@@ -150,7 +257,7 @@ def require_flat_cache_generation(value: Any, *, where: str) -> int:
 
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise RuntimeError(
-            f"{where}: flat cache generation must be an integer >= 0, " f"got {value!r}"
+            f"{where}: flat cache generation must be an integer >= 0, got {value!r}"
         )
     return value
 
@@ -452,7 +559,7 @@ def resolve_cache_table_source(
             or flat_generation < 0
         ):
             raise ValueError(
-                "flat_generation must be an integer >= 0, " f"got {flat_generation!r}"
+                f"flat_generation must be an integer >= 0, got {flat_generation!r}"
             )
         return CacheTableSource(
             kind="flat",
@@ -482,8 +589,13 @@ __all__ = [
     "CacheTableBinding",
     "CacheTableSource",
     "CacheTableSourceKind",
+    "FLAT_PACKED_META_MAX_OFFSET",
     "FlatCacheTableOwnerView",
+    "FlatPackedTableDestination",
+    "FlatPackedTableOwnerSource",
+    "FlatPackedTableUnion",
     "legacy_flat_loc_group_id",
+    "make_flat_packed_table_destinations",
     "require_flat_cache_generation",
     "resolve_cache_table_binding",
     "resolve_cache_table_source",

@@ -21,7 +21,6 @@
 #pragma once
 
 #include <cstdint>
-#include <map>
 #include <span>
 #include <string>
 #include <utility>
@@ -68,19 +67,12 @@ bool FinalizePrefillAndReserveDecode(KvCacheCoordinator& coordinator, std::vecto
 // synthesizes the legacy "default" pool from device_allocator.total_pages.
 std::vector<FlatBlockPoolConfig> MakeFlatBlockPoolConfigs(const SchedulerConfig& config);
 
-// One KvCacheSpec per config paged_cache_group (group_id = index). The legacy
-// overload binds every group to pool 0; the pool-set overload resolves each
-// group.pool_id once during construction into the canonical PoolIndex.
+// One config DTO per paged_cache_group. The coordinator normalizes these into
+// its immutable runtime schema; the pool-set overload resolves group.pool_id
+// once during construction into the canonical PoolIndex.
 std::vector<KvCacheSpec> MakeSpecsFromConfig(const SchedulerConfig& config);
 std::vector<KvCacheSpec> MakeSpecsFromConfig(const SchedulerConfig& config, const BlockPoolSet& pools);
 
 void FreeRequest(KvCacheCoordinator& coordinator, std::vector<BlockTable>& tables) noexcept;
-
-// One row per config group_id (page encoding: BlockTablePageIds).
-std::map<std::string, std::vector<std::int32_t>> BuildFlatBlockTables(const std::vector<BlockTable>& tables,
-                                                                      std::span<const std::string> group_ids);
-// Explicit companion for every group, including zero-based full-history rows.
-std::map<std::string, std::int32_t> BuildFlatBlockTableBaseOffsets(const std::vector<BlockTable>& tables,
-                                                                   std::span<const std::string> group_ids);
 
 }  // namespace tokenspeed

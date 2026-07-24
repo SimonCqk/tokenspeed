@@ -23,9 +23,11 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cache/block_pool_set.h"
+#include "cache/flat_reservation_tracker.h"
 
 namespace tokenspeed::test {
 namespace {
@@ -63,6 +65,48 @@ TEST(PoolDemandTest, InvalidArithmeticDoesNotPartiallyMutate) {
     }
 }
 
+TEST(FlatReservationTrackerTest, AccountsOwnDemandAndKeepOneAggregate) {
+    FlatReservationTracker tracker(/*pool_count=*/2);
+    {
+        auto first = tracker.MakeAccount();
+        auto second = tracker.MakeAccount();
+
+        first.Set(PoolDemand{1, 2});
+        second.Set(PoolDemand{3, 1});
+        EXPECT_EQ(tracker.Total(), (PoolDemand{4, 3}));
+        EXPECT_EQ(first.Demand(), (PoolDemand{1, 2}));
+        EXPECT_EQ(second.Demand(), (PoolDemand{3, 1}));
+
+        first.Set(PoolDemand{2, 0});
+        EXPECT_EQ(tracker.Total(), (PoolDemand{5, 1}));
+
+        second.Clear();
+        second.Clear();
+        EXPECT_EQ(tracker.Total(), (PoolDemand{2, 0}));
+    }
+    EXPECT_TRUE(tracker.Empty());
+}
+
+TEST(FlatReservationTrackerTest, MovePreservesDemandAndDestructionClearsIt) {
+    FlatReservationTracker tracker(/*pool_count=*/2);
+    {
+        auto original = tracker.MakeAccount();
+        original.Set(PoolDemand{2, 3});
+        auto moved = std::move(original);
+
+        EXPECT_EQ(moved.Demand(), (PoolDemand{2, 3}));
+        EXPECT_EQ(tracker.Total(), (PoolDemand{2, 3}));
+    }
+    EXPECT_TRUE(tracker.Empty());
+}
+
+TEST(FlatReservationTrackerTest, RejectsShapeMismatchWithoutPartialMutation) {
+    FlatReservationTracker tracker(/*pool_count=*/2);
+    auto account = tracker.MakeAccount();
+    EXPECT_DEATH(account.Set(PoolDemand{1}), "");
+    EXPECT_TRUE(tracker.Empty());
+}
+
 TEST(BlockPoolSetTest, CanonicalizesIdsAndKeepsPoolAddressesStable) {
     BlockPoolSet pools({
         FlatBlockPoolConfig{.pool_id = "v4.swa", .total_blocks = 8, .bytes_per_block = 64},
@@ -79,13 +123,13 @@ TEST(BlockPoolSetTest, CanonicalizesIdsAndKeepsPoolAddressesStable) {
     EXPECT_EQ(&pools.Pool(0), first);
     EXPECT_EQ(&pools.Pool(1), second);
 
-    auto first_page = first->AllocateBlocks(1);
-    auto second_page = second->AllocateBlocks(1);
-    ASSERT_EQ(first_page.size(), 1u);
-    ASSERT_EQ(second_page.size(), 1u);
-    EXPECT_EQ(first_page.front()->BlockId(), 1);
-    EXPECT_EQ(second_page.front()->BlockId(), 1);
-    EXPECT_NE(first_page.front(), second_page.front());
+    BlockRef first_page = first->AcquireBlock();
+    BlockRef second_page = second->AcquireBlock();
+    ASSERT_TRUE(first_page);
+    ASSERT_TRUE(second_page);
+    EXPECT_EQ(first_page->BlockId(), 1);
+    EXPECT_EQ(second_page->BlockId(), 1);
+    EXPECT_NE(first_page, second_page);
 }
 
 TEST(BlockPoolSetTest, SnapshotReportsIndependentPerPoolCapacityAndUsage) {
@@ -103,8 +147,8 @@ TEST(BlockPoolSetTest, SnapshotReportsIndependentPerPoolCapacityAndUsage) {
     EXPECT_EQ(initial[1].usable_blocks, 1);
     EXPECT_EQ(initial[1].free_blocks, 1);
 
-    auto state = pools.Pool(pools.IndexOf("state")).AllocateBlocks(1);
-    ASSERT_EQ(state.size(), 1u);
+    BlockRef state = pools.Pool(pools.IndexOf("state")).AcquireBlock();
+    ASSERT_TRUE(state);
     const std::vector<BlockPoolSnapshot> allocated = pools.Snapshot();
     ASSERT_EQ(allocated.size(), initial.size());
     EXPECT_EQ(allocated[0].free_blocks, initial[0].free_blocks);
@@ -148,26 +192,26 @@ TEST(BlockPoolSetTest, QuiescentResetAtomicallyInvalidatesCachedContentAndAdvanc
     });
     BlockPool& history = pools.Pool(pools.IndexOf("history"));
     BlockPool& state = pools.Pool(pools.IndexOf("state"));
-    CacheBlock* history_block = history.AllocateBlock();
-    CacheBlock* state_block = state.AllocateBlock();
-    ASSERT_NE(history_block, nullptr);
-    ASSERT_NE(state_block, nullptr);
+    BlockRef history_block = history.AcquireBlock();
+    BlockRef state_block = state.AcquireBlock();
+    ASSERT_TRUE(history_block);
+    ASSERT_TRUE(state_block);
     history.CacheFullBlock(history_block, "history-key");
     state.CacheFullBlock(state_block, "state-key");
 
     EXPECT_FALSE(pools.IsQuiescent());
     EXPECT_THROW(pools.ResetQuiescent(), std::logic_error);
     EXPECT_EQ(pools.Generation(), 0u);
-    EXPECT_NE(history.GetCachedBlock("history-key"), nullptr);
-    EXPECT_NE(state.GetCachedBlock("state-key"), nullptr);
+    EXPECT_TRUE(history.ContainsCachedBlock("history-key"));
+    EXPECT_TRUE(state.ContainsCachedBlock("state-key"));
 
-    history.FreeBlock(history_block);
-    state.FreeBlock(state_block);
+    history_block.reset();
+    state_block.reset();
     ASSERT_TRUE(pools.IsQuiescent());
     EXPECT_EQ(pools.ResetQuiescent(), 1u);
     EXPECT_EQ(pools.Generation(), 1u);
-    EXPECT_EQ(history.GetCachedBlock("history-key"), nullptr);
-    EXPECT_EQ(state.GetCachedBlock("state-key"), nullptr);
+    EXPECT_FALSE(history.ContainsCachedBlock("history-key"));
+    EXPECT_FALSE(state.ContainsCachedBlock("state-key"));
     EXPECT_EQ(history.NumFreeBlocks(), history.TotalBlocks() - 1);
     EXPECT_EQ(state.NumFreeBlocks(), state.TotalBlocks() - 1);
     EXPECT_EQ(pools.ResetQuiescent(), 2u);

@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -40,6 +41,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "cache/forward_cache_ops.h"
 #include "fsm/cache_states.h"
 #include "fsm/forward_events.h"
 #include "fsm/forward_states.h"
@@ -64,39 +66,35 @@ SchedulerConfig ValidateFlatConfigBeforeResources(SchedulerConfig config) {
             "per-pool total_blocks is the only device page authority");
     }
 #endif
-    if (!config.UsesStructuredFlatAdmission()) {
+    if (!config.UsesExplicitFlatPools()) {
         return config;
+    }
+    if (config.role != Role::kFused) {
+        throw std::invalid_argument(
+            "Scheduler: explicit flat KV does not support PD roles; group-aware PD transfer is required");
     }
     if (config.enable_mamba && config.mamba_pool_total_chunks > 0) {
         throw std::invalid_argument(
-            "Scheduler: structured explicit flat KV does not support the radix-owned Mamba adjunct; "
+            "Scheduler: explicit flat KV does not support the radix-owned Mamba adjunct; "
             "model Mamba state as a coordinator-native cache group");
     }
     if (!config.disable_l2_cache && config.host_allocator.total_pages > 1) {
-        throw std::invalid_argument(
-            "Scheduler: structured explicit flat KV is device-only; group-aware host offload is required");
+        throw std::invalid_argument("Scheduler: explicit flat KV is device-only; group-aware host offload is required");
     }
     if (config.enable_l3_storage) {
-        throw std::invalid_argument("Scheduler: structured explicit flat KV does not support radix-owned L3 storage");
+        throw std::invalid_argument("Scheduler: explicit flat KV does not support radix-owned L3 storage");
     }
     return config;
 }
 
 #if TOKENSPEED_FLAT_KVCACHE
-std::vector<FlatKVCompletionGroupSchema> MakeFlatCompletionGroupSchema(const SchedulerConfig& config) {
-    std::vector<FlatKVCompletionGroupSchema> schema;
-    schema.reserve(config.paged_cache_groups.size());
-    for (const PagedCacheGroupConfig& group : config.paged_cache_groups) {
-        schema.push_back(FlatKVCompletionGroupSchema{
-            .group_id = group.group_id,
-            // Generic flat configurations predate explicit producer domains;
-            // preserve their single-producer contract on the structured ABI.
-            .required_domain_mask = group.required_producer_domain_mask == 0 ? 1u : group.required_producer_domain_mask,
-            .entry_stride_tokens = group.entry_stride_tokens,
-        });
+std::size_t FlatCompletionDepth(const SchedulerConfig& config) {
+    if (config.overlap_schedule_depth < 0 || config.overlap_schedule_depth > 1) {
+        throw std::invalid_argument("Scheduler: overlap_schedule_depth must be 0 or 1");
     }
-    return schema;
+    return static_cast<std::size_t>(config.overlap_schedule_depth) + 1;
 }
+
 #endif
 
 }  // namespace
@@ -109,31 +107,20 @@ Scheduler::Scheduler(SchedulerConfig config)
       req_pool_allocator_{config_.max_batch_size}
 #if TOKENSPEED_FLAT_KVCACHE
       ,
-      flat_mutation_domain_{},
-      block_pools_{MakeFlatBlockPoolConfigs(config_), flat_mutation_domain_},
+      block_pools_{MakeFlatBlockPoolConfigs(config_)},
       block_pool_{block_pools_.Pool(0)},
-      flat_host_pool_{config_.FlatStreamingSinkEnabled() ? config_.host_allocator.total_pages : 1,
-                      flat_mutation_domain_},
+      flat_host_pool_{config_.FlatStreamingSinkEnabled() ? config_.host_allocator.total_pages : 1},
       coordinator_{MakeCoordinator(MakeSpecsFromConfig(config_, block_pools_), block_pools_,
                                    config_.FlatStreamingSinkEnabled() ? &flat_host_pool_ : nullptr)},
-      flat_group_ids_{[&] {
-          std::vector<std::string> ids;
-          ids.reserve(config_.paged_cache_groups.size());
-          for (const auto& g : config_.paged_cache_groups) {
-              ids.push_back(g.group_id);
-          }
-          return ids;
-      }()},
-      flat_completion_ledger_{static_cast<std::size_t>(std::max(config_.overlap_schedule_depth, 0)) + 2,
-                              MakeFlatCompletionGroupSchema(config_)},
+      flat_completion_ledger_{FlatCompletionDepth(config_), coordinator_.Schema()},
       flat_reserved_pages_{block_pools_.Size()}
 #endif
 {
 #if TOKENSPEED_FLAT_KVCACHE
-    coordinator_.SetCompletionFencedPublication(config_.enable_structured_flat_kv_completion);
+    coordinator_.SetCompletionFencedPublication(config_.UsesExplicitFlatPools());
 #endif
-    const bool structured_flat_admission = config_.UsesStructuredFlatAdmission();
-    if (!structured_flat_admission) {
+    const bool uses_explicit_flat_pools = config_.UsesExplicitFlatPools();
+    if (!uses_explicit_flat_pools) {
         kv_prefix_cache_.emplace(&device_allocator_, &host_allocator_, config_.enable_l3_storage,
                                  config_.disable_prefix_cache);
     }
@@ -170,14 +157,15 @@ Scheduler::Scheduler(SchedulerConfig config)
     // Construct HybridPrefixCache when any adjunct/paged-cache feature is configured.
     // Role::kD skips Mamba but still participates in paged-cache transport.
     const bool has_mamba_adjunct = has_mamba_pool && config_.role != Role::kD;
-    // In the structured explicit-pool mode, BlockPoolSet/KvCacheCoordinator is
+    // In explicit-pool mode, BlockPoolSet/KvCacheCoordinator is
     // the sole page owner. Paged group configs remain scheduling geometry only;
     // do not mirror their capacities into HybridPrefixCache allocators or its
     // radix snapshot adjunct. The legacy prefix_cache_adjunct may still arrive
-    // from V4 Python config, but prefix_role is the coordinator's sole policy
+    // from a model-specific Python config, but prefix_role is the
+    // coordinator's sole policy
     // authority. Radix-owned Mamba was rejected above.
-    const bool has_prefix_cache_adjunct = config_.prefix_cache_adjunct.has_value() && !structured_flat_admission;
-    const bool has_paged_cache_groups = !config_.paged_cache_groups.empty() && !structured_flat_admission;
+    const bool has_prefix_cache_adjunct = config_.prefix_cache_adjunct.has_value() && !uses_explicit_flat_pools;
+    const bool has_paged_cache_groups = !config_.paged_cache_groups.empty() && !uses_explicit_flat_pools;
     if (has_mamba_adjunct || has_prefix_cache_adjunct || has_paged_cache_groups) {
         MambaChunkAllocator* mamba_ptr = has_mamba_adjunct ? &*mamba_allocator_ : nullptr;
         MambaHostAllocator* mamba_host_ptr = has_mamba_l2_pool ? &*mamba_host_allocator_ : nullptr;
@@ -235,40 +223,24 @@ Scheduler::Scheduler(SchedulerConfig config)
     }
 }
 
-Scheduler::~Scheduler() noexcept {
-    // Run before member destruction: request tables, completion tickets and
-    // pools all release thread-confined ownership while unwinding.
-    assertSchedulerThreadNoexcept();
-}
-
 #if TOKENSPEED_FLAT_KVCACHE
 std::uint64_t Scheduler::FlatKVGeneration() const {
-    assertSchedulerThread();
     return block_pools_.Generation();
 }
 
 bool Scheduler::FlatKVQuiescent() const {
-    assertSchedulerThread();
-    return requests_.empty() && flat_completion_ledger_.TotalOutstandingCount() == 0 &&
-           pending_forward_results_.empty() && flat_pending_terminals_.empty() && flat_reserved_pages_.Empty() &&
-           flat_write_progress_.empty() && cache_op_tracker_.empty() && flat_store_ops_.Empty() &&
-           flat_load_ops_.empty() && block_pools_.IsQuiescent();
+    return requests_.empty() && pending_forward_results_.empty() && flat_reserved_pages_.Empty() &&
+           cache_op_tracker_.empty() && flat_store_ops_.Empty() && flat_load_ops_.empty() && block_pools_.IsQuiescent();
 }
 
 std::uint64_t Scheduler::ResetFlatKVCache() {
-    assertSchedulerThread();
-    if (!config_.UsesStructuredFlatAdmission()) {
-        throw std::logic_error("flat KV cache reset requires structured completion and explicit block pools");
+    if (!config_.UsesExplicitFlatPools()) {
+        throw std::logic_error("flat KV cache reset requires explicit block pools");
     }
     if (!FlatKVQuiescent()) {
         throw std::logic_error("cannot reset flat KV cache while scheduler state is not quiescent");
     }
     return block_pools_.ResetQuiescent();
-}
-
-void Scheduler::SetFlatKVCompletionPublisher(FlatKVCompletionObserver publisher) {
-    assertSchedulerThread();
-    flat_completion_publisher_ = std::move(publisher);
 }
 
 void Scheduler::consumeFlatCompletionDebt(const std::string& request_id, std::size_t count) {
@@ -284,25 +256,18 @@ void Scheduler::consumeFlatCompletionDebt(const std::string& request_id, std::si
     }
 }
 
-void Scheduler::invalidateFlatCompletionGeneration(const std::string& request_id) {
-    (void)flat_completion_ledger_.Invalidate(request_id);
-    pending_forward_results_.erase(request_id);
-    flat_write_progress_.erase(request_id);
-}
 #endif
 
 std::vector<KvCacheEvent> Scheduler::DrainKvEvents() {
-    assertSchedulerThread();
     std::vector<KvCacheEvent> events;
     events.swap(kv_events_);
     return events;
 }
 
 std::vector<std::string> Scheduler::CalcRollingHash(const std::vector<std::int32_t>& input_tokens, bool apply_match) {
-    assertSchedulerThread();
     const std::int32_t block_size =
 #if TOKENSPEED_FLAT_KVCACHE
-        config_.UsesStructuredFlatAdmission() ? coordinator_.BaseBlockSize() : config_.block_size;
+        coordinator_.BaseBlockSize();
 #else
         config_.block_size;
 #endif
@@ -329,7 +294,6 @@ std::vector<std::string> Scheduler::CalcRollingHash(const std::vector<std::int32
 }
 
 void Scheduler::SubmitRequests(const std::vector<RequestSpec>& request_specs) {
-    assertSchedulerThread();
 #if TOKENSPEED_FLAT_KVCACHE
     std::size_t max_request_id_size = flat_max_request_id_size_;
     for (const RequestSpec& spec : request_specs) {
@@ -351,33 +315,19 @@ void Scheduler::SubmitRequests(const std::vector<RequestSpec>& request_specs) {
     // coordinator folds base pages up to each group's block_size. Uniform block_size =>
     // base == block_size.
     const std::int32_t page_size = coordinator_.BaseBlockSize();
-    flat_reserved_pages_.ReservePrepared(request_specs.size());
 #else
     const std::int32_t page_size = config_.block_size;
 #endif
     for (const auto& spec : request_specs) {
         auto req = std::make_unique<Request>(spec, page_size, config_.role);
 #if TOKENSPEED_FLAT_KVCACHE
-        const bool prepared_inserted = flat_reserved_pages_.Prepare(spec.request_id);
-        try {
-            const bool request_inserted = requests_.emplace(spec.request_id, std::move(req)).second;
-            if (!request_inserted && prepared_inserted) {
-                (void)flat_reserved_pages_.Erase(spec.request_id);
-            }
-        } catch (...) {
-            if (prepared_inserted) {
-                (void)flat_reserved_pages_.Erase(spec.request_id);
-            }
-            throw;
-        }
-#else
-        requests_.emplace(spec.request_id, std::move(req));
+        req->AttachFlatReservation(flat_reserved_pages_);
 #endif
+        requests_.emplace(spec.request_id, std::move(req));
     }
 }
 
 std::size_t Scheduler::WaitingSize() const {
-    assertSchedulerThread();
     std::size_t count = 0;
     for (const auto& [id, req] : requests_) {
         if (req->Is<fsm::Submitted>()) {
@@ -388,7 +338,6 @@ std::size_t Scheduler::WaitingSize() const {
 }
 
 std::size_t Scheduler::DecodingSize() const {
-    assertSchedulerThread();
     std::size_t count = 0;
     for (const auto& [id, req] : requests_) {
         if (req->Is<fsm::Decoding>()) {
@@ -399,7 +348,6 @@ std::size_t Scheduler::DecodingSize() const {
 }
 
 std::size_t Scheduler::PrefillSize() const {
-    assertSchedulerThread();
     std::size_t count = 0;
     for (const auto& [id, req] : requests_) {
         if (req->Is<fsm::Prefilling>() || req->Is<fsm::PrefillDone>()) {
@@ -410,7 +358,6 @@ std::size_t Scheduler::PrefillSize() const {
 }
 
 std::size_t Scheduler::RetractedSize() const {
-    assertSchedulerThread();
     std::size_t count = 0;
     for (const auto& [id, req] : requests_) {
         if (req->Is<fsm::Retracting>() || req->Is<fsm::Retracted>()) {
@@ -421,7 +368,6 @@ std::size_t Scheduler::RetractedSize() const {
 }
 
 std::size_t Scheduler::AvailableKvPages() const {
-    assertSchedulerThread();
 #if TOKENSPEED_FLAT_KVCACHE
     // Legacy scalar metric: aggregate cardinality across independent local-ID
     // domains. Admission and pressure never consume this lossy aggregate.
@@ -436,7 +382,6 @@ std::size_t Scheduler::AvailableKvPages() const {
 }
 
 std::size_t Scheduler::ActiveKvPages() const {
-    assertSchedulerThread();
 #if TOKENSPEED_FLAT_KVCACHE
     // Flat page ids are local to each independent pool. Count distinct live
     // physical blocks per pool, then sum the cardinalities; a single set would
@@ -464,21 +409,44 @@ std::size_t Scheduler::ActiveKvPages() const {
 
 #if TOKENSPEED_FLAT_KVCACHE
 PoolDemand Scheduler::FlatReservedBlocksByPool() const {
-    assertSchedulerThread();
     return flat_reserved_pages_.Total();
 }
 
-std::vector<std::string> Scheduler::FlatPoolIds() const {
-    std::vector<std::string> ids;
-    ids.reserve(block_pools_.Size());
+FlatPoolAggregate Scheduler::FlatPoolAggregateStats() const {
+    const PoolDemand& reserved = flat_reserved_pages_.Total();
+    _assert(reserved.Size() == block_pools_.Size(), "flat pool aggregate/reservation shape mismatch");
+
+    FlatPoolAggregate aggregate;
     for (PoolIndex i = 0; i < block_pools_.Size(); ++i) {
-        ids.push_back(block_pools_.PoolId(i));
+        const FlatBlockPoolConfig& config = block_pools_.Config(i);
+        const std::int32_t usable = config.total_blocks - 1;
+        const std::int32_t free = block_pools_.Pool(i).NumFreeBlocks();
+        const std::int32_t active = usable - free;
+        const std::int64_t bytes_per_block = config.bytes_per_block;
+        if (bytes_per_block != 0 && usable > std::numeric_limits<std::int64_t>::max() / bytes_per_block) {
+            throw std::overflow_error("flat pool aggregate capacity bytes overflow");
+        }
+        const std::int64_t pool_capacity = static_cast<std::int64_t>(usable) * bytes_per_block;
+        const std::int64_t pool_active = static_cast<std::int64_t>(active) * bytes_per_block;
+        if (aggregate.capacity_bytes > std::numeric_limits<std::int64_t>::max() - pool_capacity ||
+            aggregate.active_bytes > std::numeric_limits<std::int64_t>::max() - pool_active) {
+            throw std::overflow_error("flat pool aggregate bytes overflow");
+        }
+        aggregate.capacity_bytes += pool_capacity;
+        aggregate.active_bytes += pool_active;
+
+        const std::int32_t available_unreserved = std::clamp(free - reserved[i], 0, usable);
+        const std::int32_t used_or_reserved = usable - available_unreserved;
+        if (static_cast<std::int64_t>(used_or_reserved) * aggregate.pressure_denominator >
+            static_cast<std::int64_t>(aggregate.pressure_numerator) * usable) {
+            aggregate.pressure_numerator = used_or_reserved;
+            aggregate.pressure_denominator = usable;
+        }
     }
-    return ids;
+    return aggregate;
 }
 
 std::vector<BlockPoolSnapshot> Scheduler::FlatPoolSnapshots() const {
-    assertSchedulerThread();
     std::vector<BlockPoolSnapshot> snapshots = block_pools_.Snapshot();
     const PoolDemand reserved = FlatReservedBlocksByPool();
     _assert(snapshots.size() == reserved.Size(), "flat pool snapshot/reservation shape mismatch");
@@ -491,8 +459,13 @@ std::vector<BlockPoolSnapshot> Scheduler::FlatPoolSnapshots() const {
 
 std::vector<std::string> Scheduler::PagedCacheGroupIds() const {
 #if TOKENSPEED_FLAT_KVCACHE
-    if (!flat_group_ids_.empty()) {
-        return flat_group_ids_;
+    if (!coordinator_.Schema().empty()) {
+        std::vector<std::string> group_ids;
+        group_ids.reserve(coordinator_.Schema().size());
+        for (const KvCacheGroupSchema& group : coordinator_.Schema()) {
+            group_ids.push_back(group.group_id);
+        }
+        return group_ids;
     }
 #endif
     if (!hybrid_prefix_cache_) return {};
@@ -501,11 +474,8 @@ std::vector<std::string> Scheduler::PagedCacheGroupIds() const {
 
 std::int32_t Scheduler::PagedCacheGroupTotalPages(const std::string& group_id) const {
 #if TOKENSPEED_FLAT_KVCACHE
-    if (const auto group = std::ranges::find(flat_group_ids_, group_id); group != flat_group_ids_.end()) {
-        const std::size_t group_index = static_cast<std::size_t>(std::distance(flat_group_ids_.begin(), group));
-        const std::string& pool_id = config_.paged_cache_groups.at(group_index).pool_id;
-        const PoolIndex pool_index = block_pools_.IndexOf(pool_id.empty() ? "default" : pool_id);
-        return block_pools_.Config(pool_index).total_blocks;
+    if (const std::optional<std::size_t> schema_index = coordinator_.FindSchemaIndex(group_id)) {
+        return block_pools_.Config(coordinator_.GroupSchema(*schema_index).pool_index).total_blocks;
     }
 #endif
     if (!hybrid_prefix_cache_) {
@@ -515,12 +485,9 @@ std::int32_t Scheduler::PagedCacheGroupTotalPages(const std::string& group_id) c
 }
 
 std::int32_t Scheduler::PagedCacheGroupAvailablePages(const std::string& group_id) const {
-    assertSchedulerThread();
 #if TOKENSPEED_FLAT_KVCACHE
-    if (const auto group = std::ranges::find(flat_group_ids_, group_id); group != flat_group_ids_.end()) {
-        const std::size_t group_index = static_cast<std::size_t>(std::distance(flat_group_ids_.begin(), group));
-        const std::string& pool_id = config_.paged_cache_groups.at(group_index).pool_id;
-        return block_pools_.Pool(block_pools_.IndexOf(pool_id.empty() ? "default" : pool_id)).NumFreeBlocks();
+    if (const std::optional<std::size_t> schema_index = coordinator_.FindSchemaIndex(group_id)) {
+        return block_pools_.Pool(coordinator_.GroupSchema(*schema_index).pool_index).NumFreeBlocks();
     }
 #endif
     if (!hybrid_prefix_cache_) {
@@ -530,7 +497,6 @@ std::int32_t Scheduler::PagedCacheGroupAvailablePages(const std::string& group_i
 }
 
 std::int64_t Scheduler::PagedCacheGroupFailedAllocCount(const std::string& group_id) const {
-    assertSchedulerThread();
     if (!hybrid_prefix_cache_) {
         throw std::out_of_range("Scheduler::PagedCacheGroupFailedAllocCount: group_id not configured");
     }
@@ -539,17 +505,15 @@ std::int64_t Scheduler::PagedCacheGroupFailedAllocCount(const std::string& group
 
 std::vector<std::int32_t> Scheduler::GetRequestPagedCachePageIds(const std::string& request_id,
                                                                  const std::string& group_id) const {
-    assertSchedulerThread();
 #if TOKENSPEED_FLAT_KVCACHE
-    if (const auto group = std::ranges::find(flat_group_ids_, group_id); group != flat_group_ids_.end()) {
+    if (const std::optional<std::size_t> schema_index = coordinator_.FindSchemaIndex(group_id)) {
         const auto request = requests_.find(request_id);
         if (request == requests_.end() || request->second->FlatBlockTablesEmpty()) {
             return {};
         }
-        const std::size_t group_index = static_cast<std::size_t>(std::distance(flat_group_ids_.begin(), group));
         const std::vector<BlockTable>& tables = request->second->FlatBlockTablesRef();
-        _assert(group_index < tables.size(), "flat request table/group schema mismatch");
-        return BlockTablePageIds(tables[group_index]);
+        _assert(*schema_index < tables.size(), "flat request table/group schema mismatch");
+        return BlockTablePageIds(tables[*schema_index]);
     }
 #endif
     if (!hybrid_prefix_cache_) {
@@ -560,17 +524,15 @@ std::vector<std::int32_t> Scheduler::GetRequestPagedCachePageIds(const std::stri
 
 std::int32_t Scheduler::GetRequestPagedCacheBaseLogicalPage(const std::string& request_id,
                                                             const std::string& group_id) const {
-    assertSchedulerThread();
 #if TOKENSPEED_FLAT_KVCACHE
-    if (const auto group = std::ranges::find(flat_group_ids_, group_id); group != flat_group_ids_.end()) {
+    if (const std::optional<std::size_t> schema_index = coordinator_.FindSchemaIndex(group_id)) {
         const auto request = requests_.find(request_id);
         if (request == requests_.end() || request->second->FlatBlockTablesEmpty()) {
             return 0;
         }
-        const std::size_t group_index = static_cast<std::size_t>(std::distance(flat_group_ids_.begin(), group));
         const std::vector<BlockTable>& tables = request->second->FlatBlockTablesRef();
-        _assert(group_index < tables.size(), "flat request table/group schema mismatch");
-        return tables[group_index].BaseLogicalPage();
+        _assert(*schema_index < tables.size(), "flat request table/group schema mismatch");
+        return tables[*schema_index].BaseLogicalPage();
     }
 #endif
     if (!hybrid_prefix_cache_) {
@@ -580,7 +542,6 @@ std::int32_t Scheduler::GetRequestPagedCacheBaseLogicalPage(const std::string& r
 }
 
 std::int32_t Scheduler::GetRequestTokenSize(const std::string& id) const {
-    assertSchedulerThread();
     auto it = requests_.find(id);
     if (it == requests_.end()) {
         return -1;
@@ -618,16 +579,12 @@ std::vector<WriteBackOperation> Scheduler::newWriteBackOperation(
 }
 
 ExecutionPlan Scheduler::NextExecutionPlan() {
-    assertSchedulerThread();
     ExecutionPlan plan;
     // One forward batch plus at most one write-back and one load-back batch.
     // Reserve before any scheduler/FSM mutation so final publication consists
     // solely of no-throw Operation moves.
     plan.ReserveOperations(3);
 #if TOKENSPEED_FLAT_KVCACHE
-    // Allocate the dispatch rollback log before any request state changes.
-    // Records are added only after the complete plan payload is materialized.
-    FlatKVDispatchBatch dispatch_batch{flat_completion_ledger_, static_cast<std::size_t>(config_.max_batch_size)};
     if (!requests_.empty()) {
         if (flat_oom_request_ids_.size() == flat_oom_request_ids_.max_size()) {
             throw std::length_error("flat OOM outbox exceeds max_size");
@@ -652,8 +609,8 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
 #if TOKENSPEED_FLAT_KVCACHE
     for (const auto& [id, req] : requests_) {
         if (req->Is<fsm::Finished>()) {
-            invalidateFlatCompletionGeneration(id);
-            (void)flat_reserved_pages_.Erase(id);
+            pending_forward_results_.erase(id);
+            req->FlatReservation().Clear();
         }
     }
 #endif
@@ -668,19 +625,15 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
     }
 
     auto [fwd_ops, cache_ops] = newForwardOperation(candidates);
-#if TOKENSPEED_FLAT_KVCACHE
-    // newForwardOperation is the existing scheduler/FSM mutation boundary. Do
-    // not let any migration-added export, debt, or publication failure unwind
-    // past it and return an undispatched mutated request to the caller. General
-    // failures inside the mutation boundary retain their baseline fail-stop
-    // contract; this closure gives its newly added publication tail the same
-    // explicit contract without pretending that the FSM is rollback-capable.
-    auto publish_flat_plan = [&]() noexcept -> ExecutionPlan {
-#endif
     // Flat table rectangles and all SoA storage are fully materialized before
     // completion debt or execution-plan publication. The production row view
-    // copies each table cell exactly once into this owner.
+    // copies each table cell exactly once into this owner. Any failure after
+    // newForwardOperation propagates to the event-loop boundary; the scheduler
+    // does not attempt to resume from a partially mutated FSM.
     FlatForwardOperation flat_forward_op{std::move(fwd_ops)};
+#if TOKENSPEED_FLAT_KVCACHE
+    flat_forward_op.cache_generation = block_pools_.Generation();
+#endif
 
     // Merge retract write-backs (if any) into the Draining write-back list, then emit once.
     if (auto* wb = std::get_if<std::vector<WriteBackOperation>>(&cache_ops)) {
@@ -732,18 +685,15 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
 #if TOKENSPEED_FLAT_KVCACHE
     // Materialize legacy debt nodes and reserve the destination buckets before
     // publishing either one. The final node-handle merge below is
-    // allocation-free and occurs once, immediately before return. Allocation
-    // failure here follows the explicit post-FSM fail-stop boundary above.
+    // allocation-free and occurs once, immediately before return.
     std::unordered_map<std::string, std::int32_t> legacy_debt;
-    if (config_.enable_structured_flat_kv_completion) {
+    if (config_.UsesExplicitFlatPools()) {
         flat_forward_op.flat_kv_completion_inputs.reserve(flat_forward_op.request_ids.size());
     } else {
         legacy_debt.reserve(flat_forward_op.request_ids.size());
         for (const std::string& request_id : flat_forward_op.request_ids) {
             Request* request = find_request(request_id);
-            if (request == nullptr) {
-                std::terminate();
-            }
+            _assert(request != nullptr, "flat forward request disappeared before completion publication");
             // Legacy flat ABI emits ExtendResult only for prefill-completing
             // and decode operations; mid-prefill chunks owe no result.
             if (!request->Is<fsm::Prefilling>()) {
@@ -757,14 +707,15 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
         check_device_mem();
     }
 #if TOKENSPEED_FLAT_KVCACHE
-    if (config_.enable_structured_flat_kv_completion) {
+    if (config_.UsesExplicitFlatPools()) {
+        // All fallible plan storage is materialized above, and the
+        // request-owned FIFO is now the single authority for the dispatches
+        // being returned.
         for (std::size_t row = 0; row < flat_forward_op.request_ids.size(); ++row) {
             Request* request = find_request(flat_forward_op.request_ids[row]);
-            if (request == nullptr) {
-                std::terminate();
-            }
-            attachFlatKVCompletionInput(dispatch_batch, request, flat_forward_op, row,
-                                        /*legacy_result_expected=*/!request->Is<fsm::Prefilling>());
+            _assert(request != nullptr, "flat forward request disappeared before completion attachment");
+            attachFlatKVCompletionInput(request, flat_forward_op, row,
+                                        /*apply_fsm_result=*/!request->Is<fsm::Prefilling>());
         }
     }
 #endif
@@ -778,34 +729,23 @@ ExecutionPlan Scheduler::NextExecutionPlan() {
     }
 
 #if TOKENSPEED_FLAT_KVCACHE
-    auto commit_legacy_debt = [&]() noexcept {
-        while (!legacy_debt.empty()) {
-            auto node = legacy_debt.extract(legacy_debt.begin());
-            auto existing = pending_forward_results_.find(node.key());
-            if (existing != pending_forward_results_.end()) {
-                existing->second += node.mapped();
-                continue;
-            }
-            const auto inserted = pending_forward_results_.insert(std::move(node));
-            if (!inserted.inserted) {
-                std::terminate();
-            }
+    while (!legacy_debt.empty()) {
+        auto node = legacy_debt.extract(legacy_debt.begin());
+        auto existing = pending_forward_results_.find(node.key());
+        if (existing != pending_forward_results_.end()) {
+            existing->second += node.mapped();
+            continue;
         }
-    };
-    commit_legacy_debt();
+        const auto inserted = pending_forward_results_.insert(std::move(node));
+        _assert(inserted.inserted, "legacy flat completion debt publication failed");
+    }
     // OOM notifications stay in the scheduler outbox across every
-    // materialization step and transfer only after publication is no-throw.
+    // materialization step and transfer only after publication.
     if (!flat_oom_request_ids_.empty()) {
         plan.TakeFlatOomRequestIds(flat_oom_request_ids_);
     }
-    static_assert(std::is_nothrow_move_constructible_v<ExecutionPlan>);
-    dispatch_batch.Commit();
-    return std::move(plan);
-    };
-    return publish_flat_plan();
-#else
-    return plan;
 #endif
+    return plan;
 }
 
 void Scheduler::check_device_mem() {
@@ -884,7 +824,6 @@ void Scheduler::check_device_mem() {
 }
 
 void Scheduler::Advance(const ExecutionEvent& event) {
-    assertSchedulerThread();
     auto dispatch = [this](const auto& inner) { handleEvent(inner); };
     for (const auto& item : event.Events()) {
         std::visit([&](const auto& outer) { std::visit(dispatch, outer); }, item);

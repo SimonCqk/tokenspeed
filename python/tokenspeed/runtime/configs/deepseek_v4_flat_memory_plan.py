@@ -48,8 +48,6 @@ class V4FlatMemoryPlan:
     max_total_tokens: int
     pools: tuple[FlatBlockPoolPlan, ...]
     scheduler_group_specs: tuple[PagedCacheGroupSpec, ...]
-    target_owner_group_specs: tuple[PagedCacheGroupSpec, ...]
-    draft_owner_group_specs: tuple[PagedCacheGroupSpec, ...]
     runtime_metadata: FlatRuntimeMetadataPlan
     plan_fingerprint: str
 
@@ -57,12 +55,6 @@ class V4FlatMemoryPlan:
         object.__setattr__(self, "pools", tuple(self.pools))
         object.__setattr__(
             self, "scheduler_group_specs", tuple(self.scheduler_group_specs)
-        )
-        object.__setattr__(
-            self, "target_owner_group_specs", tuple(self.target_owner_group_specs)
-        )
-        object.__setattr__(
-            self, "draft_owner_group_specs", tuple(self.draft_owner_group_specs)
         )
         if not isinstance(self.runtime_metadata, FlatRuntimeMetadataPlan):
             raise TypeError("runtime_metadata must be FlatRuntimeMetadataPlan")
@@ -74,15 +66,48 @@ class V4FlatMemoryPlan:
             raise ValueError("V4 flat memory max_total_tokens must be >= 0")
         if not self.pools:
             raise ValueError("V4 flat memory plan must contain at least one pool")
-        scheduler_group_ids = {spec.group_id for spec in self.scheduler_group_specs}
+        scheduler_group_ids = [spec.group_id for spec in self.scheduler_group_specs]
+        if len(set(scheduler_group_ids)) != len(scheduler_group_ids):
+            raise ValueError("scheduler_group_specs must have unique group ids")
+        if any(spec.owner_mask == 0 for spec in self.scheduler_group_specs):
+            raise ValueError(
+                "scheduler_group_specs must assign every group to an owner"
+            )
         table_group_ids = {
             plan.group_id for plan in self.runtime_metadata.group_table_plans
         }
-        if table_group_ids != scheduler_group_ids:
+        if table_group_ids != set(scheduler_group_ids):
             raise ValueError(
                 "group_table_plans must cover the scheduler group union exactly"
             )
         require_sha256_hexdigest(self.plan_fingerprint, field_name="plan_fingerprint")
+
+    def group_specs_for_owner(self, owner_mask: int) -> tuple[PagedCacheGroupSpec, ...]:
+        """Return a read-only owner view over the canonical scheduler schema."""
+
+        if isinstance(owner_mask, bool) or owner_mask not in (
+            CACHE_OWNER_TARGET,
+            CACHE_OWNER_DRAFT,
+        ):
+            raise ValueError(
+                "owner_mask must be exactly CACHE_OWNER_TARGET or "
+                f"CACHE_OWNER_DRAFT, got {owner_mask!r}"
+            )
+        return tuple(
+            spec for spec in self.scheduler_group_specs if spec.owner_mask & owner_mask
+        )
+
+    @property
+    def target_owner_group_specs(self) -> tuple[PagedCacheGroupSpec, ...]:
+        """Target-owned entries from the canonical scheduler schema."""
+
+        return self.group_specs_for_owner(CACHE_OWNER_TARGET)
+
+    @property
+    def draft_owner_group_specs(self) -> tuple[PagedCacheGroupSpec, ...]:
+        """Draft-owned entries from the canonical scheduler schema."""
+
+        return self.group_specs_for_owner(CACHE_OWNER_DRAFT)
 
     @property
     def payload_bytes(self) -> int:
@@ -571,8 +596,6 @@ def build_v4_flat_memory_plan(
         max_total_tokens=max_total_tokens,
         pools=tuple(pools),
         scheduler_group_specs=scheduler_specs,
-        target_owner_group_specs=target_specs,
-        draft_owner_group_specs=draft_specs,
         runtime_metadata=runtime_metadata,
         plan_fingerprint="0" * 64,
     )

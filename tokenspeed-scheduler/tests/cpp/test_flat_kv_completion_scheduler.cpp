@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -140,8 +141,7 @@ std::vector<PagedCacheGroupConfig> HeterogeneousCompletionGroups(std::int32_t to
 }
 
 SchedulerConfig HeterogeneousCompletionConfig(std::int32_t verify_width, std::int32_t overlap_depth,
-                                              bool disable_prefix_cache = true) {
-    constexpr std::int32_t kTotalBlocks = 512;
+                                              bool disable_prefix_cache = true, std::int32_t total_blocks = 512) {
     SchedulerConfig cfg{};
     cfg.block_size = 2;
     cfg.device_allocator.total_pages = 0;
@@ -153,10 +153,10 @@ SchedulerConfig HeterogeneousCompletionConfig(std::int32_t verify_width, std::in
     cfg.disable_l2_cache = true;
     cfg.disable_prefix_cache = disable_prefix_cache;
     cfg.flat_block_pools = {
-        FlatBlockPoolConfig{.pool_id = "history-pool", .total_blocks = kTotalBlocks, .bytes_per_block = 128},
-        FlatBlockPoolConfig{.pool_id = "state-pool", .total_blocks = kTotalBlocks, .bytes_per_block = 32},
+        FlatBlockPoolConfig{.pool_id = "history-pool", .total_blocks = total_blocks, .bytes_per_block = 128},
+        FlatBlockPoolConfig{.pool_id = "state-pool", .total_blocks = total_blocks, .bytes_per_block = 32},
     };
-    cfg.paged_cache_groups = HeterogeneousCompletionGroups(kTotalBlocks);
+    cfg.paged_cache_groups = HeterogeneousCompletionGroups(total_blocks);
     return cfg;
 }
 
@@ -221,6 +221,33 @@ class FlatKVResetSchedulerTest : public FlatKVCompletionSchedulerTest {
 protected:
     SchedulerConfig MakeConfig() override {
         SchedulerConfig cfg = FlatKVCompletionSchedulerTest::MakeConfig();
+        return cfg;
+    }
+};
+
+class FlatKVShortAcceptReservationTest : public SchedulerTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        return HeterogeneousCompletionConfig(/*verify_width=*/1, /*overlap_depth=*/1,
+                                             /*disable_prefix_cache=*/true, /*total_blocks=*/4);
+    }
+};
+
+class FlatKVLegacyOverlapSchedulerTest : public SchedulerTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        SchedulerConfig cfg{};
+        cfg.block_size = 2;
+        cfg.device_allocator.total_pages = 6;
+        cfg.host_allocator.total_pages = 6;
+        cfg.max_scheduled_tokens = 64;
+        cfg.max_batch_size = 8;
+        cfg.decode_input_tokens = 2;
+        cfg.overlap_schedule_depth = 1;
+        cfg.disable_l2_cache = true;
+        cfg.disable_prefix_cache = true;
+        cfg.paged_cache_groups = {CompletionGroup("full")};
+        cfg.paged_cache_groups.front().total_pages = cfg.device_allocator.total_pages;
         return cfg;
     }
 };
@@ -410,6 +437,103 @@ TEST_F(FlatKVCompletionSchedulerTest, UnfencedRejectedSuccessorQuarantinesTables
     const FlatKVCompletionInput recovered = InputForRequest(recovered_plan, "r");
     EXPECT_GT(recovered.dispatch_seq, successor.dispatch_seq);
     EXPECT_LE(FlatTableForRequest(recovered_plan, "r", "history").size(), protected_cols);
+}
+
+TEST_F(FlatKVShortAcceptReservationTest, RewindRefreshesReservationBeforeCompetingExactFit) {
+    EXPECT_EQ(SnapshotFreeBlocks(*scheduler_), (std::vector<std::int32_t>{3, 3}));
+    Submit(RequestSpec{.request_id = "a", .tokens = {1, 2}});
+    const FlatKVCompletionInput prefill = InputForRequest(PlanOnce(), "a");
+    EXPECT_EQ(SnapshotFreeBlocks(*scheduler_), (std::vector<std::int32_t>{2, 2}));
+    EXPECT_EQ(scheduler_->FlatReservedBlocksByPool(), (PoolDemand{1, 1}));
+    SendCompletion(*scheduler_, "a", prefill, /*tokens=*/{3}, prefill.dispatch_raw_end);
+
+    const FlatKVCompletionInput decode = InputForRequest(PlanOnce(), "a");
+    EXPECT_EQ(SnapshotFreeBlocks(*scheduler_), (std::vector<std::int32_t>{1, 1}));
+    EXPECT_EQ(scheduler_->FlatReservedBlocksByPool(), (PoolDemand{0, 0}));
+    SendCompletion(*scheduler_, "a", decode, /*tokens=*/{}, /*accepted_raw_end=*/2);
+    EXPECT_EQ(SnapshotFreeBlocks(*scheduler_), (std::vector<std::int32_t>{2, 2}));
+    EXPECT_EQ(scheduler_->FlatReservedBlocksByPool(), (PoolDemand{1, 1}));
+
+    Submit(RequestSpec{.request_id = "b", .tokens = {101, 102}});
+    const ExecutionPlan next_plan = PlanOnce();
+    const FlatForwardOperation* next = FindCompletionForward(next_plan);
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(next->request_ids, (std::vector<std::string>{"a"}));
+    EXPECT_EQ(scheduler_->WaitingSize(), 1u);
+}
+
+TEST_F(FlatKVLegacyOverlapSchedulerTest, CompletionDebtDoesNotGateLegacyDispatch) {
+    Submit(RequestSpec{.request_id = "r", .tokens = {1, 2}});
+    PlanOnce();
+    EXPECT_EQ(SnapshotFreeBlocks(*scheduler_), (std::vector<std::int32_t>{4}));
+    EXPECT_EQ(scheduler_->FlatReservedBlocksByPool(), (PoolDemand{2}));
+    SendForwardDone("r", {3});
+
+    const ExecutionPlan first_plan = PlanOnce();
+    const FlatForwardOperation* first = FindCompletionForward(first_plan);
+    ASSERT_NE(first, nullptr);
+    ASSERT_EQ(first->request_ids, (std::vector<std::string>{"r"}));
+    EXPECT_EQ(SnapshotFreeBlocks(*scheduler_), (std::vector<std::int32_t>{3}));
+    EXPECT_EQ(scheduler_->FlatReservedBlocksByPool(), (PoolDemand{1}));
+
+    const ExecutionPlan second_plan = PlanOnce();
+    const FlatForwardOperation* second = FindCompletionForward(second_plan);
+    ASSERT_NE(second, nullptr);
+    ASSERT_EQ(second->request_ids, (std::vector<std::string>{"r"}));
+    EXPECT_EQ(SnapshotFreeBlocks(*scheduler_), (std::vector<std::int32_t>{2}));
+    EXPECT_EQ(scheduler_->FlatReservedBlocksByPool(), (PoolDemand{0}));
+
+    const ExecutionPlan successor_plan = PlanOnce();
+    const FlatForwardOperation* successor = FindCompletionForward(successor_plan);
+    ASSERT_NE(successor, nullptr);
+    EXPECT_EQ(successor->request_ids, (std::vector<std::string>{"r"}))
+        << "legacy Flat tracks completion debt for lifetime only; main never used it as a dispatch window";
+}
+
+TEST(FlatKVAdmissionOverflowTest, RejectsBeforePoolOrReservationMutation) {
+    SchedulerConfig config =
+        HeterogeneousCompletionConfig(std::numeric_limits<std::int32_t>::max(), /*overlap_depth=*/0,
+                                      /*disable_prefix_cache=*/true, /*total_blocks=*/4);
+    Scheduler scheduler(std::move(config));
+    scheduler.SubmitRequests({RequestSpec{.request_id = "r", .tokens = {1, 2}}});
+    const std::vector<std::int32_t> free_before = SnapshotFreeBlocks(scheduler);
+    const PoolDemand reserved_before = scheduler.FlatReservedBlocksByPool();
+
+    EXPECT_THROW(scheduler.NextExecutionPlan(), std::overflow_error);
+    EXPECT_EQ(SnapshotFreeBlocks(scheduler), free_before);
+    EXPECT_EQ(scheduler.FlatReservedBlocksByPool(), reserved_before);
+    EXPECT_EQ(scheduler.WaitingSize(), 1u);
+}
+
+TEST(FlatKVCompletionRetirementTest, FinalizationFailureDoesNotRetireCompletionTicket) {
+    SchedulerConfig config = HeterogeneousCompletionConfig(/*verify_width=*/4, /*overlap_depth=*/1);
+    config.max_scheduled_tokens = 4;
+    Scheduler scheduler(std::move(config));
+    const std::vector<std::int32_t> initial_free = SnapshotFreeBlocks(scheduler);
+    scheduler.SubmitRequests({RequestSpec{.request_id = "r", .tokens = {1, 2}}});
+    const FlatKVCompletionInput prefill = InputForRequest(scheduler.NextExecutionPlan(), "r");
+    SendCompletion(scheduler, "r", prefill, /*tokens=*/{3}, prefill.dispatch_raw_end);
+    const FlatKVCompletionInput decode = InputForRequest(scheduler.NextExecutionPlan(), "r");
+
+    ExecutionEvent reserve_update;
+    reserve_update.With(ForwardEvent{forward::UpdateReserveNumTokens{
+        .request_id = "r",
+        .reserve_num_tokens_in_next_schedule_event = -1,
+    }});
+    scheduler.Advance(std::move(reserve_update));
+
+    EXPECT_THROW(SendCompletion(scheduler, "r", decode, /*tokens=*/{4, 5, 6, 7}, decode.dispatch_raw_end),
+                 std::runtime_error);
+    const std::vector<std::int32_t> held_after_failure = SnapshotFreeBlocks(scheduler);
+    EXPECT_NE(held_after_failure, initial_free);
+
+    // Production exits the event loop after the exception. This abort is only
+    // an observation: a still-live ticket defers terminal release, whereas a
+    // prematurely retired ticket would free every table here.
+    ExecutionEvent abort;
+    abort.With(ForwardEvent{forward::Abort{.request_id = "r"}});
+    scheduler.Advance(std::move(abort));
+    EXPECT_EQ(SnapshotFreeBlocks(scheduler), held_after_failure);
 }
 
 TEST_F(FlatKVStarvationFenceSchedulerTest, StarvationCannotRetractLiveTablesBeforeCompletionFence) {

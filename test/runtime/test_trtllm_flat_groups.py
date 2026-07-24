@@ -239,6 +239,30 @@ class TRTLLMFlatGroupsTest(unittest.TestCase):
             [12 * 64 + 0, 0 * 64 + 0],
         )
 
+    def test_repeated_capture_reuses_metadata_object(self):
+        b = self._bare_backend()
+        bs = 2
+        b.cuda_graph_cache_seqlens = self.torch.ones(4, dtype=self.torch.int32)
+        b.cuda_graph_page_table = self.torch.zeros(
+            (4, b.max_num_pages), dtype=self.torch.int32
+        )
+
+        b._init_decode_metadata_capture(bs, b.cuda_graph_cache_seqlens[:bs])
+        first = b.cuda_graph_decode_metadata[bs]
+        first_cu_seqlens = first.cu_seqlens_q
+        b._init_decode_metadata_capture(bs, b.cuda_graph_cache_seqlens[:bs])
+
+        self.assertIs(b.cuda_graph_decode_metadata[bs], first)
+        self.assertIs(first.cu_seqlens_q, first_cu_seqlens)
+
+        b._init_multi_token_metadata_capture(bs, 4)
+        first_prefill = b.cuda_graph_prefill_metadata[bs]
+        first_prefill_cu_seqlens = first_prefill.cu_seqlens_q
+        b._init_multi_token_metadata_capture(bs, 4)
+
+        self.assertIs(b.cuda_graph_prefill_metadata[bs], first_prefill)
+        self.assertIs(first_prefill.cu_seqlens_q, first_prefill_cu_seqlens)
+
     def test_verify_metadata_expanded_write_locs(self):
         # Target verify (spec N, not draft): [bs]-row per-group tables in the
         # prefill slot + [bs*N] token-major write locs (radix verify layout).
@@ -314,7 +338,14 @@ class TRTLLMFlatGroupsTest(unittest.TestCase):
                 [[11, 12], [0, -1]], dtype=self.torch.int32, device="cuda"
             )
         }
-        bases = {"full_attention": self.torch.zeros(bs, dtype=self.torch.int32)}
+        bases = {
+            "full_attention": self.torch.zeros(
+                bs,
+                dtype=self.torch.int32,
+                device=src["full_attention"].device,
+            )
+        }
+        self.assertEqual(bases["full_attention"].device, src["full_attention"].device)
         b.init_forward_metadata_replay_cuda_graph(
             bs,
             req_pool_indices=self.torch.tensor([0, 1], dtype=self.torch.int32),

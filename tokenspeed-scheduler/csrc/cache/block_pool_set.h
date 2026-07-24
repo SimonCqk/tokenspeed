@@ -27,7 +27,6 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -53,48 +52,48 @@ struct FlatBlockPoolConfig {
     std::int64_t bytes_per_block{0};
 };
 
-// Compact component-wise page demand, indexed by BlockPoolSet's immutable
-// canonical pool order. The arithmetic preflights every component before
-// mutation so failed admission bookkeeping cannot leave a partial demand.
-class PoolDemand {
+// Compact fixed-shape non-negative counts. Tags keep unrelated index domains
+// type-safe while sharing the inline-storage and checked-arithmetic machinery.
+template <typename Tag>
+class CompactCounts {
 public:
     // Eight int32 entries fit in one 32-byte inline array. Larger heterogeneous
     // layouts retain the same contract through the heap fallback.
     static constexpr std::size_t kInlineCapacity = 8;
 
-    PoolDemand() = default;
-    explicit PoolDemand(std::size_t size, std::int32_t value = 0) {
+    CompactCounts() = default;
+    explicit CompactCounts(std::size_t size, std::int32_t value = 0) {
         if (value < 0) {
-            throw std::invalid_argument("PoolDemand values must be non-negative");
+            throw std::invalid_argument("component counts must be non-negative");
         }
         Initialize(size, value);
     }
-    PoolDemand(std::initializer_list<std::int32_t> values) {
+    CompactCounts(std::initializer_list<std::int32_t> values) {
         const std::span<const std::int32_t> view{values.begin(), values.size()};
         ValidateNonNegative(view);
         Initialize(view);
     }
-    explicit PoolDemand(std::vector<std::int32_t> values) {
+    explicit CompactCounts(std::vector<std::int32_t> values) {
         const std::span<const std::int32_t> view{values};
         ValidateNonNegative(view);
         Initialize(view);
     }
 
-    PoolDemand(const PoolDemand& other) { Initialize(other.Values()); }
-    PoolDemand& operator=(const PoolDemand& other) {
+    CompactCounts(const CompactCounts& other) { Initialize(other.Values()); }
+    CompactCounts& operator=(const CompactCounts& other) {
         if (this != &other) {
-            PoolDemand copy{other};
+            CompactCounts copy{other};
             Swap(copy);
         }
         return *this;
     }
 
-    PoolDemand(PoolDemand&& other) noexcept
+    CompactCounts(CompactCounts&& other) noexcept
         : inline_values_{other.inline_values_},
           heap_values_{std::move(other.heap_values_)},
           size_{std::exchange(other.size_, 0)} {}
 
-    PoolDemand& operator=(PoolDemand&& other) noexcept {
+    CompactCounts& operator=(CompactCounts&& other) noexcept {
         if (this != &other) {
             inline_values_ = other.inline_values_;
             heap_values_ = std::move(other.heap_values_);
@@ -109,11 +108,11 @@ public:
     std::int32_t& operator[](PoolIndex index) noexcept { return Data()[index]; }
     std::span<const std::int32_t> Values() const noexcept { return {Data(), size_}; }
 
-    void AddInPlace(const PoolDemand& other) {
+    void AddInPlace(const CompactCounts& other) {
         RequireSameSize(other);
         for (PoolIndex i = 0; i < Size(); ++i) {
             if ((*this)[i] > std::numeric_limits<std::int32_t>::max() - other[i]) {
-                throw std::overflow_error("PoolDemand addition overflow");
+                throw std::overflow_error("component-count addition overflow");
             }
         }
         for (PoolIndex i = 0; i < Size(); ++i) {
@@ -121,11 +120,11 @@ public:
         }
     }
 
-    void SubtractInPlace(const PoolDemand& other) {
+    void SubtractInPlace(const CompactCounts& other) {
         RequireSameSize(other);
         for (PoolIndex i = 0; i < Size(); ++i) {
             if ((*this)[i] < other[i]) {
-                throw std::underflow_error("PoolDemand subtraction would become negative");
+                throw std::underflow_error("component-count subtraction would become negative");
             }
         }
         for (PoolIndex i = 0; i < Size(); ++i) {
@@ -133,7 +132,7 @@ public:
         }
     }
 
-    bool FitsWithin(const PoolDemand& capacity) const {
+    bool FitsWithin(const CompactCounts& capacity) const {
         RequireSameSize(capacity);
         for (PoolIndex i = 0; i < Size(); ++i) {
             if ((*this)[i] > capacity[i]) {
@@ -147,7 +146,7 @@ public:
         return std::ranges::any_of(Values(), [](std::int32_t value) { return value > 0; });
     }
 
-    friend bool operator==(const PoolDemand& lhs, const PoolDemand& rhs) noexcept {
+    friend bool operator==(const CompactCounts& lhs, const CompactCounts& rhs) noexcept {
         return std::ranges::equal(lhs.Values(), rhs.Values());
     }
 
@@ -180,21 +179,21 @@ private:
 
     std::int32_t* Data() noexcept { return size_ > kInlineCapacity ? heap_values_.get() : inline_values_.data(); }
 
-    void Swap(PoolDemand& other) noexcept {
+    void Swap(CompactCounts& other) noexcept {
         inline_values_.swap(other.inline_values_);
         heap_values_.swap(other.heap_values_);
         std::swap(size_, other.size_);
     }
 
-    void RequireSameSize(const PoolDemand& other) const {
+    void RequireSameSize(const CompactCounts& other) const {
         if (Size() != other.Size()) {
-            throw std::invalid_argument("PoolDemand shape mismatch");
+            throw std::invalid_argument("component-count shape mismatch");
         }
     }
 
     static void ValidateNonNegative(std::span<const std::int32_t> values) {
         if (std::ranges::any_of(values, [](std::int32_t value) { return value < 0; })) {
-            throw std::invalid_argument("PoolDemand values must be non-negative");
+            throw std::invalid_argument("component counts must be non-negative");
         }
     }
 
@@ -202,6 +201,9 @@ private:
     std::unique_ptr<std::int32_t[]> heap_values_;
     std::size_t size_{0};
 };
+
+struct PoolDemandTag {};
+using PoolDemand = CompactCounts<PoolDemandTag>;
 
 struct BlockPoolSnapshot {
     std::string pool_id;
@@ -216,21 +218,11 @@ struct BlockPoolSnapshot {
 };
 
 // Immutable canonical registry of homogeneous BlockPools. Pools are heap-owned
-// so CacheBlock::owner_ and BlockRef's non-owning pool pointer remain stable for
-// the full scheduler lifetime even though the registry uses a contiguous index.
+// so BlockControl's owner link remains stable for the full scheduler lifetime
+// even though the registry itself uses a contiguous canonical index.
 class BlockPoolSet {
 public:
-    explicit BlockPoolSet(std::vector<FlatBlockPoolConfig> configs)
-        : owned_mutation_domain_{std::in_place}, mutation_domain_{&*owned_mutation_domain_} {
-        Initialize(std::move(configs));
-    }
-
-    BlockPoolSet(std::vector<FlatBlockPoolConfig> configs, const SchedulerThreadMutationDomain& mutation_domain)
-        : mutation_domain_{&mutation_domain} {
-        Initialize(std::move(configs));
-    }
-
-    ~BlockPoolSet() noexcept { mutation_domain_->AssertOwnerThreadNoexcept(); }
+    explicit BlockPoolSet(std::vector<FlatBlockPoolConfig> configs) { Initialize(std::move(configs)); }
 
     BlockPoolSet(const BlockPoolSet&) = delete;
     BlockPoolSet& operator=(const BlockPoolSet&) = delete;
@@ -241,12 +233,8 @@ public:
     std::size_t Size() const noexcept { return pools_.size(); }
     BlockPool& Pool(PoolIndex index) { return *pools_.at(index); }
     const BlockPool& Pool(PoolIndex index) const { return *pools_.at(index); }
-    const SchedulerThreadMutationDomain& MutationDomain() const noexcept { return *mutation_domain_; }
 
-    std::uint64_t Generation() const {
-        mutation_domain_->AssertOwnerThread();
-        return generation_;
-    }
+    std::uint64_t Generation() const noexcept { return generation_; }
 
     PoolIndex IndexOf(std::string_view pool_id) const {
         auto it = pool_index_.find(std::string{pool_id});
@@ -260,10 +248,9 @@ public:
     const FlatBlockPoolConfig& Config(PoolIndex index) const { return configs_.at(index); }
 
     PoolDemand FreeBlocks() const {
-        mutation_domain_->AssertOwnerThread();
         PoolDemand out(Size(), 0);
         for (PoolIndex i = 0; i < Size(); ++i) {
-            out[i] = Pool(i).numFreeBlocksInDomain();
+            out[i] = Pool(i).NumFreeBlocks();
         }
         return out;
     }
@@ -284,7 +271,6 @@ public:
     }
 
     std::vector<BlockPoolSnapshot> Snapshot() const {
-        mutation_domain_->AssertOwnerThread();
         std::vector<BlockPoolSnapshot> out;
         out.reserve(Size());
         for (PoolIndex i = 0; i < Size(); ++i) {
@@ -306,7 +292,6 @@ public:
     }
 
     bool IsQuiescent() const {
-        mutation_domain_->AssertOwnerThread();
         for (PoolIndex i = 0; i < Size(); ++i) {
             if (!Pool(i).IsQuiescent()) {
                 return false;
@@ -316,7 +301,6 @@ public:
     }
 
     std::uint64_t ResetQuiescent() {
-        mutation_domain_->AssertOwnerThread();
         // Validate every independent pool before mutating any of them.
         if (!IsQuiescent()) {
             throw std::logic_error("cannot reset flat block pool set with live refs");
@@ -331,15 +315,7 @@ public:
     }
 
 private:
-    // Scheduler APIs validate the shared mutation domain once before scanning
-    // the immutable pool registry. Keep the unchecked counter read private so
-    // no other caller can accidentally bypass that transaction boundary.
-    std::int32_t numFreeBlocksInValidatedDomain(PoolIndex index) const noexcept {
-        return pools_[index]->numFreeBlocksInDomain();
-    }
-
     void Initialize(std::vector<FlatBlockPoolConfig> configs) {
-        mutation_domain_->AssertOwnerThread();
         if (configs.empty()) {
             throw std::invalid_argument("BlockPoolSet requires at least one pool");
         }
@@ -354,7 +330,7 @@ private:
             }
             const PoolIndex index = configs_.size();
             pool_index_.emplace(config.pool_id, index);
-            pools_.push_back(std::make_unique<BlockPool>(config.total_blocks, *mutation_domain_));
+            pools_.push_back(std::make_unique<BlockPool>(config.total_blocks));
             configs_.push_back(std::move(config));
         }
     }
@@ -370,10 +346,6 @@ private:
         }
     }
 
-    // Standalone sets own a token; Scheduler-owned sets point at the
-    // scheduler's token. The owned token is declared first and destroyed last.
-    std::optional<SchedulerThreadMutationDomain> owned_mutation_domain_{};
-    const SchedulerThreadMutationDomain* mutation_domain_{};
     std::vector<FlatBlockPoolConfig> configs_;
     std::vector<std::unique_ptr<BlockPool>> pools_;
     std::unordered_map<std::string, PoolIndex> pool_index_;

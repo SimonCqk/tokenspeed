@@ -80,7 +80,7 @@ struct ForwardOperationBase {
     // FlatForwardOperation before NextExecutionPlan returns; request state is
     // never exposed through the public execution-plan ABI.
     std::span<const BlockTable> flat_block_table_view;
-    std::span<const std::string> flat_block_table_group_ids;
+    std::span<const KvCacheGroupSchema> flat_cache_schema;
 
     // Populated by the flat scheduler after the table mutation is committed.
     // Radix operations leave this null so their batched ABI remains empty.
@@ -248,7 +248,7 @@ struct FlatForwardOperation {
     std::vector<FlatKVCompletionInput> flat_kv_completion_inputs;
 
     explicit FlatForwardOperation(std::vector<ForwardOperation> ops) {
-        std::span<const std::string> canonical_flat_group_ids;
+        std::span<const KvCacheGroupSchema> canonical_flat_schema;
         std::vector<std::size_t> flat_widths;
         bool have_flat_schema = false;
         bool miss_flat_schema = false;
@@ -262,49 +262,29 @@ struct FlatForwardOperation {
             std::visit(
                 [&](const auto& inner) {
                     const bool uses_live_view =
-                        !inner.flat_block_table_view.empty() || !inner.flat_block_table_group_ids.empty();
+                        !inner.flat_block_table_view.empty() || !inner.flat_cache_schema.empty();
                     if (uses_live_view) {
-                        // Production rows all use the scheduler-owned group-id
-                        // vector and request-owned table vector. A disagreement
-                        // is an internal invariant violation, not recoverable
-                        // execution-plan input validation after FSM mutation.
-                        if (inner.flat_block_table_view.size() != inner.flat_block_table_group_ids.size()) {
+                        // Every production row borrows the coordinator-owned
+                        // schema and is index-aligned with its request tables.
+                        if (inner.flat_block_table_view.size() != inner.flat_cache_schema.size()) {
                             std::terminate();
                         }
                         if (!have_flat_schema) {
-                            canonical_flat_group_ids = inner.flat_block_table_group_ids;
-                            flat_widths.reserve(canonical_flat_group_ids.size());
+                            canonical_flat_schema = inner.flat_cache_schema;
+                            flat_widths.reserve(canonical_flat_schema.size());
                             for (std::size_t i = 0; i < inner.flat_block_table_view.size(); ++i) {
-                                if (std::find(canonical_flat_group_ids.begin(), canonical_flat_group_ids.begin() + i,
-                                              canonical_flat_group_ids[i]) != canonical_flat_group_ids.begin() + i) {
-                                    std::terminate();
-                                }
                                 flat_widths.push_back(
                                     static_cast<std::size_t>(inner.flat_block_table_view[i].NumBlocks()));
                             }
                             have_flat_schema = true;
                         } else {
-                            if (inner.flat_block_table_group_ids.size() != canonical_flat_group_ids.size()) {
+                            if (inner.flat_cache_schema.data() != canonical_flat_schema.data() ||
+                                inner.flat_cache_schema.size() != canonical_flat_schema.size()) {
                                 std::terminate();
                             }
-                            const bool uses_canonical_group_order =
-                                inner.flat_block_table_group_ids.data() == canonical_flat_group_ids.data() ||
-                                std::equal(inner.flat_block_table_group_ids.begin(),
-                                           inner.flat_block_table_group_ids.end(), canonical_flat_group_ids.begin());
                             for (std::size_t i = 0; i < inner.flat_block_table_view.size(); ++i) {
-                                std::size_t canonical_index = i;
-                                if (!uses_canonical_group_order) {
-                                    const auto group =
-                                        std::find(canonical_flat_group_ids.begin(), canonical_flat_group_ids.end(),
-                                                  inner.flat_block_table_group_ids[i]);
-                                    if (group == canonical_flat_group_ids.end()) {
-                                        std::terminate();
-                                    }
-                                    canonical_index =
-                                        static_cast<std::size_t>(group - canonical_flat_group_ids.begin());
-                                }
-                                flat_widths[canonical_index] =
-                                    std::max(flat_widths[canonical_index],
+                                flat_widths[i] =
+                                    std::max(flat_widths[i],
                                              static_cast<std::size_t>(inner.flat_block_table_view[i].NumBlocks()));
                             }
                         }
@@ -358,7 +338,7 @@ struct FlatForwardOperation {
         flat_exports.reserve(flat_widths.size());
         for (std::size_t i = 0; i < flat_widths.size(); ++i) {
             const auto [export_it, inserted] =
-                flat_block_tables.try_emplace(canonical_flat_group_ids[i], num_reqs, flat_widths[i]);
+                flat_block_tables.try_emplace(canonical_flat_schema[i].group_id, num_reqs, flat_widths[i]);
             if (!inserted) {
                 std::terminate();
             }
@@ -373,9 +353,9 @@ struct FlatForwardOperation {
             offsets.assign(num_reqs, 0);
         }
 
-        auto append_row = [this, &canonical_flat_group_ids, &flat_exports](ForwardOperation& op, std::size_t row) {
+        auto append_row = [this, &flat_exports](ForwardOperation& op, std::size_t row) {
             std::visit(
-                [this, row, &canonical_flat_group_ids, &flat_exports](auto& inner) {
+                [this, row, &flat_exports](auto& inner) {
                     request_ids.push_back(std::move(inner.request_id));
                     request_pool_indices.push_back(inner.request_pool_index);
                     input_lengths.push_back(inner.input_length);
@@ -387,29 +367,15 @@ struct FlatForwardOperation {
                     mamba_checkpoint_dst_indices.push_back(inner.mamba_checkpoint_dst_idx);
                     mamba_cow_src_indices.push_back(inner.mamba_cow_src_idx);
                     mamba_branching_seqlens.push_back(inner.mamba_branching_seqlen);
-                    const bool uses_canonical_group_order =
-                        inner.flat_block_table_group_ids.data() == canonical_flat_group_ids.data() ||
-                        std::equal(inner.flat_block_table_group_ids.begin(), inner.flat_block_table_group_ids.end(),
-                                   canonical_flat_group_ids.begin());
                     for (std::size_t i = 0; i < inner.flat_block_table_view.size(); ++i) {
-                        std::size_t canonical_index = i;
-                        if (!uses_canonical_group_order) {
-                            const auto group =
-                                std::find(canonical_flat_group_ids.begin(), canonical_flat_group_ids.end(),
-                                          inner.flat_block_table_group_ids[i]);
-                            if (group == canonical_flat_group_ids.end()) {
-                                std::terminate();
-                            }
-                            canonical_index = static_cast<std::size_t>(group - canonical_flat_group_ids.begin());
-                        }
-                        FlatBlockTableExport& export_owner = *flat_exports[canonical_index];
+                        FlatBlockTableExport& export_owner = *flat_exports[i];
                         const BlockTable& table = inner.flat_block_table_view[i];
                         if (static_cast<std::size_t>(table.NumBlocks()) > export_owner.cols) {
                             std::terminate();
                         }
                         std::size_t destination = row * export_owner.cols;
-                        for (CacheBlock* block : table.Blocks()) {
-                            export_owner.values[destination++] = block->IsNull() ? 0 : block->BlockId();
+                        for (const BlockRef& block : table.Blocks()) {
+                            export_owner.values[destination++] = block ? block->BlockId() : 0;
                         }
                         export_owner.bases[row] = table.BaseLogicalPage();
                     }

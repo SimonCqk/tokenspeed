@@ -43,9 +43,15 @@ from tokenspeed_scheduler import (
     SchedulerConfig,
 )
 
+from tokenspeed.runtime.configs.flat_memory_plan import (
+    FLAT_PACKED_UNPACK_META_FIELDS,
+)
 from tokenspeed.runtime.configs.paged_cache_spec import require_flat_table_cols
 from tokenspeed.runtime.flat_cache_tables import (
+    FLAT_PACKED_META_MAX_OFFSET,
     CacheTableSource,
+    FlatPackedTableUnion,
+    make_flat_packed_table_destinations,
     require_flat_cache_generation,
 )
 
@@ -436,24 +442,25 @@ def cache_sync_debug_enabled() -> bool:
 
 @dataclass(slots=True)
 class _FlatBlockTableStagingSlot:
-    host_tables: dict[str, torch.Tensor]
-    host_bases: dict[str, torch.Tensor]
-    device_tables: dict[str, torch.Tensor]
-    device_bases: dict[str, torch.Tensor]
-    table_views: dict[str, torch.Tensor | None]
-    base_views: dict[str, torch.Tensor | None]
-    cols_by_group: dict[str, int]
+    host_buffer: torch.Tensor
+    device_buffer: torch.Tensor
+    host_unpack_rows_by_group: tuple[tuple[np.ndarray, ...], ...]
+    table_views: dict[str, torch.Tensor]
+    base_views: dict[str, torch.Tensor]
+    cols_by_group: list[int]
+    table_offsets: list[int]
+    base_offsets: list[int]
     source: CacheTableSource
 
 
 class FlatBlockTableStagingBuffers:
-    """Persistent table/base H2D buffers for one flat memory plan.
+    """Persistent packed table/base H2D buffers for one flat memory plan.
 
-    The scheduler binding writes each rectangular C++ export directly into a
-    planned pinned host slot.  A matching persistent device slot receives the
-    active rectangle with a non-blocking copy.  Slots rotate at the plan's
-    declared forward depth, so Python neither flattens nested rows nor allocates
-    pinned/device table tensors in the per-forward hot path.
+    Each ring slot owns one pinned host tensor and one matching device tensor.
+    The scheduler writes heterogeneous group rectangles into the active packed
+    prefix, followed by one H2D. Per-group table/base tensors are zero-copy
+    views over that storage. For graph replay, owner-local unpack headers ride
+    in the same H2D and drive one exact-width fused unpack per owner.
     """
 
     def __init__(self, plan: Any, *, device: "torch.device | str") -> None:
@@ -491,11 +498,11 @@ class FlatBlockTableStagingBuffers:
                     f"flat table staging has an invalid/duplicate pool {pool_id!r}"
                 )
             pool_capacity_by_id[pool_id] = self._positive_plan_int(pool, "total_blocks")
-        self._page_id_upper_bound_by_group: dict[str, int] = {}
+        page_id_upper_bound_by_group: dict[str, int] = {}
         for spec in tuple(getattr(plan, "scheduler_group_specs", ())):
             group_id = str(spec.group_id)
             pool_id = str(spec.pool_id)
-            if group_id in self._page_id_upper_bound_by_group:
+            if group_id in page_id_upper_bound_by_group:
                 raise ValueError(
                     f"flat table staging has duplicate scheduler group {group_id!r}"
                 )
@@ -504,20 +511,98 @@ class FlatBlockTableStagingBuffers:
                     f"flat table staging group {group_id!r} refers to unknown "
                     f"pool {pool_id!r}"
                 )
-            self._page_id_upper_bound_by_group[group_id] = pool_capacity_by_id[pool_id]
-        if self._page_id_upper_bound_by_group.keys() != self._group_id_set:
+            page_id_upper_bound_by_group[group_id] = pool_capacity_by_id[pool_id]
+        if page_id_upper_bound_by_group.keys() != self._group_id_set:
             raise ValueError(
                 "flat table staging group plans and scheduler groups differ: "
                 f"tables={sorted(self._group_ids)}, "
-                f"scheduler={sorted(self._page_id_upper_bound_by_group)}"
+                f"scheduler={sorted(page_id_upper_bound_by_group)}"
             )
-
-        planned_bytes = (
-            4
-            * self._depth
-            * self._max_rows
-            * sum(self._max_cols_by_group[group_id] + 1 for group_id in self._group_ids)
+        page_id_upper_bounds = tuple(
+            page_id_upper_bound_by_group[group_id] for group_id in self._group_ids
         )
+        self._page_id_upper_bounds_tensor = torch.tensor(
+            page_id_upper_bounds,
+            dtype=torch.int64,
+            device="cpu",
+        )
+        self._copy_metadata = torch.empty(
+            (len(self._group_ids), 4),
+            dtype=torch.int64,
+            device="cpu",
+        )
+        self._copy_metadata_array = self._copy_metadata.numpy()
+
+        graph_batch_rows = getattr(runtime_metadata, "graph_batch_rows", 0)
+        if (
+            isinstance(graph_batch_rows, bool)
+            or not isinstance(graph_batch_rows, int)
+            or graph_batch_rows < 0
+        ):
+            raise ValueError(
+                "flat memory plan graph_batch_rows must be an integer >= 0"
+            )
+        owner_destinations = {}
+        owner_header_rows: dict[str, dict[str, int]] = {}
+        owner_header_offsets: dict[str, int] = {}
+        header_numel = 0
+        if graph_batch_rows > 0:
+            capture_cols_fn = getattr(
+                runtime_metadata, "graph_capture_cols_by_group", None
+            )
+            for owner, capture_field in (
+                ("target", "target_capture_cols"),
+                ("draft", "draft_capture_cols"),
+            ):
+                capture_cols = (
+                    capture_cols_fn(owner)
+                    if callable(capture_cols_fn)
+                    else {
+                        str(group_plan.group_id): int(
+                            getattr(group_plan, capture_field, 0)
+                        )
+                        for group_plan in group_plans
+                        if int(getattr(group_plan, capture_field, 0)) > 0
+                    }
+                )
+                unknown_groups = frozenset(capture_cols).difference(self._group_id_set)
+                if unknown_groups:
+                    raise ValueError(
+                        f"flat {owner} capture plan has unknown groups "
+                        f"{sorted(unknown_groups)}"
+                    )
+                destinations, _ = make_flat_packed_table_destinations(
+                    capture_cols,
+                    batch_rows=graph_batch_rows,
+                )
+                for destination in destinations:
+                    max_cols = self._max_cols_by_group[destination.group_id]
+                    if destination.table_cols > max_cols:
+                        raise ValueError(
+                            f"flat {owner} capture columns exceed export capacity "
+                            f"for {destination.group_id!r}: "
+                            f"capture={destination.table_cols}, export={max_cols}"
+                        )
+                if not destinations:
+                    continue
+                owner_destinations[owner] = destinations
+                owner_header_offsets[owner] = header_numel
+                owner_header_rows[owner] = {
+                    destination.group_id: index
+                    for index, destination in enumerate(destinations)
+                }
+                header_numel += len(destinations) * FLAT_PACKED_UNPACK_META_FIELDS
+        self._header_numel = header_numel
+        self._payload_capacity_numel = self._max_rows * sum(
+            self._max_cols_by_group[group_id] + 1 for group_id in self._group_ids
+        )
+        self._slot_capacity_numel = self._header_numel + self._payload_capacity_numel
+        if self._slot_capacity_numel > FLAT_PACKED_META_MAX_OFFSET:
+            raise OverflowError(
+                "flat table staging slot exceeds int32 unpack offsets: "
+                f"elements={self._slot_capacity_numel}"
+            )
+        planned_bytes = 4 * self._depth * self._slot_capacity_numel
         actual = getattr(runtime_metadata, "forward_input_bytes", None)
         if isinstance(actual, bool) or not isinstance(actual, int):
             raise ValueError("flat memory plan forward_input_bytes must be an integer")
@@ -530,77 +615,90 @@ class FlatBlockTableStagingBuffers:
         pin_memory = self._device.type == "cuda"
         self._slots: list[_FlatBlockTableStagingSlot] = []
         for _ in range(self._depth):
-            host_tables = {
-                group_id: torch.full(
-                    (self._max_rows * self._max_cols_by_group[group_id],),
-                    -1,
-                    dtype=torch.int32,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                )
-                for group_id in self._group_ids
-            }
-            host_bases = {
-                group_id: torch.zeros(
-                    (self._max_rows,),
-                    dtype=torch.int32,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                )
-                for group_id in self._group_ids
-            }
-            device_tables = {
-                group_id: torch.empty(
-                    (self._max_rows * self._max_cols_by_group[group_id],),
-                    dtype=torch.int32,
-                    device=self._device,
-                )
-                for group_id in self._group_ids
-            }
-            device_bases = {
-                group_id: torch.empty(
-                    (self._max_rows,),
-                    dtype=torch.int32,
-                    device=self._device,
-                )
-                for group_id in self._group_ids
-            }
-            if pin_memory and not all(
-                tensor.is_pinned()
-                for tensor in (*host_tables.values(), *host_bases.values())
-            ):
+            host_buffer = torch.empty(
+                (self._slot_capacity_numel,),
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
+            device_buffer = torch.empty(
+                (self._slot_capacity_numel,),
+                dtype=torch.int32,
+                device=self._device,
+            )
+            if pin_memory and not host_buffer.is_pinned():
                 raise RuntimeError(
                     "flat CUDA table staging must use pinned host tensors"
                 )
-            table_views = dict.fromkeys(self._group_ids)
-            base_views = dict.fromkeys(self._group_ids)
+            host_unpack_arrays_by_owner = {}
+            device_unpack_meta_by_owner = {}
+            group_ids_by_owner = {}
+            for owner, destinations in owner_destinations.items():
+                start = owner_header_offsets[owner]
+                count = len(destinations) * FLAT_PACKED_UNPACK_META_FIELDS
+                host_meta = host_buffer[start : start + count].view(
+                    len(destinations), FLAT_PACKED_UNPACK_META_FIELDS
+                )
+                device_meta = device_buffer[start : start + count].view(
+                    len(destinations), FLAT_PACKED_UNPACK_META_FIELDS
+                )
+                host_unpack_arrays_by_owner[owner] = host_meta.numpy()
+                device_unpack_meta_by_owner[owner] = device_meta
+                group_ids_by_owner[owner] = tuple(
+                    destination.group_id for destination in destinations
+                )
+                for row, destination in enumerate(destinations):
+                    host_unpack_arrays_by_owner[owner][
+                        row, 2
+                    ] = destination.table_offset
+                    host_unpack_arrays_by_owner[owner][row, 3] = destination.table_cols
+                    host_unpack_arrays_by_owner[owner][row, 5] = destination.base_offset
+            host_unpack_rows_by_group = tuple(
+                tuple(
+                    host_unpack_arrays_by_owner[owner][rows_by_group[group_id]]
+                    for owner, rows_by_group in owner_header_rows.items()
+                    if group_id in rows_by_group
+                )
+                for group_id in self._group_ids
+            )
+            table_views = {
+                group_id: device_buffer[:0].view(0, 0) for group_id in self._group_ids
+            }
+            base_views = {group_id: device_buffer[:0] for group_id in self._group_ids}
+            packed = (
+                FlatPackedTableUnion(
+                    buffer=device_buffer,
+                    unpack_meta_by_owner=device_unpack_meta_by_owner,
+                    group_ids_by_owner=group_ids_by_owner,
+                )
+                if device_unpack_meta_by_owner
+                else None
+            )
             self._slots.append(
                 _FlatBlockTableStagingSlot(
-                    host_tables=host_tables,
-                    host_bases=host_bases,
-                    device_tables=device_tables,
-                    device_bases=device_bases,
+                    host_buffer=host_buffer,
+                    device_buffer=device_buffer,
+                    host_unpack_rows_by_group=host_unpack_rows_by_group,
                     table_views=table_views,
                     base_views=base_views,
-                    cols_by_group=dict.fromkeys(self._group_ids, 0),
+                    cols_by_group=[0] * len(self._group_ids),
+                    table_offsets=[0] * len(self._group_ids),
+                    base_offsets=[0] * len(self._group_ids),
                     source=CacheTableSource(
                         kind="flat",
                         tables=table_views,
                         base_offsets=base_views,
                         planned=True,
+                        packed=packed,
                     ),
                 )
             )
 
         actual_host_bytes = sum(
-            self._tensor_nbytes(tensor)
-            for slot in self._slots
-            for tensor in (*slot.host_tables.values(), *slot.host_bases.values())
+            self._tensor_nbytes(slot.host_buffer) for slot in self._slots
         )
         actual_device_bytes = sum(
-            self._tensor_nbytes(tensor)
-            for slot in self._slots
-            for tensor in (*slot.device_tables.values(), *slot.device_bases.values())
+            self._tensor_nbytes(slot.device_buffer) for slot in self._slots
         )
         if actual_host_bytes != planned_bytes or actual_device_bytes != planned_bytes:
             raise RuntimeError(
@@ -610,9 +708,6 @@ class FlatBlockTableStagingBuffers:
             )
 
         self._next_slot = 0
-        self._current_slot: int | None = None
-        self._current_rows = 0
-        self._current_cols_by_group: dict[str, int] = {}
 
     @staticmethod
     def _positive_plan_int(owner: Any, field: str) -> int:
@@ -625,7 +720,7 @@ class FlatBlockTableStagingBuffers:
     def _tensor_nbytes(tensor: torch.Tensor) -> int:
         return int(tensor.numel()) * int(tensor.element_size())
 
-    def _validate_forward_op_schema(self, forward_op: Any, *, num_reqs: int) -> None:
+    def _validate_forward_op_schema(self, forward_op: Any) -> None:
         """Validate the immutable native group header once per staging plan."""
         group_ids_fn = getattr(forward_op, "flat_block_table_group_ids", None)
         if not callable(group_ids_fn):
@@ -642,6 +737,42 @@ class FlatBlockTableStagingBuffers:
                 f"extra={sorted(actual_set - self._group_id_set)}"
             )
         self._forward_schema_validated = True
+
+    @staticmethod
+    def _set_unpack_source_offsets(
+        slot: _FlatBlockTableStagingSlot,
+        group_index: int,
+        *,
+        table_offset: int,
+        table_cols: int,
+        base_offset: int,
+    ) -> None:
+        for meta_row in slot.host_unpack_rows_by_group[group_index]:
+            meta_row[0] = table_offset
+            meta_row[1] = table_cols
+            meta_row[4] = base_offset
+
+    def _retarget_slot_views(
+        self,
+        slot: _FlatBlockTableStagingSlot,
+        *,
+        rows: int,
+    ) -> None:
+        storage = slot.device_buffer.untyped_storage()
+        for group_index, group_id in enumerate(self._group_ids):
+            cols = slot.cols_by_group[group_index]
+            slot.table_views[group_id].set_(
+                storage,
+                slot.table_offsets[group_index],
+                (rows, cols),
+                (cols, 1),
+            )
+            slot.base_views[group_id].set_(
+                storage,
+                slot.base_offsets[group_index],
+                (rows,),
+                (1,),
+            )
 
     def stage(
         self,
@@ -664,69 +795,88 @@ class FlatBlockTableStagingBuffers:
                 where="planned flat table staging",
             )
         if not self._forward_schema_validated:
-            self._validate_forward_op_schema(forward_op, num_reqs=num_reqs)
+            self._validate_forward_op_schema(forward_op)
 
         slot_index = self._next_slot
         slot = self._slots[slot_index]
         cols_by_group = slot.cols_by_group
-        copy_to = getattr(forward_op, "copy_flat_block_table_to", None)
-        if not callable(copy_to):
+        copy_all_to = getattr(forward_op, "copy_flat_block_tables_to", None)
+        if not callable(copy_all_to):
             raise RuntimeError(
                 "planned flat table staging requires a scheduler binding "
-                "with copy_flat_block_table_to()"
+                "with copy_flat_block_tables_to()"
             )
-        for group_id in self._group_ids:
-            copied = copy_to(
-                group_id,
-                slot.host_tables[group_id],
-                slot.host_bases[group_id],
-                self._page_id_upper_bound_by_group[group_id],
+        copied_payload_end = copy_all_to(
+            slot.host_buffer,
+            self._page_id_upper_bounds_tensor,
+            self._copy_metadata,
+            self._header_numel,
+        )
+        if isinstance(copied_payload_end, bool) or not isinstance(
+            copied_payload_end, int
+        ):
+            raise RuntimeError(
+                "flat packed staging copy returned an invalid payload end"
             )
-            if not isinstance(copied, Sequence) or len(copied) != 2:
-                raise RuntimeError(
-                    f"flat staging copy for {group_id!r} returned an invalid header"
-                )
-            rows, cols = copied
-            if any(
-                isinstance(value, bool) or not isinstance(value, int)
-                for value in (rows, cols)
-            ):
-                raise RuntimeError(
-                    f"flat staging copy for {group_id!r} returned non-integer metadata"
-                )
+        payload_cursor = self._header_numel
+        for group_index, group_id in enumerate(self._group_ids):
+            rows = int(self._copy_metadata_array[group_index, 0])
+            cols = int(self._copy_metadata_array[group_index, 1])
+            table_offset = int(self._copy_metadata_array[group_index, 2])
+            base_offset = int(self._copy_metadata_array[group_index, 3])
             if rows != num_reqs:
                 raise RuntimeError(
                     f"flat staging copy for {group_id!r} returned {rows} "
                     f"rows, expected {num_reqs}"
                 )
             capacity = self._max_cols_by_group[group_id]
-            if cols < 0 or cols > capacity:
+            if cols <= 0 or cols > capacity:
                 raise RuntimeError(
                     f"flat staging copy for {group_id!r} returned {cols} "
-                    f"columns outside [0, {capacity}]"
+                    f"columns outside [1, {capacity}]"
                 )
-            cols_by_group[group_id] = cols
-
-            active_values = num_reqs * cols
-            slot.device_tables[group_id][:active_values].copy_(
-                slot.host_tables[group_id][:active_values],
-                non_blocking=self._non_blocking_copy,
+            if table_offset != payload_cursor:
+                raise RuntimeError(
+                    f"flat staging copy for {group_id!r} returned table offset "
+                    f"{table_offset}, expected {payload_cursor}"
+                )
+            table_values = rows * cols
+            expected_base_offset = table_offset + table_values
+            if base_offset != expected_base_offset:
+                raise RuntimeError(
+                    f"flat staging copy for {group_id!r} returned base offset "
+                    f"{base_offset}, expected {expected_base_offset}"
+                )
+            payload_cursor = base_offset + rows
+            # Shape scratch stays unpublished until the single H2D succeeds
+            # and every persistent view is retargeted below.
+            cols_by_group[group_index] = cols
+            slot.table_offsets[group_index] = table_offset
+            slot.base_offsets[group_index] = base_offset
+        if copied_payload_end != payload_cursor:
+            raise RuntimeError(
+                "flat packed staging copy returned an inconsistent payload end: "
+                f"actual={copied_payload_end}, expected={payload_cursor}"
             )
-            slot.device_bases[group_id][:num_reqs].copy_(
-                slot.host_bases[group_id][:num_reqs],
-                non_blocking=self._non_blocking_copy,
+        if payload_cursor > self._slot_capacity_numel:
+            raise RuntimeError(
+                "flat table staging active payload exceeds its planned slot: "
+                f"active={payload_cursor}, capacity={self._slot_capacity_numel}"
             )
-
-        self._current_slot = slot_index
-        self._current_rows = num_reqs
-        self._current_cols_by_group = cols_by_group
+        for group_index in range(len(self._group_ids)):
+            self._set_unpack_source_offsets(
+                slot,
+                group_index,
+                table_offset=slot.table_offsets[group_index],
+                table_cols=cols_by_group[group_index],
+                base_offset=slot.base_offsets[group_index],
+            )
+        slot.device_buffer[:payload_cursor].copy_(
+            slot.host_buffer[:payload_cursor],
+            non_blocking=self._non_blocking_copy,
+        )
         self._next_slot = (slot_index + 1) % self._depth
-        for group_id in self._group_ids:
-            cols = cols_by_group[group_id]
-            slot.table_views[group_id] = slot.device_tables[group_id][
-                : num_reqs * cols
-            ].view(num_reqs, cols)
-            slot.base_views[group_id] = slot.device_bases[group_id][:num_reqs]
+        self._retarget_slot_views(slot, rows=num_reqs)
         if slot.source.generation != cache_generation:
             slot.source = CacheTableSource(
                 kind="flat",
@@ -734,6 +884,7 @@ class FlatBlockTableStagingBuffers:
                 base_offsets=slot.base_views,
                 planned=True,
                 generation=cache_generation,
+                packed=slot.source.packed,
             )
         return slot.source
 
@@ -766,23 +917,29 @@ class FlatBlockTableStagingBuffers:
             cache_generation,
             where="planned flat idle table staging",
         )
-        for group_id in self._group_ids:
-            # One column is sufficient for an idle dummy row. Page/base zero is
-            # the canonical non-owning mapping in every local pool.
-            slot.device_tables[group_id][:padded_rows].zero_()
-            slot.device_bases[group_id][:padded_rows].zero_()
-
-        self._current_slot = slot_index
-        self._current_rows = 0
-        self._current_cols_by_group = slot.cols_by_group
-        for group_id in self._group_ids:
-            self._current_cols_by_group[group_id] = 1
+        payload_cursor = self._header_numel
+        for group_index in range(len(self._group_ids)):
+            table_offset = payload_cursor
+            payload_cursor += padded_rows
+            base_offset = payload_cursor
+            payload_cursor += padded_rows
+            slot.table_offsets[group_index] = table_offset
+            slot.base_offsets[group_index] = base_offset
+            slot.cols_by_group[group_index] = 1
+            self._set_unpack_source_offsets(
+                slot,
+                group_index,
+                table_offset=table_offset,
+                table_cols=1,
+                base_offset=base_offset,
+            )
+        slot.host_buffer[self._header_numel : payload_cursor].zero_()
+        slot.device_buffer[:payload_cursor].copy_(
+            slot.host_buffer[:payload_cursor],
+            non_blocking=self._non_blocking_copy,
+        )
         self._next_slot = (slot_index + 1) % self._depth
-        for group_id in self._group_ids:
-            slot.table_views[group_id] = slot.device_tables[group_id][
-                :padded_rows
-            ].view(padded_rows, 1)
-            slot.base_views[group_id] = slot.device_bases[group_id][:padded_rows]
+        self._retarget_slot_views(slot, rows=padded_rows)
         if slot.source.generation != cache_generation:
             slot.source = CacheTableSource(
                 kind="flat",
@@ -790,65 +947,8 @@ class FlatBlockTableStagingBuffers:
                 base_offsets=slot.base_views,
                 planned=True,
                 generation=cache_generation,
+                packed=slot.source.packed,
             )
-        return slot.source
-
-    def pad_current_for_graph(
-        self,
-        source: CacheTableSource,
-        *,
-        actual_rows: int,
-        padded_rows: int,
-    ) -> CacheTableSource:
-        """Return padded views backed by the current persistent device slot."""
-        if self._current_slot is None:
-            raise RuntimeError("flat table graph padding has no staged forward")
-        if actual_rows != self._current_rows:
-            raise RuntimeError(
-                "flat table graph padding rows disagree with staged forward: "
-                f"actual={actual_rows}, staged={self._current_rows}"
-            )
-        if padded_rows < actual_rows or padded_rows > self._max_rows:
-            raise RuntimeError(
-                "flat table graph padded rows exceed the planned staging shape: "
-                f"actual={actual_rows}, padded={padded_rows}, "
-                f"capacity={self._max_rows}"
-            )
-        slot = self._slots[self._current_slot]
-        if source is not slot.source:
-            raise RuntimeError(
-                "flat table graph padding did not receive the current staged source"
-            )
-        for group_id in self._group_ids:
-            cols = self._current_cols_by_group[group_id]
-            table = source.tables[group_id]
-            bases = source.base_offsets[group_id]
-            expected_table_shape = (actual_rows, cols)
-            if tuple(table.shape) != expected_table_shape or tuple(bases.shape) != (
-                actual_rows,
-            ):
-                raise RuntimeError(
-                    f"flat graph input shape for {group_id!r} is not the "
-                    f"current staging view: table={tuple(table.shape)}, "
-                    f"base={tuple(bases.shape)}, expected={expected_table_shape}"
-                )
-            if table.data_ptr() != slot.device_tables[group_id].data_ptr() or (
-                bases.data_ptr() != slot.device_bases[group_id].data_ptr()
-            ):
-                raise RuntimeError(
-                    f"flat graph input for {group_id!r} is not backed by the "
-                    "current persistent staging slot"
-                )
-            if padded_rows > actual_rows:
-                # Page 0/base 0 is the canonical dummy row for graph padding.
-                slot.device_tables[group_id][
-                    actual_rows * cols : padded_rows * cols
-                ].zero_()
-                slot.device_bases[group_id][actual_rows:padded_rows].zero_()
-            slot.table_views[group_id] = slot.device_tables[group_id][
-                : padded_rows * cols
-            ].view(padded_rows, cols)
-            slot.base_views[group_id] = slot.device_bases[group_id][:padded_rows]
         return slot.source
 
 
@@ -982,8 +1082,7 @@ def flat_block_tables_from_forward_op(
             # Radix builds / idle ops carry no flat tables at all.
             if max_cols_by_group is not None and (num_reqs or 0) > 0:
                 raise ValueError(
-                    "flat_block_tables_arrays is missing for a planned flat "
-                    "cache batch"
+                    "flat_block_tables_arrays is missing for a planned flat cache batch"
                 )
             return {}
         # Preserve plan validation as a fail-closed diagnostic even when an old

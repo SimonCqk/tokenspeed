@@ -276,6 +276,9 @@ def plan_tensors(components, *, block_size, alignment, budget_bytes):
 FlatCacheOwner = Literal["target", "draft"]
 
 FLAT_GRAPH_METADATA_ELEMENT_BYTES = 4
+# One row describes table source offset/width, table destination offset/width,
+# and source/destination base offsets for one owner/group.
+FLAT_PACKED_UNPACK_META_FIELDS = 6
 
 
 def require_sha256_hexdigest(value: str, *, field_name: str) -> None:
@@ -464,19 +467,39 @@ def _flat_forward_input_metadata_bytes(
     *,
     buffer_depth: int,
     batch_rows: int,
+    graph_batch_rows: int,
 ) -> int:
-    """Exact buffered int32 table plus base bytes for eager inputs."""
+    """Exact packed table/base payload plus graph-unpack header bytes."""
     for name, value in (("buffer_depth", buffer_depth), ("batch_rows", batch_rows)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"flat {name} must be an integer >= 0")
+    if (
+        isinstance(graph_batch_rows, bool)
+        or not isinstance(graph_batch_rows, int)
+        or graph_batch_rows < 0
+    ):
+        raise ValueError("flat graph_batch_rows must be an integer >= 0")
     if buffer_depth == 0:
         raise ValueError("flat buffer_depth must be positive")
-    return (
+    payload_bytes = (
         FLAT_GRAPH_METADATA_ELEMENT_BYTES
         * buffer_depth
         * batch_rows
         * sum(plan.max_export_cols + 1 for plan in group_table_plans)
     )
+    if graph_batch_rows == 0:
+        return payload_bytes
+    owner_group_count = sum(
+        int(plan.target_capture_cols > 0) + int(plan.draft_capture_cols > 0)
+        for plan in group_table_plans
+    )
+    header_bytes = (
+        FLAT_GRAPH_METADATA_ELEMENT_BYTES
+        * buffer_depth
+        * owner_group_count
+        * FLAT_PACKED_UNPACK_META_FIELDS
+    )
+    return payload_bytes + header_bytes
 
 
 @dataclass(frozen=True)
@@ -532,6 +555,7 @@ class FlatRuntimeMetadataPlan:
             self.group_table_plans,
             buffer_depth=self.forward_buffer_depth,
             batch_rows=self.max_scheduled_batch_rows,
+            graph_batch_rows=self.graph_batch_rows,
         )
 
     def graph_capture_cols_by_group(self, owner: FlatCacheOwner) -> dict[str, int]:
@@ -642,6 +666,7 @@ __all__ = [
     "BlockGeometry",
     "ComponentSpec",
     "FLAT_GRAPH_METADATA_ELEMENT_BYTES",
+    "FLAT_PACKED_UNPACK_META_FIELDS",
     "FlatBlockPoolPlan",
     "FlatCacheOwner",
     "FlatComponentTensorPlan",

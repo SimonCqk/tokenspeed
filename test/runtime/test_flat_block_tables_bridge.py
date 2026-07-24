@@ -143,15 +143,34 @@ class FlatBlockTablesBridgeTest(unittest.TestCase):
 
         runtime_metadata = SimpleNamespace(
             forward_buffer_depth=1,
+            graph_batch_rows=2,
             max_scheduled_batch_rows=2,
-            group_table_plans=(SimpleNamespace(group_id="history", max_export_cols=2),),
-            forward_input_bytes=24,
+            group_table_plans=(
+                SimpleNamespace(
+                    group_id="history",
+                    target_capture_cols=2,
+                    draft_capture_cols=2,
+                    max_export_cols=2,
+                ),
+                SimpleNamespace(
+                    group_id="state",
+                    target_capture_cols=1,
+                    draft_capture_cols=0,
+                    max_export_cols=1,
+                ),
+            ),
+            # Ten payload int32s plus target/draft owner unpack headers.
+            forward_input_bytes=112,
         )
         plan = SimpleNamespace(
             runtime_metadata=runtime_metadata,
-            pools=(SimpleNamespace(pool_id="pool", total_blocks=8),),
+            pools=(
+                SimpleNamespace(pool_id="history_pool", total_blocks=8),
+                SimpleNamespace(pool_id="state_pool", total_blocks=4),
+            ),
             scheduler_group_specs=(
-                SimpleNamespace(group_id="history", pool_id="pool"),
+                SimpleNamespace(group_id="history", pool_id="history_pool"),
+                SimpleNamespace(group_id="state", pool_id="state_pool"),
             ),
         )
         staging = self.staging_cls(plan, device="cpu")
@@ -159,41 +178,93 @@ class FlatBlockTablesBridgeTest(unittest.TestCase):
         class Op:
             cache_generation = 0
             fail = False
+            copy_calls = 0
 
             @staticmethod
             def flat_block_table_group_ids():
-                return ("history",)
+                return ("history", "state")
 
-            def copy_flat_block_table_to(
-                self, group_id, table_destination, base_destination, upper_bound
+            def copy_flat_block_tables_to(
+                self,
+                destination,
+                page_id_upper_bounds,
+                copy_metadata,
+                payload_offset,
             ):
-                self_outer.assertEqual(group_id, "history")
-                self_outer.assertEqual(upper_bound, 8)
+                self.copy_calls += 1
+                self_outer.assertEqual(page_id_upper_bounds.tolist(), [8, 4])
+                self_outer.assertEqual(payload_offset, 18)
                 if self.fail:
                     raise RuntimeError("copy failed")
-                table_destination[:2].copy_(
-                    self_outer.torch.tensor([1, 2], dtype=self_outer.torch.int32)
+                destination[18:23].copy_(
+                    self_outer.torch.tensor(
+                        [1, 2, 0, 3, 0],
+                        dtype=self_outer.torch.int32,
+                    )
                 )
-                base_destination[0] = 0
-                return (1, 2)
+                copy_metadata.copy_(
+                    self_outer.torch.tensor(
+                        (
+                            (1, 2, 18, 20),
+                            (1, 1, 21, 22),
+                        ),
+                        dtype=self_outer.torch.int64,
+                    )
+                )
+                return 23
 
         self_outer = self
         op = Op()
         original = staging.stage(op, num_reqs=1)
+        self.assertEqual(op.copy_calls, 1)
+        self.assertFalse(hasattr(op, "flat_block_tables_arrays"))
         original_ptr = original.tables["history"].data_ptr()
+        self.assertIsNotNone(original.packed)
+        self.assertEqual(
+            original.tables["history"].untyped_storage().data_ptr(),
+            original.base_offsets["history"].untyped_storage().data_ptr(),
+        )
+        self.assertEqual(
+            original.tables["history"].untyped_storage().data_ptr(),
+            original.packed.buffer.untyped_storage().data_ptr(),
+        )
+        packed_owner = original.packed.bind("target", ("history", "state"))
+        self.assertEqual(
+            packed_owner.unpack_meta.tolist(),
+            [
+                [18, 2, 0, 2, 20, 4],
+                [21, 1, 6, 1, 22, 8],
+            ],
+        )
+        self.assertEqual(
+            original.packed.bind("draft", ("history",)).unpack_meta.tolist(),
+            [[18, 2, 0, 2, 20, 4]],
+        )
+        self.assertEqual(original.tables["history"].tolist(), [[1, 2]])
+        self.assertEqual(original.base_offsets["history"].tolist(), [0])
+        self.assertEqual(original.tables["state"].tolist(), [[3]])
+        self.assertEqual(original.base_offsets["state"].tolist(), [0])
+        original_table = original.tables["history"]
+        original_base = original.base_offsets["history"]
         self.assertIs(staging.stage(op, num_reqs=1), original)
+        self.assertIs(original.tables["history"], original_table)
+        self.assertIs(original.base_offsets["history"], original_base)
 
         op.cache_generation = 1
         refreshed = staging.stage(op, num_reqs=1)
         self.assertIsNot(refreshed, original)
         self.assertEqual(original.generation, 0)
         self.assertEqual(refreshed.generation, 1)
+        self.assertIs(refreshed.tables["history"], original_table)
+        self.assertIs(refreshed.base_offsets["history"], original_base)
         self.assertEqual(refreshed.tables["history"].data_ptr(), original_ptr)
+        self.assertEqual(op.copy_calls, 3)
 
         op.cache_generation = 2
         op.fail = True
         with self.assertRaisesRegex(RuntimeError, "copy failed"):
             staging.stage(op, num_reqs=1)
+        self.assertEqual(op.copy_calls, 4)
         self.assertIs(staging._slots[0].source, refreshed)
         self.assertEqual(staging._slots[0].source.generation, 1)
 

@@ -162,22 +162,22 @@ bool Scheduler::deferFlatTerminal(const std::string& request_id, FlatPendingTerm
     }
     request->DeferFlatTerminal(terminal);
     (void)request->FlatCompletionState().CancelOutstanding();
-    flat_reserved_pages_.Erase(request_id);
+    request->FlatReservation().Clear();
     return true;
 }
 
 void Scheduler::applyFlatFinish(const std::string& request_id) {
     pending_forward_results_.erase(request_id);
-    flat_reserved_pages_.Erase(request_id);
     if (auto req = find_request(request_id)) {
-        req->Apply(fsm::FlatFinishEvent{&coordinator_});
+        req->FlatReservation().Clear();
+        req->Apply(fsm::FinishEvent{&coordinator_});
     }
 }
 
 void Scheduler::applyFlatAbort(const std::string& request_id) {
     pending_forward_results_.erase(request_id);
-    flat_reserved_pages_.Erase(request_id);
     if (Request* req = find_request(request_id); req != nullptr) {
+        req->FlatReservation().Clear();
         req->Apply(fsm::AbortEvent{&coordinator_});
     }
 }
@@ -186,8 +186,8 @@ bool Scheduler::applyPendingFlatTerminal(Request* request) {
     if (request == nullptr || !request->HasPendingFlatTerminal()) {
         return false;
     }
-    _assert(!request->FlatCompletionState().HasOutstanding(),
-            "flat terminal cannot release tables before every completion fence retires");
+    _assert(request->FlatCompletionState().Snapshot().outstanding_count == 1,
+            "flat terminal requires the final completion fence");
     std::optional<FlatPendingTerminal> terminal = request->TakePendingFlatTerminal();
     _assert(terminal.has_value(), "flat terminal disappeared while applying it");
     if (*terminal == FlatPendingTerminal::kAbort) {
@@ -220,21 +220,25 @@ void Scheduler::handleEvent(const forward::ExtendResult& event) {
             return;
         }
         _assert(fifo_prepared.ticket.has_value(), "non-stale flat completion has no retirement ticket");
+        const bool final_fence = request->FlatCompletionState().Snapshot().outstanding_count == 1;
         if (fifo_prepared.disposition == FlatKVCompletionDisposition::kApplied) {
             _assert(fifo_prepared.ready.has_value(), "applied flat completion has no ready view");
-            PreparedFlatCompletion prepared;
-            PrepareFlatCompletion(*fifo_prepared.ready, request, prepared);
-            CommitFlatCompletion(*fifo_prepared.ready, prepared);
+            ApplyFlatCompletion(*fifo_prepared.ready, request);
         } else {
             _assert(!fifo_prepared.ready.has_value(), "canceled flat completion unexpectedly has a ready view");
         }
-        const std::size_t outstanding_after =
-            flat_completion_ledger_.Commit(request->FlatCompletionState(), *fifo_prepared.ticket);
-        if (outstanding_after == 0) {
+
+        // The current event is the physical execution fence for the validated
+        // FIFO front. When it is also the last fence, finish every fallible
+        // terminal/reclaim/reservation update before retiring the ticket.
+        // Failures propagate to the event-loop boundary; this scheduler does
+        // not attempt to resume from the partially applied completion.
+        if (final_fence) {
             if (!applyPendingFlatTerminal(request)) {
                 FinalizeFlatQuiescentState(request);
             }
         }
+        (void)flat_completion_ledger_.Commit(request->FlatCompletionState(), *fifo_prepared.ticket);
         return;
     }
     std::size_t retired = 0;
@@ -256,161 +260,138 @@ void Scheduler::handleEvent(const forward::ExtendResult& event) {
 }
 
 #if TOKENSPEED_FLAT_KVCACHE
-Scheduler::PreparedFlatCompletion::~PreparedFlatCompletion() noexcept {
-    if (!rollback_progress) {
-        return;
-    }
-    if (progress == nullptr || progress_slot == nullptr || progress->base_hashes.size() < original_base_hash_count) {
-        std::terminate();
-    }
-    while (progress->base_hashes.size() > original_base_hash_count) {
-        progress->base_hashes.pop_back();
-    }
-    if (inserted_progress) {
-        if (!progress_slot->has_value() || &progress_slot->value() != progress) {
-            std::terminate();
-        }
-        progress_slot->reset();
-    }
-}
-
-void Scheduler::PrepareFlatCompletion(const FlatKVReadyCompletion& ready, Request* request,
-                                      PreparedFlatCompletion& prepared) {
+void Scheduler::ApplyFlatCompletion(const FlatKVReadyCompletion& ready, Request* request) {
     _assert(request != nullptr && request->Id() == ready.request_id, "active flat KV completion lost its request");
-    prepared.request = request;
+    bool append_tokens = false;
     if (ready.apply_fsm_result) {
-        prepared.append_tokens = request->PrepareFlatResultAppend(ready.tokens.size());
+        append_tokens = request->PrepareFlatResultAppend(ready.tokens.size());
     }
 
     std::optional<FlatKVWriteProgress>& progress_slot = request->FlatWriteProgress();
-    prepared.progress_slot = &progress_slot;
+    const bool inserted_progress = !progress_slot.has_value();
     if (!progress_slot.has_value()) {
         FlatKVWriteProgress initial;
         initial.table_generation = ready.table_generation;
-        initial.published_raw_ends.reserve(config_.paged_cache_groups.size());
-        for (const PagedCacheGroupConfig& group : config_.paged_cache_groups) {
+        initial.published_raw_ends.reserve(coordinator_.Schema().size());
+        for (const KvCacheGroupSchema& group : coordinator_.Schema()) {
             initial.published_raw_ends.push_back(ready.dispatch_raw_start / group.entry_stride_tokens *
                                                  group.entry_stride_tokens);
         }
         progress_slot.emplace(std::move(initial));
-        prepared.inserted_progress = true;
     }
-    prepared.progress = &*progress_slot;
-    prepared.original_base_hash_count = prepared.progress->base_hashes.size();
-    prepared.rollback_progress = true;
-    FlatKVWriteProgress& progress = *prepared.progress;
+    FlatKVWriteProgress& progress = *progress_slot;
+    const std::size_t original_base_hash_count = progress.base_hashes.size();
 
-    _assert(progress.table_generation == ready.table_generation,
-            "flat write progress generation disagrees with completion ledger");
-    _assert(progress.published_raw_ends.size() == ready.ready_raw_ends.size(),
-            "flat write progress group count disagrees with completion");
+    try {
+        _assert(progress.table_generation == ready.table_generation,
+                "flat write progress generation disagrees with completion ledger");
+        _assert(progress.published_raw_ends.size() == ready.ready_raw_ends.size(),
+                "flat write progress group count disagrees with completion");
 
-    std::int32_t max_hash_raw_end = 0;
-    for (std::size_t i = 0; i < ready.ready_raw_ends.size(); ++i) {
-        const std::int32_t ready_raw_end = ready.ready_raw_ends[i];
-        _assert(ready_raw_end >= progress.published_raw_ends[i],
-                "flat completion would move an aligned ready end backward");
-        if (config_.paged_cache_groups[i].prefix_role != PrefixRole::None) {
-            max_hash_raw_end = std::max(max_hash_raw_end, ready_raw_end);
+        std::int32_t max_hash_raw_end = 0;
+        for (std::size_t i = 0; i < ready.ready_raw_ends.size(); ++i) {
+            const std::int32_t ready_raw_end = ready.ready_raw_ends[i];
+            _assert(ready_raw_end >= progress.published_raw_ends[i],
+                    "flat completion would move an aligned ready end backward");
+            if (coordinator_.GroupSchema(i).prefix_role != KvPrefixRole::kNone) {
+                max_hash_raw_end = std::max(max_hash_raw_end, ready_raw_end);
+            }
         }
-    }
 
-    if (!config_.disable_prefix_cache && max_hash_raw_end > 0) {
-        const std::int32_t base_block_size = coordinator_.BaseBlockSize();
-        const std::int32_t required_base_pages = max_hash_raw_end / base_block_size;
-        _assert(required_base_pages >= 0, "flat completion produced a negative base-page count");
-        _assert(progress.base_hashes.size() <= static_cast<std::size_t>(required_base_pages),
-                "flat completion accepted end moved behind the hashed prefix");
-        if (progress.base_hashes.size() < static_cast<std::size_t>(required_base_pages)) {
-            const std::size_t first_fresh_page = progress.base_hashes.size();
-            const std::size_t required_pages = static_cast<std::size_t>(required_base_pages);
-            const std::size_t page_size = static_cast<std::size_t>(base_block_size);
-            const std::size_t first_token = first_fresh_page * page_size;
-            const std::size_t past_last_token = required_pages * page_size;
-            const std::size_t stable_tokens = static_cast<std::size_t>(request->TokenSize());
-            const std::size_t prospective_tokens = stable_tokens + (prepared.append_tokens ? ready.tokens.size() : 0);
-            _assert(past_last_token <= prospective_tokens,
-                    "accepted flat KV pages exceed prospective stable request tokens");
+        if (!config_.disable_prefix_cache && max_hash_raw_end > 0) {
+            const std::int32_t base_block_size = coordinator_.BaseBlockSize();
+            const std::int32_t required_base_pages = max_hash_raw_end / base_block_size;
+            _assert(required_base_pages >= 0, "flat completion produced a negative base-page count");
+            _assert(progress.base_hashes.size() <= static_cast<std::size_t>(required_base_pages),
+                    "flat completion accepted end moved behind the hashed prefix");
+            if (progress.base_hashes.size() < static_cast<std::size_t>(required_base_pages)) {
+                const std::size_t first_fresh_page = progress.base_hashes.size();
+                const std::size_t required_pages = static_cast<std::size_t>(required_base_pages);
+                const std::size_t page_size = static_cast<std::size_t>(base_block_size);
+                const std::size_t first_token = first_fresh_page * page_size;
+                const std::size_t past_last_token = required_pages * page_size;
+                const std::size_t stable_tokens = static_cast<std::size_t>(request->TokenSize());
+                const std::size_t prospective_tokens = stable_tokens + (append_tokens ? ready.tokens.size() : 0);
+                _assert(past_last_token <= prospective_tokens,
+                        "accepted flat KV pages exceed prospective stable request tokens");
 
-            std::span<const std::int32_t> stable_fresh_tokens;
-            const std::size_t stable_end = std::min(past_last_token, stable_tokens);
-            if (first_token < stable_end) {
-                stable_fresh_tokens = request->GetTokenSlice(TokenContainer::Window{
-                    .begin = static_cast<std::int32_t>(first_token),
-                    .size = static_cast<std::int32_t>(stable_end - first_token),
-                });
+                std::span<const std::int32_t> stable_fresh_tokens;
+                const std::size_t stable_end = std::min(past_last_token, stable_tokens);
+                if (first_token < stable_end) {
+                    stable_fresh_tokens = request->GetTokenSlice(TokenContainer::Window{
+                        .begin = static_cast<std::int32_t>(first_token),
+                        .size = static_cast<std::int32_t>(stable_end - first_token),
+                    });
+                }
+
+                std::span<const std::int32_t> appended_fresh_tokens;
+                if (past_last_token > stable_tokens) {
+                    const std::size_t appended_begin = std::max(first_token, stable_tokens) - stable_tokens;
+                    const std::size_t appended_count = past_last_token - std::max(first_token, stable_tokens);
+                    _assert(appended_begin + appended_count <= ready.tokens.size(),
+                            "flat completion result tokens do not cover the hash interval");
+                    appended_fresh_tokens =
+                        std::span<const std::int32_t>{ready.tokens}.subspan(appended_begin, appended_count);
+                }
+                _assert(stable_fresh_tokens.size() + appended_fresh_tokens.size() == past_last_token - first_token,
+                        "flat completion hash spans have the wrong combined size");
+
+                const std::size_t fresh_page_count = required_pages - first_fresh_page;
+                progress.base_hashes.reserve(required_pages);
+                const std::string empty_prior;
+                const std::string* prior = progress.base_hashes.empty() ? &empty_prior : &progress.base_hashes.back();
+                for (std::size_t page_index = 0; page_index < fresh_page_count; ++page_index) {
+                    const std::size_t offset = page_index * page_size;
+                    const std::size_t past_page = offset + page_size;
+                    const std::size_t stable_part_begin = std::min(offset, stable_fresh_tokens.size());
+                    const std::size_t stable_part_end = std::min(past_page, stable_fresh_tokens.size());
+                    const std::span<const std::int32_t> stable_part =
+                        stable_fresh_tokens.subspan(stable_part_begin, stable_part_end - stable_part_begin);
+                    const std::size_t appended_part_begin =
+                        offset > stable_fresh_tokens.size() ? offset - stable_fresh_tokens.size() : 0;
+                    const std::size_t appended_part_end =
+                        past_page > stable_fresh_tokens.size() ? past_page - stable_fresh_tokens.size() : 0;
+                    const std::span<const std::int32_t> appended_part =
+                        appended_fresh_tokens.subspan(appended_part_begin, appended_part_end - appended_part_begin);
+                    _assert(stable_part.size() + appended_part.size() == page_size,
+                            "flat completion hash page is not fully covered by stable and appended spans");
+                    progress.base_hashes.push_back(HashPageSegments(stable_part, appended_part, *prior));
+                    prior = &progress.base_hashes.back();
+                }
+                _assert(progress.base_hashes.size() == required_pages,
+                        "flat completion hash count disagrees with its page interval");
             }
-
-            std::span<const std::int32_t> appended_fresh_tokens;
-            if (past_last_token > stable_tokens) {
-                const std::size_t appended_begin = std::max(first_token, stable_tokens) - stable_tokens;
-                const std::size_t appended_count = past_last_token - std::max(first_token, stable_tokens);
-                _assert(appended_begin + appended_count <= ready.tokens.size(),
-                        "flat completion result tokens do not cover the hash interval");
-                appended_fresh_tokens =
-                    std::span<const std::int32_t>{ready.tokens}.subspan(appended_begin, appended_count);
-            }
-            _assert(stable_fresh_tokens.size() + appended_fresh_tokens.size() == past_last_token - first_token,
-                    "flat completion hash spans have the wrong combined size");
-
-            const std::size_t fresh_page_count = required_pages - first_fresh_page;
-            progress.base_hashes.reserve(required_pages);
-            const std::string empty_prior;
-            const std::string* prior = progress.base_hashes.empty() ? &empty_prior : &progress.base_hashes.back();
-            for (std::size_t page_index = 0; page_index < fresh_page_count; ++page_index) {
-                const std::size_t offset = page_index * page_size;
-                const std::size_t past_page = offset + page_size;
-                const std::size_t stable_part_begin = std::min(offset, stable_fresh_tokens.size());
-                const std::size_t stable_part_end = std::min(past_page, stable_fresh_tokens.size());
-                const std::span<const std::int32_t> stable_part =
-                    stable_fresh_tokens.subspan(stable_part_begin, stable_part_end - stable_part_begin);
-                const std::size_t appended_part_begin =
-                    offset > stable_fresh_tokens.size() ? offset - stable_fresh_tokens.size() : 0;
-                const std::size_t appended_part_end =
-                    past_page > stable_fresh_tokens.size() ? past_page - stable_fresh_tokens.size() : 0;
-                const std::span<const std::int32_t> appended_part =
-                    appended_fresh_tokens.subspan(appended_part_begin, appended_part_end - appended_part_begin);
-                _assert(stable_part.size() + appended_part.size() == page_size,
-                        "flat completion hash page is not fully covered by stable and appended spans");
-                progress.base_hashes.push_back(HashPageSegments(stable_part, appended_part, *prior));
-                prior = &progress.base_hashes.back();
-            }
-            _assert(progress.base_hashes.size() == required_pages,
-                    "flat completion hash count disagrees with its page interval");
+            coordinator_.PublishReadyBlocks(request->FlatBlockTablesRef(), progress.base_hashes,
+                                            progress.published_raw_ends, ready.ready_raw_ends);
         }
-        prepared.publication.emplace(coordinator_.PrepareReadyBlocks(
-            request->FlatBlockTablesRef(), progress.base_hashes, progress.published_raw_ends, ready.ready_raw_ends));
+    } catch (...) {
+        if (inserted_progress) {
+            progress_slot.reset();
+        } else {
+            while (progress.base_hashes.size() > original_base_hash_count) {
+                progress.base_hashes.pop_back();
+            }
+        }
+        throw;
     }
-}
 
-void Scheduler::CommitFlatCompletion(const FlatKVReadyCompletion& ready, PreparedFlatCompletion& prepared) noexcept {
-    if (prepared.request == nullptr || prepared.progress == nullptr || !prepared.rollback_progress) {
-        std::terminate();
-    }
-    prepared.request->CommitFlatResultAppend(ready.tokens, prepared.append_tokens);
-    if (prepared.publication.has_value()) {
-        prepared.publication->Commit();
-    }
-    if (prepared.progress->published_raw_ends.size() != ready.ready_raw_ends.size()) {
-        std::terminate();
-    }
+    request->CommitFlatResultAppend(ready.tokens, append_tokens);
     for (std::size_t i = 0; i < ready.ready_raw_ends.size(); ++i) {
-        prepared.progress->published_raw_ends[i] = ready.ready_raw_ends[i];
+        progress.published_raw_ends[i] = ready.ready_raw_ends[i];
     }
-    prepared.progress->accepted_raw_end = ready.accepted_raw_end;
+    progress.accepted_raw_end = ready.accepted_raw_end;
 
     if (ready.accepted_raw_end == ready.dispatch_raw_end) {
-        coordinator_.ReclaimExpired(prepared.request->FlatBlockTablesRef(), ready.accepted_raw_end);
+        coordinator_.ReclaimExpired(request->FlatBlockTablesRef(), ready.accepted_raw_end);
     }
-    prepared.rollback_progress = false;
 }
 
-void Scheduler::FinalizeFlatQuiescentState(Request* request) noexcept {
+void Scheduler::FinalizeFlatQuiescentState(Request* request) {
     if (request == nullptr || request->FlatBlockTablesEmpty()) {
         return;
     }
-    _assert(!request->FlatCompletionState().HasOutstanding(),
-            "flat reclaim/rewind requires a request-quiescent completion ledger");
+    _assert(request->FlatCompletionState().Snapshot().outstanding_count == 1,
+            "flat reclaim/rewind requires the final completion fence");
     std::optional<FlatKVWriteProgress>& progress_slot = request->FlatWriteProgress();
     if (!progress_slot.has_value()) {
         return;
@@ -422,6 +403,23 @@ void Scheduler::FinalizeFlatQuiescentState(Request* request) noexcept {
     coordinator_.ReclaimExpired(request->FlatBlockTablesRef(), progress.accepted_raw_end);
     coordinator_.RewindTail(request->FlatBlockTablesRef(), progress.accepted_raw_end,
                             /*retain_raw_end=*/progress.accepted_raw_end);
+
+    // Rewind may change the tail capacity that the request's existing account
+    // was computed from. Keep only the future slots promised beyond the next
+    // schedulable decode; PrefillDone still owes that first decode as well.
+    std::size_t reserved_slots = 0;
+    if (request->Is<fsm::PrefillDone>()) {
+        reserved_slots = static_cast<std::size_t>(config_.overlap_schedule_depth) + 1;
+    } else if (request->Is<fsm::Decoding>()) {
+        reserved_slots = static_cast<std::size_t>(config_.overlap_schedule_depth);
+    }
+    if (reserved_slots == 0) {
+        request->FlatReservation().Clear();
+        return;
+    }
+    const std::int32_t reserved_tokens =
+        decodeReservationTokensForSlots(request->GetReserveNumTokensInNextScheduleEvent(), reserved_slots);
+    request->FlatReservation().Set(coordinator_.BlocksNeededByPool(request->FlatBlockTablesRef(), reserved_tokens));
 }
 #endif
 

@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -33,6 +34,27 @@ namespace {
 
 static_assert(std::is_same_v<decltype(FlatKVReadyCompletion::request_id), const std::string&>);
 static_assert(std::is_same_v<decltype(FlatKVReadyCompletion::tokens), std::span<const std::int32_t>>);
+
+std::vector<KvCacheGroupSchema> CompletionSchema(std::initializer_list<std::int32_t> strides) {
+    std::vector<KvCacheGroupSchema> schema;
+    schema.reserve(strides.size());
+    std::size_t index = 0;
+    for (const std::int32_t stride : strides) {
+        schema.push_back(KvCacheGroupSchema{
+            .group_id = std::to_string(index++),
+            .kind = AttnKind::kFull,
+            .block_size = stride,
+            .rows_per_page = 1,
+            .entry_stride_tokens = stride,
+            .sliding_window = 0,
+            .pool_index = 0,
+            .prefix_role = KvPrefixRole::kHistoryAnchor,
+            .table_layout = KvTableLayout::kAbsolute,
+            .owner_mask = 0,
+        });
+    }
+    return schema;
+}
 
 forward::FlatKVCompletion Complete(const FlatKVCompletionInput& input, std::int32_t accepted_raw_end) {
     return forward::FlatKVCompletion{
@@ -60,10 +82,13 @@ std::size_t CommitPrepared(FlatKVCompletionLedger& ledger, FlatKVCompletionState
 }
 
 TEST(FlatKVCompletionLedgerTest, ValidatesFixedDepthAndGroupStrides) {
-    EXPECT_THROW((FlatKVCompletionLedger{0, {1}}), std::invalid_argument);
-    EXPECT_THROW((FlatKVCompletionLedger{3, {1}}), std::invalid_argument);
-    EXPECT_THROW((FlatKVCompletionLedger{1, {}}), std::invalid_argument);
-    EXPECT_THROW((FlatKVCompletionLedger{1, {0}}), std::invalid_argument);
+    const std::vector<KvCacheGroupSchema> valid = CompletionSchema({1});
+    EXPECT_THROW((FlatKVCompletionLedger{0, valid}), std::invalid_argument);
+    EXPECT_THROW((FlatKVCompletionLedger{3, valid}), std::invalid_argument);
+    EXPECT_THROW((FlatKVCompletionLedger{1, std::span<const KvCacheGroupSchema>{}}), std::invalid_argument);
+    std::vector<KvCacheGroupSchema> invalid = CompletionSchema({1});
+    invalid[0].entry_stride_tokens = 0;
+    EXPECT_THROW((FlatKVCompletionLedger{1, invalid}), std::invalid_argument);
 }
 
 TEST(FlatKVCompletionLedgerTest, PrepareDerivesStaticGroupBoundariesWithoutRetiringFront) {
@@ -71,9 +96,10 @@ TEST(FlatKVCompletionLedgerTest, PrepareDerivesStaticGroupBoundariesWithoutRetir
         std::int32_t accepted;
         std::vector<std::int32_t> expected;
     };
+    const std::vector<KvCacheGroupSchema> schema = CompletionSchema({1, 4, 128});
     for (const Case& test :
          std::vector<Case>{{0, {0, 0, 0}}, {7, {7, 4, 0}}, {128, {128, 128, 128}}, {585, {585, 584, 512}}}) {
-        FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/1, {1, 4, 128});
+        FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/1, schema);
         FlatKVCompletionState state;
         const FlatKVCompletionInput input = Dispatch(ledger, state, 0, 585);
 
@@ -91,7 +117,8 @@ TEST(FlatKVCompletionLedgerTest, PrepareDerivesStaticGroupBoundariesWithoutRetir
 }
 
 TEST(FlatKVCompletionLedgerTest, RejectsOutOfOrderAndRetiresStrictFifo) {
-    FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/2, {1});
+    const std::vector<KvCacheGroupSchema> schema = CompletionSchema({1});
+    FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/2, schema);
     FlatKVCompletionState state;
     const FlatKVCompletionInput first = Dispatch(ledger, state, 0, 4);
     const FlatKVCompletionInput second = Dispatch(ledger, state, 4, 8);
@@ -109,7 +136,8 @@ TEST(FlatKVCompletionLedgerTest, RejectsOutOfOrderAndRetiresStrictFifo) {
 }
 
 TEST(FlatKVCompletionLedgerTest, RejectsStaleGenerationAndRetiredSequenceWithoutMutation) {
-    FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/1, {1});
+    const std::vector<KvCacheGroupSchema> schema = CompletionSchema({1});
+    FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/1, schema);
     FlatKVCompletionState retired_state;
     const FlatKVCompletionInput stale_generation = Dispatch(ledger, retired_state, 0, 4);
     FlatKVCompletionState current_state;
@@ -126,7 +154,8 @@ TEST(FlatKVCompletionLedgerTest, RejectsStaleGenerationAndRetiredSequenceWithout
 }
 
 TEST(FlatKVCompletionLedgerTest, ShortAcceptanceQuarantinesSuccessorUntilItsFence) {
-    FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/2, {1, 4});
+    const std::vector<KvCacheGroupSchema> schema = CompletionSchema({1, 4});
+    FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/2, schema);
     FlatKVCompletionState state;
     const FlatKVCompletionInput first = Dispatch(ledger, state, 0, 4);
     const FlatKVCompletionInput successor = Dispatch(ledger, state, 4, 8);
@@ -149,7 +178,8 @@ TEST(FlatKVCompletionLedgerTest, ShortAcceptanceQuarantinesSuccessorUntilItsFenc
 }
 
 TEST(FlatKVCompletionLedgerTest, TerminalCancellationRetainsEveryExecutionFence) {
-    FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/2, {1});
+    const std::vector<KvCacheGroupSchema> schema = CompletionSchema({1});
+    FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/2, schema);
     FlatKVCompletionState state;
     const FlatKVCompletionInput first = Dispatch(ledger, state, 0, 4);
     const FlatKVCompletionInput second = Dispatch(ledger, state, 4, 8);
@@ -177,9 +207,10 @@ TEST(FlatKVCompletionLedgerTest, RejectsInvalidCompletionPayloadBeforeCommit) {
         {"canceled before dispatch", 7, {}, true},      {"canceled after dispatch", 13, {}, true},
         {"mid-prefill result tokens", 12, {99}, false},
     };
+    const std::vector<KvCacheGroupSchema> schema = CompletionSchema({1});
     for (const Case& test : cases) {
         SCOPED_TRACE(test.name);
-        FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/1, {1});
+        FlatKVCompletionLedger ledger(/*max_outstanding_per_request=*/1, schema);
         FlatKVCompletionState state;
         const FlatKVCompletionInput input = Dispatch(ledger, state, 8, 12, /*apply_fsm_result=*/false);
         if (test.canceled) {

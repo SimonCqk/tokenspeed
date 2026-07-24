@@ -30,6 +30,9 @@ from tokenspeed.runtime.configs.flat_kv_contract import (  # noqa: E402
     CACHE_OWNER_DRAFT,
     CACHE_OWNER_TARGET,
 )
+from tokenspeed.runtime.configs.flat_memory_plan import (  # noqa: E402
+    FLAT_PACKED_UNPACK_META_FIELDS,
+)
 
 PAGE_SIZE = 64
 
@@ -135,7 +138,7 @@ def test_production_specs_pin_v4_storage_geometry(production_plan) -> None:
     )
     assert all(
         spec.block_size == spec.rows_per_page * spec.entry_stride_tokens
-        and spec.owner_mask == CACHE_OWNER_TARGET
+        and spec.owner_mask & CACHE_OWNER_TARGET
         for spec in specs
     )
 
@@ -226,6 +229,14 @@ def test_owner_union_and_pool_accounting_come_from_one_plan(production_plan) -> 
     scheduler = {spec.group_id: spec for spec in production_plan.scheduler_group_specs}
 
     assert set(scheduler) == target_ids | draft_ids
+    assert all(
+        spec is scheduler[spec.group_id]
+        for spec in production_plan.target_owner_group_specs
+    )
+    assert all(
+        spec is scheduler[spec.group_id]
+        for spec in production_plan.draft_owner_group_specs
+    )
     for group_id, spec in scheduler.items():
         expected_mask = CACHE_OWNER_TARGET
         if group_id in draft_ids:
@@ -245,6 +256,22 @@ def test_owner_union_and_pool_accounting_come_from_one_plan(production_plan) -> 
     assert production_plan.payload_bytes == sum(
         pool.total_blocks * pool.bytes_per_block for pool in production_plan.pools
     )
+
+
+def test_plan_rejects_noncanonical_scheduler_membership(production_plan) -> None:
+    specs = production_plan.scheduler_group_specs
+    cases = (
+        ("duplicate", (specs[0], *specs), "unique group ids"),
+        (
+            "ownerless",
+            (replace(specs[0], owner_mask=0), *specs[1:]),
+            "assign every group to an owner",
+        ),
+    )
+
+    for _name, invalid_specs, error in cases:
+        with pytest.raises(ValueError, match=error):
+            replace(production_plan, scheduler_group_specs=invalid_specs)
 
 
 def test_graph_and_forward_metadata_are_exact_owner_local_shapes(
@@ -267,12 +294,19 @@ def test_graph_and_forward_metadata_are_exact_owner_local_shapes(
     assert metadata.graph_metadata_bytes == target_bytes + draft_bytes
     assert metadata.forward_buffer_depth == 2
     assert metadata.max_scheduled_batch_rows == 3
-    assert metadata.forward_input_bytes == (
+    payload_bytes = (
         4
         * metadata.forward_buffer_depth
         * metadata.max_scheduled_batch_rows
         * sum(item.max_export_cols + 1 for item in metadata.group_table_plans)
     )
+    header_bytes = (
+        4
+        * metadata.forward_buffer_depth
+        * FLAT_PACKED_UNPACK_META_FIELDS
+        * (len(target_cols) + len(draft_cols))
+    )
+    assert metadata.forward_input_bytes == payload_bytes + header_bytes
     assert production_plan.device_cache_total_bytes == (
         production_plan.payload_bytes
         + metadata.graph_metadata_bytes

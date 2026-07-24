@@ -53,6 +53,7 @@ from tokenspeed.runtime.engine.scheduler_utils import (  # noqa: E402
     pool_to_paged_cache_groups,
 )
 from tokenspeed.runtime.execution.forward_batch_info import ForwardMode  # noqa: E402
+from tokenspeed.runtime.flat_cache_tables import FlatCacheTableOwnerView  # noqa: E402
 from tokenspeed.runtime.layers.attention.backends.deepseek_v4 import (  # noqa: E402
     DeepseekV4AttentionBackend,
 )
@@ -194,7 +195,9 @@ def test_scheduler_plan_staging_backend_and_swa_writer_share_one_page_contract()
     group_ids = {spec.group_id for spec in plan.scheduler_group_specs}
     assert set(op.flat_block_table_group_ids()) == group_ids
     # The production plan, not a parallel test schema, sizes persistent staging.
-    source = FlatBlockTableStagingBuffers(plan, device="cuda").stage(op, num_reqs=1)
+    staging = FlatBlockTableStagingBuffers(plan, device="cuda")
+    with torch.cuda.nvtx.range("v4_flat_stage"):
+        source = staging.stage(op, num_reqs=1)
 
     backend = _backend(plan)
     backend.init_forward_metadata(
@@ -213,6 +216,22 @@ def test_scheduler_plan_staging_backend_and_swa_writer_share_one_page_contract()
     assert not metadata.cache.has_legacy_block_table
     assert set(metadata.cache.paged_cache_block_tables) == group_ids
     assert set(metadata.cache.paged_cache_block_table_base_offsets) == group_ids
+
+    target_source = FlatCacheTableOwnerView(
+        tuple(spec.group_id for spec in plan.target_owner_group_specs)
+    ).bind(source, owner="target")
+    assert target_source is not None
+    with torch.cuda.nvtx.range("v4_flat_graph_unpack"):
+        backend._refresh_cuda_graph_flat_packed(target_source, bs=1, actual_bs=1)
+    for group_id, table in target_source.tables.items():
+        graph_table = backend._cuda_graph_paged_cache_block_tables[group_id]
+        cols = table.shape[1]
+        assert torch.equal(graph_table[:, :cols], table)
+        assert torch.all(graph_table[:, cols:] == -1)
+        assert torch.equal(
+            backend._cuda_graph_paged_cache_base_offsets[group_id],
+            target_source.base_offsets[group_id],
+        )
 
     # One request crosses c4 and c128 compression boundaries. This proves the
     # same staged group set preserves heterogeneous raw spans without assuming
@@ -285,3 +304,7 @@ def test_scheduler_plan_staging_backend_and_swa_writer_share_one_page_contract()
 
     assert _changed_pages(before, swa) == expected_pages
     assert torch.equal(swa[0], before[0])
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

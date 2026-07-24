@@ -40,6 +40,7 @@
 #include "utils.h"
 
 #if TOKENSPEED_FLAT_KVCACHE
+#include "cache/flat_reservation_tracker.h"
 #include "scheduler/flat_kv_completion_ledger.h"
 #endif
 
@@ -148,6 +149,27 @@ public:
     }
 
 #if TOKENSPEED_FLAT_KVCACHE
+    void AttachFlatReservation(FlatReservationTracker& tracker) {
+        if (flat_reservation_.has_value()) {
+            throw std::logic_error("Request already has a flat reservation account");
+        }
+        flat_reservation_.emplace(tracker.MakeAccount());
+    }
+
+    FlatReservationTracker::Account& FlatReservation() noexcept {
+        if (!flat_reservation_.has_value()) {
+            std::terminate();
+        }
+        return *flat_reservation_;
+    }
+
+    const FlatReservationTracker::Account& FlatReservation() const noexcept {
+        if (!flat_reservation_.has_value()) {
+            std::terminate();
+        }
+        return *flat_reservation_;
+    }
+
     FlatKVCompletionState& FlatCompletionState() noexcept { return flat_completion_state_; }
     const FlatKVCompletionState& FlatCompletionState() const noexcept { return flat_completion_state_; }
 
@@ -406,6 +428,7 @@ private:
     fsm::State state_;
     StorageInfo storage_info_;
 #if TOKENSPEED_FLAT_KVCACHE
+    std::optional<FlatReservationTracker::Account> flat_reservation_;
     FlatKVCompletionState flat_completion_state_;
     std::optional<FlatKVWriteProgress> flat_write_progress_;
     std::optional<FlatPendingTerminal> flat_pending_terminal_;

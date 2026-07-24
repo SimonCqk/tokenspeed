@@ -22,7 +22,7 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <map>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -93,19 +93,19 @@ TEST(ForwardCacheOpsPrefill, FirstChunkClaimsHitThenAcquiresOnlyRemainder) {
     FreeRequest(coordinator, r1);
 
     // r2: same 8-token prefix, 12-token prefill target -> 4 NEW tokens.
-    CoordinatorMatch hit = coordinator.MatchPrefix(hashes8).device;
+    CoordinatorMatch hit = coordinator.AcquirePrefix(coordinator.ProbePrefix(hashes8)).device;
     ASSERT_EQ(hit.num_common_tokens, 8);
     ASSERT_EQ(hit.per_group[1].num_hit_blocks, 4) << "W=16 must keep every SWA prefix page real";
 
     // Claimed pages carry no tail credit (spec §4.3): tail_avail_ stays 0, so
-    // BlocksNeededFor(4 new tokens) = ceil(4/2) = 2 pages/group = 4 total.
+    // Four new tokens need ceil(4/2) = 2 pages in each group.
     {
         std::vector<BlockTable> probe(coordinator.NumGroups());
         CoordinatorMatch probe_hit = hit;
         coordinator.ClaimCommonPrefix(probe, std::move(probe_hit));
         EXPECT_EQ(probe[0].TailAvailableTokens(), 0);
         EXPECT_EQ(probe[1].TailAvailableTokens(), 0);
-        EXPECT_EQ(coordinator.BlocksNeededFor(probe, /*num_tokens=*/4), 4);
+        EXPECT_EQ(coordinator.BlocksNeededByPool(probe, /*num_tokens=*/4), (PoolDemand{4}));
         FreeRequest(coordinator, probe);
     }
 
@@ -254,14 +254,14 @@ TEST(ForwardCacheOpsDecode, DecodeStepRegistersFilledPages) {
         hashes[i] = std::string(64, static_cast<char>('a' + i));
     }
     coordinator.CacheFullBlocks(tables, std::span<const std::string>(hashes).first(2));
-    ASSERT_EQ(coordinator.MatchPrefix(hashes).device.num_common_tokens, 4);
+    ASSERT_EQ(coordinator.AcquirePrefix(coordinator.ProbePrefix(hashes)).device.num_common_tokens, 4);
 
     const std::vector<std::string> fresh(hashes.begin() + 2, hashes.end());
     ASSERT_TRUE(DecodeStep(coordinator, tables, fresh, /*first_page_slot=*/2,
                            /*num_tokens=*/1, /*num_computed_tokens=*/8));
 
     // Registration maps slots to this request's physical pages, not copies.
-    const CoordinatorMatch hit = coordinator.MatchPrefix(hashes).device;
+    const CoordinatorMatch hit = coordinator.AcquirePrefix(coordinator.ProbePrefix(hashes)).device;
     EXPECT_EQ(hit.num_common_tokens, 8);
     for (std::int32_t i = 0; i < 4; ++i) {
         EXPECT_EQ(hit.per_group[0].blocks[i]->BlockId(), tables[0].Blocks()[i]->BlockId()) << "slot " << i;
@@ -299,6 +299,8 @@ TEST(ForwardCacheOpsSpecs, TranslatesPagedCacheGroups) {
     config.block_size = 16;
     PagedCacheGroupConfig full_grp;
     full_grp.group_id = "full";
+    full_grp.rows_per_page = 8;
+    full_grp.entry_stride_tokens = 2;
     full_grp.retention = PagedCacheGroupConfig::Retention::FullHistory;
     PagedCacheGroupConfig swa_grp;
     swa_grp.group_id = "swa";
@@ -311,9 +313,15 @@ TEST(ForwardCacheOpsSpecs, TranslatesPagedCacheGroups) {
     EXPECT_EQ(specs[0].kind, AttnKind::kFull);
     EXPECT_EQ(specs[0].block_size, 16);
     EXPECT_EQ(specs[0].sliding_window, 0);
+    EXPECT_EQ(specs[0].group_id, "full");
+    EXPECT_EQ(specs[0].rows_per_page, 8);
+    EXPECT_EQ(specs[0].entry_stride_tokens, 2);
     EXPECT_EQ(specs[1].kind, AttnKind::kSlidingWindow);
     EXPECT_EQ(specs[1].block_size, 16);
     EXPECT_EQ(specs[1].sliding_window, 128);
+    EXPECT_EQ(specs[1].group_id, "swa");
+    EXPECT_EQ(specs[1].rows_per_page, 16);
+    EXPECT_EQ(specs[1].entry_stride_tokens, 1);
 }
 
 TEST(ForwardCacheOpsSpecs, StateFamilyMapsToMambaStateKind) {
@@ -389,119 +397,6 @@ TEST(ForwardCacheOpsSpecs, CanonicalFlatConfigMapsPrefixRolesByCacheMode) {
             EXPECT_THROW(MakeCoordinator(specs, pools), std::invalid_argument);
         }
     }
-}
-
-TEST(ForwardCacheOpsBuildFlatBlockTables, TwoGroupsRowsAndIds) {
-    BlockPool pool(/*total_num_blocks=*/32, /*enable_caching=*/true);
-    KvCacheCoordinator coordinator = MakeTwoGroup(pool);
-    std::vector<BlockTable> tables(coordinator.NumGroups());
-    // 6 tokens, block_size 2 -> 3 pages per group.
-    ASSERT_TRUE(coordinator.Acquire(tables, /*num_tokens=*/6));
-
-    std::vector<std::string> group_ids{"full", "swa"};
-    auto built = BuildFlatBlockTables(tables, group_ids);
-
-    ASSERT_EQ(built.size(), 2u);
-    ASSERT_TRUE(built.count("full"));
-    ASSERT_TRUE(built.count("swa"));
-    EXPECT_EQ(built.at("full").size(), 3u);
-    EXPECT_EQ(built.at("swa").size(), 3u);
-    for (std::int32_t id : built.at("full")) {
-        EXPECT_GT(id, 0);
-    }
-    // Rows match the source span verbatim: no compaction, null hole = 0 in its slot.
-    const std::vector<std::int32_t> expected_full = BlockTablePageIds(tables[0]);
-    const std::vector<std::int32_t> expected_swa = BlockTablePageIds(tables[1]);
-    EXPECT_EQ(built.at("full"), expected_full);
-    EXPECT_EQ(built.at("swa"), expected_swa);
-}
-
-TEST(ForwardCacheOpsBuildFlatBlockTables, SwaRowGetsNullHoleAfterAdvance) {
-    BlockPool pool(/*total_num_blocks=*/32, /*enable_caching=*/true);
-    KvCacheCoordinator coordinator = MakeTwoGroup(pool);
-    std::vector<BlockTable> tables(coordinator.NumGroups());
-    // Window = 4 tokens = 2 pages, so 8 tokens leave earlier pages out of window.
-    ASSERT_TRUE(coordinator.Acquire(tables, /*num_tokens=*/8));  // 4 pages/group
-    for (std::int32_t g = 0; g < coordinator.NumGroups(); ++g) {
-        coordinator.GroupManager(g).ReclaimExpired(pool, tables[static_cast<std::size_t>(g)],
-                                                   /*num_computed_tokens=*/8);
-    }
-
-    std::vector<std::string> group_ids{"full", "swa"};
-    auto built = BuildFlatBlockTables(tables, group_ids);
-    for (std::int32_t id : built.at("full")) {
-        EXPECT_GT(id, 0);
-    }
-    const auto& swa = built.at("swa");
-    EXPECT_NE(std::find(swa.begin(), swa.end(), 0), swa.end());
-    const std::vector<std::int32_t> expected_swa = BlockTablePageIds(tables[1]);
-    EXPECT_EQ(swa, expected_swa);
-}
-
-TEST(ForwardCacheOpsBuildFlatBlockTables, FreshTablesProduceEmptyRows) {
-    BlockPool pool(/*total_num_blocks=*/32, /*enable_caching=*/true);
-    KvCacheCoordinator coordinator = MakeTwoGroup(pool);
-    std::vector<BlockTable> tables(coordinator.NumGroups());
-
-    std::vector<std::string> group_ids{"full", "swa"};
-    auto built = BuildFlatBlockTables(tables, group_ids);
-
-    ASSERT_EQ(built.size(), 2u);
-    EXPECT_TRUE(built.at("full").empty());
-    EXPECT_TRUE(built.at("swa").empty());
-}
-
-TEST(ForwardCacheOpsBuildFlatBlockTables, SingleGroupRowMatchesSource) {
-    BlockPool pool(/*total_num_blocks=*/32, /*enable_caching=*/true);
-    std::vector<KvCacheSpec> specs{
-        KvCacheSpec{AttnKind::kFull, /*block_size=*/2, /*sliding_window=*/0},
-    };
-    KvCacheCoordinator coordinator = MakeCoordinator(specs, pool);
-    std::vector<BlockTable> tables(coordinator.NumGroups());
-    ASSERT_TRUE(coordinator.Acquire(tables, /*num_tokens=*/4));  // 2 pages
-
-    std::vector<std::string> group_ids{"only"};
-    auto built = BuildFlatBlockTables(tables, group_ids);
-
-    ASSERT_EQ(built.size(), 1u);
-    const std::vector<std::int32_t> expected = BlockTablePageIds(tables[0]);
-    EXPECT_EQ(built.at("only"), expected);
-    // Sanity: keyed by the supplied group_id, not a bare index.
-    EXPECT_EQ(built.count("0"), 0u);
-}
-
-TEST(ForwardCacheOpsBuildFlatBlockTables, KeyMatchesSuppliedGroupIdStrings) {
-    BlockPool pool(/*total_num_blocks=*/32, /*enable_caching=*/true);
-    KvCacheCoordinator coordinator = MakeTwoGroup(pool);
-    std::vector<BlockTable> tables(coordinator.NumGroups());
-    ASSERT_TRUE(coordinator.Acquire(tables, /*num_tokens=*/4));
-
-    std::vector<std::string> group_ids{"alpha", "beta"};
-    auto built = BuildFlatBlockTables(tables, group_ids);
-
-    ASSERT_EQ(built.size(), 2u);
-    EXPECT_TRUE(built.count("alpha"));
-    EXPECT_TRUE(built.count("beta"));
-    const std::vector<std::int32_t> expected_alpha = BlockTablePageIds(tables[0]);
-    EXPECT_EQ(built.at("alpha"), expected_alpha);
-}
-
-TEST(ForwardCacheOpsBuildFlatBlockTables, ExportsExplicitBaseForEveryGroup) {
-    BlockPool pool(/*total_num_blocks=*/8, /*enable_caching=*/true);
-    std::vector<BlockTable> tables(2);
-    auto blocks = pool.AllocateBlocks(2);
-    ASSERT_EQ(blocks.size(), 2u);
-    std::vector<BlockRef> refs;
-    refs.reserve(blocks.size());
-    for (CacheBlock* block : blocks) {
-        refs.push_back(BlockRef::Adopt(pool, block));
-    }
-    tables[1].InitRange(/*base_logical_page=*/9, std::move(refs));
-
-    std::vector<std::string> group_ids{"full", "state"};
-    auto bases = BuildFlatBlockTableBaseOffsets(tables, group_ids);
-
-    EXPECT_EQ(bases, (std::map<std::string, std::int32_t>{{"full", 0}, {"state", 9}}));
 }
 
 }  // namespace

@@ -348,28 +348,46 @@ class FlatCacheGroupsMixin:
         pass's KV writes cover its extra leading rows.
 
         Radix metadata (no flat locs) needs no swap: the drafter's caller
-        locs are live there. Returns False when the flat locs cannot be
-        provided (lookback disarmed, or a captured metadata without the
-        lookback loc stack), so the caller falls back to the plain window
-        pass. The next round's metadata init restores the plain locs.
+        locs are live there. Returns False when lookback is disarmed, so the
+        caller falls back to the plain window pass. Captured Flat metadata
+        without a complete static lookback stack is a contract error: it must
+        never fall through to the eager gather. The next round's metadata init
+        restores the plain locs.
         """
         md = self.forward_decode_metadata
-        if md is None or md.out_cache_locs is None:
+        if md is None:
+            return True
+        captured = getattr(self, "cuda_graph_decode_metadata", None) or {}
+        captured_md = captured.get(bs)
+        graph_backed = md is captured_md
+        if md.out_cache_locs is None:
+            if graph_backed:
+                raise RuntimeError(
+                    "flat CUDA graph metadata has no group-keyed write "
+                    "locations; refusing draft lookback capture"
+                )
             return True
         lookback = int(getattr(self, "flat_draft_lookback", 0) or 0)
         if lookback <= 0:
             return False
         spec_n = max(int(getattr(self, "spec_num_tokens", 1) or 1), 1)
         total = spec_n + lookback
-        captured = getattr(self, "cuda_graph_decode_metadata", None) or {}
-        if md is captured.get(bs):
-            if not self.cuda_graph_flat_lookback_locs:
-                return False
-            locs = {
-                gid: buf[: bs * total]
-                for gid, buf in self.cuda_graph_flat_lookback_locs.items()
-                if gid in md.out_cache_locs
+        if graph_backed:
+            buffers = getattr(self, "cuda_graph_flat_lookback_locs", None) or {}
+            need = bs * total
+            invalid = {
+                gid: None if gid not in buffers else int(buffers[gid].shape[0])
+                for gid in md.out_cache_locs
+                if gid not in buffers or buffers[gid].shape[0] < need
             }
+            if invalid:
+                raise RuntimeError(
+                    "flat CUDA graph metadata is missing its static lookback "
+                    f"locations for batch size {bs}: need_rows={need}, "
+                    f"available_rows={invalid}; refusing an eager page-table "
+                    "gather during graph capture"
+                )
+            locs = {gid: buffers[gid][:need] for gid in md.out_cache_locs}
         else:
             locs = self._compute_flat_decode_out_cache_locs(
                 md.page_tables,
@@ -378,7 +396,13 @@ class FlatCacheGroupsMixin:
                 self.page_size,
                 total,
             )
-        self.forward_decode_metadata = replace(md, out_cache_locs=locs)
+        if graph_backed:
+            # CUDA Graph replay keys provenance by the captured metadata
+            # object. Keep that object stable and only redirect its loc views
+            # to the persistent lookback buffers.
+            md.out_cache_locs = locs
+        else:
+            self.forward_decode_metadata = replace(md, out_cache_locs=locs)
         return True
 
     def _maybe_check_flat_write_locs(self, page_tables, out_cache_locs, page_size):

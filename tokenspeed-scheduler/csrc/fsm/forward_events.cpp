@@ -41,7 +41,6 @@
 #include "scheduler/operations/cache.h"
 
 #if TOKENSPEED_FLAT_KVCACHE
-#include "cache/forward_cache_ops.h"
 #include "scheduler/page_hasher.h"
 #endif
 
@@ -354,7 +353,8 @@ std::variant<PrefillDone, Prefilling> SchedulePrefillEvent::operator()(Prefillin
         // Prior chunks 0..k-1 (state.window is the PREVIOUS chunk); the gate
         // credited this same slide value.
         const std::int32_t num_computed_tokens = state.window.begin + state.window.size;
-        acquired = PrefillChunk(*coordinator_, tables, hashes, tokens_this_round_, num_computed_tokens);
+        acquired = coordinator_->AdvanceRequest(tables, hashes, /*first_page_slot=*/0, tokens_this_round_,
+                                                num_computed_tokens);
     }
     if (!acquired) {
         _assert(false, "flat path: allocation failure unsupported in C slice");
@@ -450,7 +450,7 @@ Decoding ScheduleDecodeEvent::operator()(PrefillDone&& state) {
         // Full prefill length (window end == PrefillSize()); the PrefillDone
         // gate credited the same value.
         const std::int32_t num_computed_tokens = state.window.begin + state.window.size;
-        acquired = FinalizePrefillAndReserveDecode(*coordinator_, tables, hashes, reserve, num_computed_tokens);
+        acquired = coordinator_->AdvanceRequest(tables, hashes, /*first_page_slot=*/0, reserve, num_computed_tokens);
     }
     if (!acquired) {
         _assert(false, "flat path: allocation failure unsupported in C slice");
@@ -517,8 +517,8 @@ Decoding ScheduleDecodeEvent::operator()(Decoding&& state) {
             to_register = AdvanceHashChain(chain, state.GetFullPagedTokens(false), filled_pages,
                                            coordinator_->HistoryAlignmentTokens() / coordinator_->BaseBlockSize());
         }
-        acquired =
-            DecodeStep(*coordinator_, tables, to_register.hashes, to_register.begin_page, reserve, num_computed_tokens);
+        acquired = coordinator_->AdvanceRequest(tables, to_register.hashes, to_register.begin_page, reserve,
+                                                num_computed_tokens);
     }
     if (!acquired) {
         _assert(false, "flat path: allocation failure unsupported in C slice");
@@ -595,18 +595,18 @@ Decoding ScheduleDecodeFromRetractedEvent::operator()(Retracted&& state) {
 
 #if TOKENSPEED_FLAT_KVCACHE
 template <typename ForwardStateT>
-Finished FlatFinishEvent::apply(ForwardStateT&& state) {
-    _assert(coordinator_ != nullptr, "FlatFinishEvent requires a coordinator");
+Finished FinishEvent::apply(ForwardStateT&& state) {
+    _assert(coordinator_ != nullptr, "FinishEvent requires a coordinator");
     auto tables = std::move(state).TakeBlockTables();
-    FreeRequest(*coordinator_, tables);
+    coordinator_->Free(tables);
     return Finished{};
 }
 
-Finished FlatFinishEvent::operator()(Decoding&& state) {
+Finished FinishEvent::operator()(Decoding&& state) {
     return apply(std::move(state));
 }
 
-Finished FlatFinishEvent::operator()(PrefillDone&& state) {
+Finished FinishEvent::operator()(PrefillDone&& state) {
     return apply(std::move(state));
 }
 #endif
@@ -771,7 +771,7 @@ Finished AbortEvent::operator()(Prefilling&& state) noexcept {
 #if TOKENSPEED_FLAT_KVCACHE
     _assert(coordinator_ != nullptr, "AbortEvent: flat path requires a coordinator");
     auto tables = std::move(state).TakeBlockTables();
-    FreeRequest(*coordinator_, tables);
+    coordinator_->Free(tables);
 #else
     (void)state;
 #endif
@@ -782,7 +782,7 @@ Finished AbortEvent::operator()(PrefillDone&& state) noexcept {
 #if TOKENSPEED_FLAT_KVCACHE
     _assert(coordinator_ != nullptr, "AbortEvent: flat path requires a coordinator");
     auto tables = std::move(state).TakeBlockTables();
-    FreeRequest(*coordinator_, tables);
+    coordinator_->Free(tables);
 #else
     (void)state;
 #endif
@@ -793,7 +793,7 @@ Finished AbortEvent::operator()(Decoding&& state) noexcept {
 #if TOKENSPEED_FLAT_KVCACHE
     _assert(coordinator_ != nullptr, "AbortEvent: flat path requires a coordinator");
     auto tables = std::move(state).TakeBlockTables();
-    FreeRequest(*coordinator_, tables);
+    coordinator_->Free(tables);
 #else
     (void)state;
 #endif
@@ -817,7 +817,7 @@ Submitted FlatRetractEvent::applyRetract(ForwardStateT&& state) {
     // Generated tokens rebase into the prefill window so the requeued prefill recomputes them.
     token_container->RebasePrefill();
     auto tables = std::move(state).TakeBlockTables();
-    FreeRequest(*coordinator_, tables);
+    coordinator_->Free(tables);
     return Submitted{token_container, page_size};
 }
 

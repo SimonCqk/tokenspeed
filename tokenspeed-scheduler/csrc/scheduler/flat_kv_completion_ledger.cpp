@@ -94,18 +94,18 @@ std::size_t FlatKVCompletionState::CancelOutstanding() noexcept {
 }
 
 FlatKVCompletionLedger::FlatKVCompletionLedger(std::size_t max_outstanding_per_request,
-                                               std::vector<std::int32_t> group_strides)
+                                               std::span<const KvCacheGroupSchema> schema)
     : max_outstanding_per_request_{max_outstanding_per_request},
-      group_strides_{std::move(group_strides)},
-      ready_raw_ends_scratch_(group_strides_.size()) {
+      schema_{schema},
+      ready_raw_ends_scratch_(schema_.size()) {
     if (max_outstanding_per_request_ == 0 || max_outstanding_per_request_ > FlatKVCompletionState::kMaxDispatches) {
         throw std::invalid_argument("flat KV completion FIFO depth must be one or two");
     }
-    if (group_strides_.empty()) {
+    if (schema_.empty()) {
         throw std::invalid_argument("flat KV completion requires a non-empty group schema");
     }
-    for (const std::int32_t stride : group_strides_) {
-        if (stride <= 0) {
+    for (const KvCacheGroupSchema& group : schema_) {
+        if (group.entry_stride_tokens <= 0) {
             throw std::invalid_argument("flat KV completion group stride must be positive");
         }
     }
@@ -152,8 +152,8 @@ FlatKVReadyCompletion FlatKVCompletionLedger::MakeReady(const std::string& reque
     if (!record.apply_fsm_result && !tokens.empty()) {
         throw std::invalid_argument("mid-prefill flat KV completion must not carry result tokens");
     }
-    for (std::size_t i = 0; i < group_strides_.size(); ++i) {
-        const std::int32_t stride = group_strides_[i];
+    for (std::size_t i = 0; i < schema_.size(); ++i) {
+        const std::int32_t stride = schema_[i].entry_stride_tokens;
         ready_raw_ends_scratch_[i] = completion.accepted_raw_end / stride * stride;
     }
     return FlatKVReadyCompletion{

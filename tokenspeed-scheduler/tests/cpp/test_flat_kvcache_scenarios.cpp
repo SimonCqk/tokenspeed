@@ -1383,7 +1383,7 @@ TEST_F(FlatRetractExactFitSuite, ReserveRefundBalances) {
     ASSERT_EQ(scheduler_->FlatPoolFreeBlocks(), 8);
     ASSERT_EQ(scheduler_->WaitingSize(), 1u);
 
-    // "d" needs EXACTLY the freed budget: a stale reserve ledger entry for the
+    // "d" needs EXACTLY the freed budget: a stale request reservation for the
     // victim would shrink the gate below 8 and defer it.
     Submit(MakeRequestSpec("d", /*num_pages=*/3, /*start=*/201));
     ExecutionPlan admitted = PlanOnce();
@@ -1601,7 +1601,7 @@ TEST_F(FlatRetractStateGroupSuite, StateGroupVictimRetractsCleanly) {
     EXPECT_EQ(scheduler_->FlatPoolFreeBlocks(), free_at_start);
 }
 
-// Event-level PrefillDone victim: the scheduler's reserve ledger keeps a
+// Event-level PrefillDone victim: the request-owned reservation keeps a
 // PrefillDone always able to transition, so drive the FSM event directly
 // (FlatEventFailurePath idiom) to pin the PrefillDone overload.
 TEST(FlatRetractEvent, PrefillDoneVictimReleasesPagesAndRequeues) {
@@ -1887,10 +1887,10 @@ TEST(FlatSwaWindowBoundary, DecodeStepKeepsOldestInWindowPageAtPageBoundary) {
 }
 
 // ---------------------------------------------------------------------------
-// Decode-reserve ledger (flat_reserved_pages_): promised decode pages are only
+// Decode reservations (flat_reserved_pages_): promised decode pages are only
 // Acquired one round later; nobody may be admitted into them in between.
 // ---------------------------------------------------------------------------
-class FlatReserveLedgerSuite : public SchedulerTestSuite {
+class FlatReservationSuite : public SchedulerTestSuite {
 protected:
     SchedulerConfig MakeConfig() override {
         SchedulerConfig cfg{};
@@ -1913,7 +1913,7 @@ protected:
     }
 };
 
-TEST_F(FlatReserveLedgerSuite, LaterRequestCannotStealReservedDecodeHeadroom) {
+TEST_F(FlatReservationSuite, LaterRequestCannotStealReservedDecodeHeadroom) {
     const std::int32_t free_at_start = scheduler_->FlatPoolFreeBlocks();
     ASSERT_EQ(free_at_start, 10);
 
@@ -1953,7 +1953,7 @@ TEST_F(FlatReserveLedgerSuite, LaterRequestCannotStealReservedDecodeHeadroom) {
     EXPECT_EQ(scheduler_->FlatPoolFreeBlocks(), free_at_start);
 }
 
-TEST_F(FlatReserveLedgerSuite, AbortWithOutstandingReservationLeavesNoPhantom) {
+TEST_F(FlatReservationSuite, AbortWithOutstandingReservationLeavesNoPhantom) {
     const std::int32_t free_at_start = scheduler_->FlatPoolFreeBlocks();
     ASSERT_EQ(free_at_start, 10);
 
@@ -1962,7 +1962,7 @@ TEST_F(FlatReserveLedgerSuite, AbortWithOutstandingReservationLeavesNoPhantom) {
     PlanOnce();
     EXPECT_EQ(scheduler_->FlatPoolFreeBlocks(), 4);
 
-    // Abort BEFORE the reserve is acquired: the ledger entry must drop too.
+    // Abort BEFORE the reserve is acquired: the request-owned reservation must drop too.
     SendAbort(*scheduler_, "a");
     PlanOnce();  // reap
     EXPECT_EQ(scheduler_->FlatPoolFreeBlocks(), free_at_start);
@@ -2086,7 +2086,7 @@ TEST_F(FlatPrefixHitSuite, TwoRequestsSharePrefixReusePages) {
     ExpectRowPrefixEq(op->flat_block_tables.at("swa").Row(0), r1_rows.at("swa"), "swa row");
 
     // Pool: claim 4/group (8) + acquire ceil(4/2) = 2/group (4) = 12. The
-    // decode reserve is only PROMISED here (ledger), not acquired.
+    // decode reserve is only PROMISED here (request-owned), not acquired.
     EXPECT_EQ(scheduler_->FlatPoolFreeBlocks(), free_at_start - 12);
 
     // Finalize registers pages 4..5 and acquires the reserve: 1 fresh page/group.
@@ -2309,14 +2309,15 @@ TEST_F(FlatPrefixHitTightPoolSuite, GateChargesFreeHitBlocksClaimWillConsume) {
     ASSERT_EQ(scheduler_->FlatPoolFreeBlocks(), 8);
 
     // r3's finalize acquires its decode reserve (1 fresh page/group): 8 -> 6,
-    // erasing its ledger entry: r2's gate below reads raw free 6, no reserves.
+    // clearing its request-owned reservation: r2's gate below reads raw free 6, no reserves.
     SendForwardDone("r3", {599});
     PlanOnce();
     ASSERT_EQ(scheduler_->FlatPoolFreeBlocks(), 6);
 
     // r2: 8 tokens, first 4 == r1's. Hit: cap = (8-1)/2 = 3, r1 registered 2
-    // -> fixpoint 2 blocks = 4 tokens, all 4 hit blocks ref-0 free. Gate:
-    // new/reserve 2*ceil(5/2) = 6 + claim 4 = 10 > free 6 -> defers untouched.
+    // -> fixpoint 2 blocks = 4 tokens, all 4 hit blocks ref-0 free. Legacy
+    // completion debt does not fence r3; its next decode still fits the
+    // allocated tail. r2 needs new/reserve 6 + claim 4 and therefore defers.
     token_vec_t r2_tokens = MakeAlignedTokens(/*num_pages=*/2, PageSize());  // tokens 1..4 == r1's
     const token_vec_t tail = MakeTokens(/*count=*/4, /*start=*/901);
     r2_tokens.insert(r2_tokens.end(), tail.begin(), tail.end());
@@ -2324,14 +2325,14 @@ TEST_F(FlatPrefixHitTightPoolSuite, GateChargesFreeHitBlocksClaimWillConsume) {
     ExecutionPlan starved = PlanOnce();
     const FlatForwardOperation* starved_op = FindFlatOp(starved);
     ASSERT_NE(starved_op, nullptr);
-    ASSERT_EQ(starved_op->request_ids.size(), 1u) << "r2 must be deferred, not admitted into a short pool";
-    EXPECT_EQ(starved_op->request_ids.at(0), "r3");
+    EXPECT_EQ(starved_op->request_ids, (std::vector<std::string>{"r3"}));
     EXPECT_EQ(scheduler_->WaitingSize(), 1u) << "deferred r2 stays intact in the waiting set";
     EXPECT_EQ(scheduler_->FlatPoolFreeBlocks(), 6) << "a deferred first chunk must not touch the pool";
 
     // r3 finishes -> free 10; r2's charge 6 + 4 = 10 == 10: admitted exactly
     // at the boundary. Claim pulls 4, Acquire takes 2/group: free 10 -> 2.
     SendForwardDone("r3", {600});
+    SendForwardDone("r3", {601});
     SendFinish("r3");
     ExecutionPlan plan2 = PlanOnce();
     const FlatForwardOperation* op2 = FindFlatOp(plan2);
@@ -3688,9 +3689,9 @@ TEST(HeterogeneousFlatSchedulerTest, ExplicitFlatV4RejectsUnsupportedConfigMatri
     const Case cases[] = {
         {"duplicate page authority", V4ExplicitFlatConfigViolation::kDuplicatePageAuthority,
          "only device page authority"},
-        {"zero bytes per block", V4ExplicitFlatConfigViolation::kZeroBytesPerBlock, "bytes_per_block must be positive"},
-        {"missing pool", V4ExplicitFlatConfigViolation::kMissingPool, "unknown pool_id 'state'"},
-        {"unknown pool", V4ExplicitFlatConfigViolation::kUnknownPool, "unknown pool_id 'unknown'"},
+        {"zero bytes per block", V4ExplicitFlatConfigViolation::kZeroBytesPerBlock, "positive bytes_per_block"},
+        {"missing pool", V4ExplicitFlatConfigViolation::kMissingPool, "must bind a configured pool_id"},
+        {"unknown pool", V4ExplicitFlatConfigViolation::kUnknownPool, "must bind a configured pool_id"},
         {"PD role", V4ExplicitFlatConfigViolation::kPdRole, "group-aware PD transfer"},
         {"usable host tier", V4ExplicitFlatConfigViolation::kHostTier, "device-only"},
         {"radix mamba adjunct", V4ExplicitFlatConfigViolation::kRadixMamba, "radix-owned Mamba"},

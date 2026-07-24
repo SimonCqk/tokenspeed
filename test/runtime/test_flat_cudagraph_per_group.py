@@ -52,11 +52,12 @@ def _history_spec(group_id: str) -> PagedCacheGroupSpec:
     )
 
 
-def _backend():
+def _backend(*, draft_lookback: int = 0):
     backend = _mha.MHAAttnBackend.__new__(_mha.MHAAttnBackend)
     backend.spec_num_tokens = 1
     backend.is_draft = False
     backend.draft_block_decode = False
+    backend.flat_draft_lookback = draft_lookback
     backend.max_num_pages = MAX_NUM_PAGES
     backend.max_context_len = MAX_NUM_PAGES * 2
     backend.page_size = 2
@@ -158,6 +159,60 @@ def test_capture_metadata_aliases_persistent_group_buffers() -> None:
             metadata.block_table_base_offsets[group_id].data_ptr()
             == base_buffer.data_ptr()
         )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "backend_name"),
+    (
+        ("tokenspeed.runtime.layers.attention.backends.mha", "MHAAttnBackend"),
+        ("tokenspeed.runtime.layers.attention.backends.msa", "MSAAttnBackend"),
+    ),
+    ids=("mha", "msa"),
+)
+def test_repeated_capture_reuses_metadata_object(
+    module_name: str,
+    backend_name: str,
+) -> None:
+    module = pytest.importorskip(module_name)
+    backend_type = getattr(module, backend_name)
+    backend = backend_type.__new__(backend_type)
+    backend.spec_num_tokens = 1
+    backend.is_draft = False
+    backend.draft_block_decode = False
+    backend.max_num_pages = MAX_NUM_PAGES
+    backend.max_context_len = MAX_NUM_PAGES * 2
+    backend.page_size = 2
+    backend.device = "cpu"
+    backend.forward_decode_metadata = None
+    backend.forward_extend_metadata = None
+    if backend_name == "MSAAttnBackend":
+        backend.decode_score_buffer = torch.empty(
+            (MAX_BS, 1, MAX_NUM_PAGES), dtype=torch.float32
+        )
+    backend.init_cuda_graph_state(
+        max_bs=MAX_BS,
+        seq_lens_buf=torch.ones(MAX_BS, dtype=torch.int32),
+        paged_cache_group_specs=tuple(_history_spec(gid) for gid in GROUP_IDS),
+    )
+
+    first = _capture(backend)
+    second = _capture(backend)
+
+    assert second is first
+    assert second is backend.cuda_graph_decode_metadata[2]
+    assert set(second.block_table_base_offsets) == set(GROUP_IDS)
+
+
+def test_capture_init_restores_main_locs_after_lookback() -> None:
+    backend = _backend(draft_lookback=2)
+    metadata = _capture(backend)
+    main_locs = dict(metadata.out_cache_locs)
+
+    assert backend.flat_enter_draft_lookback(2)
+    assert backend.forward_decode_metadata is metadata
+    assert _capture(backend) is metadata
+    for group_id, locs in main_locs.items():
+        assert metadata.out_cache_locs[group_id].is_set_to(locs)
 
 
 def test_replay_refreshes_persistent_tables_without_rebinding_metadata() -> None:

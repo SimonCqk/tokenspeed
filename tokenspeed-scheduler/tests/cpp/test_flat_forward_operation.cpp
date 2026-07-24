@@ -51,12 +51,27 @@ struct TableShape {
 // copied it into its contiguous export owner.
 class LiveTableRows {
 public:
-    explicit LiveTableRows(std::vector<std::string> group_ids)
-        : pool_{/*total_num_blocks=*/256}, group_ids_{std::move(group_ids)} {}
+    explicit LiveTableRows(std::vector<std::string> group_ids) : pool_{/*total_num_blocks=*/256} {
+        schema_.reserve(group_ids.size());
+        for (std::string& group_id : group_ids) {
+            schema_.push_back(KvCacheGroupSchema{
+                .group_id = std::move(group_id),
+                .kind = AttnKind::kFull,
+                .block_size = 1,
+                .rows_per_page = 1,
+                .entry_stride_tokens = 1,
+                .sliding_window = 0,
+                .pool_index = 0,
+                .prefix_role = KvPrefixRole::kHistoryAnchor,
+                .table_layout = KvTableLayout::kAbsolute,
+                .owner_mask = 0,
+            });
+        }
+    }
 
     template <typename Operation>
     void Attach(Operation& op, std::vector<TableShape> shapes) {
-        if (shapes.size() != group_ids_.size()) {
+        if (shapes.size() != schema_.size()) {
             throw std::invalid_argument("test flat row shape differs from group schema");
         }
         rows_.emplace_back();
@@ -74,7 +89,7 @@ public:
                 is_null[static_cast<std::size_t>(slot)] = true;
             }
             const std::int32_t real_count = shape.size - static_cast<std::int32_t>(shape.null_slots.size());
-            std::vector<CacheBlock*> blocks = pool_.AllocateBlocks(real_count);
+            std::vector<BlockRef> blocks = pool_.AcquireBlocks(real_count);
             if (static_cast<std::int32_t>(blocks.size()) != real_count) {
                 throw std::runtime_error("test flat block pool exhausted");
             }
@@ -82,15 +97,18 @@ public:
             refs.reserve(static_cast<std::size_t>(shape.size));
             std::size_t block_index = 0;
             for (bool null_slot : is_null) {
-                refs.push_back(null_slot ? BlockRef::Share(pool_, pool_.NullBlock())
-                                         : BlockRef::Adopt(pool_, blocks[block_index++]));
+                if (null_slot) {
+                    refs.emplace_back();
+                } else {
+                    refs.push_back(std::move(blocks[block_index++]));
+                }
             }
             BlockTable table;
             table.InitRange(shape.base, std::move(refs));
             tables.push_back(std::move(table));
         }
         op.flat_block_table_view = tables;
-        op.flat_block_table_group_ids = group_ids_;
+        op.flat_cache_schema = schema_;
     }
 
     std::vector<std::int32_t> PageIds(std::size_t row, std::size_t group) const {
@@ -99,7 +117,7 @@ public:
 
 private:
     BlockPool pool_;
-    std::vector<std::string> group_ids_;
+    std::vector<KvCacheGroupSchema> schema_;
     std::deque<std::vector<BlockTable>> rows_;
 };
 
@@ -300,21 +318,21 @@ TEST(FlatForwardOperation, EqualLengthRowsUnchanged) {
     ExpectRowEq(full.Row(1), {second[0], second[1]});
 }
 
-TEST(FlatForwardOperation, CanonicalGroupOrderAlignsPermutedRowsWidthsAndExports) {
-    // Deliberately differs from std::map key order: cached export pointers must
-    // stay aligned with the scheduler's canonical group order, not map order.
-    LiveTableRows canonical_rows{{"zeta", "alpha"}};
-    LiveTableRows permuted_rows{{"alpha", "zeta"}};
+TEST(FlatForwardOperation, CanonicalSchemaIndexAlignsRowsWhilePublicMapStaysLexical) {
+    // Schema order deliberately differs from std::map key order. Production
+    // rows all borrow this one coordinator-owned schema and never reorder.
+    LiveTableRows rows{{"zeta", "alpha"}};
     std::vector<ForwardOperation> ops;
-    ops.emplace_back(MakeFlatPrefill(canonical_rows, "r0", {{.size = 1}, {.size = 3}}));
-    ops.emplace_back(MakeFlatPrefill(permuted_rows, "r1", {{.size = 1}, {.size = 2}}));
-    const std::vector<std::int32_t> first_zeta = canonical_rows.PageIds(0, 0);
-    const std::vector<std::int32_t> first_alpha = canonical_rows.PageIds(0, 1);
-    const std::vector<std::int32_t> second_alpha = permuted_rows.PageIds(0, 0);
-    const std::vector<std::int32_t> second_zeta = permuted_rows.PageIds(0, 1);
+    ops.emplace_back(MakeFlatPrefill(rows, "r0", {{.size = 1}, {.size = 3}}));
+    ops.emplace_back(MakeFlatPrefill(rows, "r1", {{.size = 2}, {.size = 1}}));
+    const std::vector<std::int32_t> first_zeta = rows.PageIds(0, 0);
+    const std::vector<std::int32_t> first_alpha = rows.PageIds(0, 1);
+    const std::vector<std::int32_t> second_zeta = rows.PageIds(1, 0);
+    const std::vector<std::int32_t> second_alpha = rows.PageIds(1, 1);
 
     FlatForwardOperation flat_op{std::move(ops)};
 
+    ASSERT_EQ(flat_op.flat_block_tables.begin()->first, "alpha");
     const auto& zeta = flat_op.flat_block_tables.at("zeta");
     EXPECT_EQ(zeta.cols, 2u);
     ExpectRowEq(zeta.Row(0), {first_zeta[0], -1});

@@ -859,15 +859,17 @@ class TRTLLMMHAAttnBackend(FlatCacheGroupsMixin, AttentionBackend):
         so the capture run stays in range before that op records."""
         expanded_bs = bs * self.spec_num_tokens
         self.cuda_graph_cache_seqlens[:expanded_bs].fill_(self.spec_num_tokens)
-        metadata = TRTLLMMHAMetadata(
-            cache_seqlens_int32=self.cuda_graph_cache_seqlens[:expanded_bs],
-            max_seq_len_q=1,
-            max_seq_len_k=self.max_context_len,
-            cu_seqlens_q=torch.arange(
-                0, expanded_bs + 1, dtype=torch.int32, device=self.device
-            ),
-            page_table=self.cuda_graph_page_table[:expanded_bs, :],
-        )
+        metadata = self.cuda_graph_decode_metadata.get(bs)
+        if metadata is None:
+            metadata = TRTLLMMHAMetadata(
+                cache_seqlens_int32=self.cuda_graph_cache_seqlens[:expanded_bs],
+                max_seq_len_q=1,
+                max_seq_len_k=self.max_context_len,
+                cu_seqlens_q=torch.arange(
+                    0, expanded_bs + 1, dtype=torch.int32, device=self.device
+                ),
+                page_table=self.cuda_graph_page_table[:expanded_bs, :],
+            )
         self.cuda_graph_decode_metadata[bs] = metadata
         self.forward_decode_metadata = metadata
 
@@ -883,18 +885,30 @@ class TRTLLMMHAAttnBackend(FlatCacheGroupsMixin, AttentionBackend):
         # Flat captures route reads through the per-group buffer views and
         # replay never fills the radix single table, so record page_table=None
         # instead of a slice of the never-filled zero buffer.
-        metadata = TRTLLMMHAMetadata(
-            cache_seqlens_int32=self.cuda_graph_cache_seqlens[:bs],
-            max_seq_len_q=1,
-            max_seq_len_k=self.max_context_len,
-            cu_seqlens_q=torch.arange(0, bs + 1, dtype=torch.int32, device=self.device),
-            page_table=(
-                None if page_tables is not None else self.cuda_graph_page_table[:bs, :]
-            ),
-            page_tables=page_tables,
-            block_table_base_offsets=block_table_base_offsets,
-            out_cache_locs=out_cache_locs,
+        cache_seqlens = self.cuda_graph_cache_seqlens[:bs]
+        page_table = (
+            None if page_tables is not None else self.cuda_graph_page_table[:bs, :]
         )
+        metadata = self.cuda_graph_decode_metadata.get(bs)
+        if metadata is None:
+            metadata = TRTLLMMHAMetadata(
+                cache_seqlens_int32=cache_seqlens,
+                max_seq_len_q=1,
+                max_seq_len_k=self.max_context_len,
+                cu_seqlens_q=torch.arange(
+                    0, bs + 1, dtype=torch.int32, device=self.device
+                ),
+                page_table=page_table,
+                page_tables=page_tables,
+                block_table_base_offsets=block_table_base_offsets,
+                out_cache_locs=out_cache_locs,
+            )
+        else:
+            metadata.cache_seqlens_int32 = cache_seqlens
+            metadata.page_table = page_table
+            metadata.page_tables = page_tables
+            metadata.block_table_base_offsets = block_table_base_offsets
+            metadata.out_cache_locs = out_cache_locs
         self.cuda_graph_decode_metadata[bs] = metadata
         self.forward_decode_metadata = metadata
 
@@ -912,24 +926,33 @@ class TRTLLMMHAAttnBackend(FlatCacheGroupsMixin, AttentionBackend):
         cache_seqlens = self._clamped_spec_seqlens(
             self.cuda_graph_cache_seqlens, bs, spec_num_tokens
         )
-        metadata = TRTLLMMHAMetadata(
-            cache_seqlens_int32=cache_seqlens,
-            max_seq_len_q=spec_num_tokens,
-            max_seq_len_k=self.max_context_len,
-            cu_seqlens_q=torch.arange(
-                0,
-                bs * spec_num_tokens + 1,
-                spec_num_tokens,
-                dtype=torch.int32,
-                device=self.device,
-            ),
-            page_table=(
-                None if page_tables is not None else self.cuda_graph_page_table[:bs, :]
-            ),
-            page_tables=page_tables,
-            block_table_base_offsets=block_table_base_offsets,
-            out_cache_locs=out_cache_locs,
+        page_table = (
+            None if page_tables is not None else self.cuda_graph_page_table[:bs, :]
         )
+        metadata = self.cuda_graph_prefill_metadata.get(bs)
+        if metadata is None:
+            metadata = TRTLLMMHAMetadata(
+                cache_seqlens_int32=cache_seqlens,
+                max_seq_len_q=spec_num_tokens,
+                max_seq_len_k=self.max_context_len,
+                cu_seqlens_q=torch.arange(
+                    0,
+                    bs * spec_num_tokens + 1,
+                    spec_num_tokens,
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+                page_table=page_table,
+                page_tables=page_tables,
+                block_table_base_offsets=block_table_base_offsets,
+                out_cache_locs=out_cache_locs,
+            )
+        else:
+            metadata.cache_seqlens_int32 = cache_seqlens
+            metadata.page_table = page_table
+            metadata.page_tables = page_tables
+            metadata.block_table_base_offsets = block_table_base_offsets
+            metadata.out_cache_locs = out_cache_locs
         self.cuda_graph_prefill_metadata[bs] = metadata
         self.forward_prefill_metadata = metadata
 

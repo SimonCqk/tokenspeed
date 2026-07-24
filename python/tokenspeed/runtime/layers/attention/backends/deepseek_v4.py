@@ -24,6 +24,7 @@ from tokenspeed_kernel.ops.attention.flash_mla import (
 from tokenspeed_kernel.ops.attention.triton.deepseek_v4 import (
     deepseek_v4_indexer_decode_metadata_compute,
 )
+from tokenspeed_kernel.ops.kvcache.triton import flat_tables_unpack
 from tokenspeed_kernel.registry import error_fn
 
 try:
@@ -43,7 +44,10 @@ from tokenspeed.runtime.configs.paged_cache_spec import (
 from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
 from tokenspeed.runtime.flat_cache_tables import (
     CacheTableSource,
+    FlatPackedTableOwnerSource,
+    make_flat_packed_table_destinations,
     resolve_cache_table_source,
+    validate_flat_table_base_offsets,
 )
 from tokenspeed.runtime.layers.attention.backends.base import (
     AttentionBackend,
@@ -255,6 +259,7 @@ class DeepseekV4AttentionBackend(AttentionBackend):
     flat_spec_capable = True
     requires_group_keyed_cache_locs = True
     uses_padded_decode_token_mask = True
+    flat_tables_self_padding = True
     accepts_bound_cache_table_source = True
     # Explicit capability hook: the generic executor does not infer this
     # sequencing from model configuration.
@@ -303,6 +308,7 @@ class DeepseekV4AttentionBackend(AttentionBackend):
         )
         self._draft_decode_step = 0
         self._draft_decode_base_seq_lens: torch.Tensor | None = None
+        self._eager_draft_decode_metadata: DeepseekV4ForwardMetadata | None = None
         self._draft_decode_metadata: DeepseekV4ForwardMetadata | None = None
         self._cuda_graph_draft_decode_metadata = {}
         self._cuda_graph_query_start_by_tokens_per_req: dict[int, torch.Tensor] = {}
@@ -556,7 +562,7 @@ class DeepseekV4AttentionBackend(AttentionBackend):
         metadata = (
             self._cuda_graph_draft_decode_metadata.get(bs)
             if is_cuda_graph_metadata
-            else self._draft_decode_metadata
+            else self._eager_draft_decode_metadata
         )
         is_valid_token = self._draft_decode_is_valid_token(prefill_metadata)
         if (
@@ -595,6 +601,8 @@ class DeepseekV4AttentionBackend(AttentionBackend):
             )
             if is_cuda_graph_metadata:
                 self._cuda_graph_draft_decode_metadata[bs] = metadata
+            else:
+                self._eager_draft_decode_metadata = metadata
             self._draft_decode_metadata = metadata
             return
 
@@ -628,6 +636,8 @@ class DeepseekV4AttentionBackend(AttentionBackend):
             max_context_len=self.context_len,
         )
         _refresh_decode_indexer_schedule_metadata(metadata)
+        if not is_cuda_graph_metadata:
+            self._eager_draft_decode_metadata = metadata
         self._draft_decode_metadata = metadata
 
     def _select_decode_metadata(
@@ -1917,39 +1927,85 @@ class DeepseekV4AttentionBackend(AttentionBackend):
         self._cuda_graph_paged_cache_base_offsets = {}
         self._cuda_graph_table_views_by_bs: dict[int, dict[str, torch.Tensor]] = {}
         self._cuda_graph_base_views_by_bs: dict[int, dict[str, torch.Tensor]] = {}
-        # group -> (rows covered by the last refresh, compact width, pad)
-        self._cuda_graph_flat_table_refresh_state: dict[str, tuple[int, int, int]] = {}
-        for spec in paged_cache_group_specs:
-            gid = str(spec.group_id)
-            max_pages = (
-                planned_capture_cols[gid]
-                if planned_capture_cols is not None
-                else compute_max_logical_pages_for_capture(
+        self._cuda_graph_flat_packed_storage: torch.Tensor | None = None
+        self._cuda_graph_flat_max_cols = 0
+        self._cuda_graph_flat_group_ids: tuple[str, ...] = ()
+        self._cuda_graph_flat_capture_cols: tuple[int, ...] = ()
+        self._cuda_graph_validated_packed_sources: dict[
+            int,
+            tuple[
+                torch.Tensor,
+                torch.Tensor,
+                Mapping[str, torch.Tensor],
+                Mapping[str, torch.Tensor],
+                tuple[str, ...],
+            ],
+        ] = {}
+        if planned_capture_cols is not None:
+            destinations, packed_numel = make_flat_packed_table_destinations(
+                planned_capture_cols,
+                batch_rows=flat_graph_allocation_rows,
+            )
+            self._cuda_graph_flat_group_ids = tuple(
+                destination.group_id for destination in destinations
+            )
+            self._cuda_graph_flat_capture_cols = tuple(
+                destination.table_cols for destination in destinations
+            )
+            self._cuda_graph_flat_packed_storage = torch.zeros(
+                (packed_numel,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            for destination in destinations:
+                gid = destination.group_id
+                table_numel = flat_graph_allocation_rows * destination.table_cols
+                self._cuda_graph_paged_cache_block_tables[gid] = (
+                    self._cuda_graph_flat_packed_storage[
+                        destination.table_offset : destination.table_offset
+                        + table_numel
+                    ].view(flat_graph_allocation_rows, destination.table_cols)
+                )
+                self._cuda_graph_paged_cache_base_offsets[gid] = (
+                    self._cuda_graph_flat_packed_storage[
+                        destination.base_offset : destination.base_offset
+                        + flat_graph_allocation_rows
+                    ]
+                )
+            self._cuda_graph_flat_max_cols = max(
+                destination.table_cols for destination in destinations
+            )
+        else:
+            for spec in paged_cache_group_specs:
+                gid = str(spec.group_id)
+                max_pages = compute_max_logical_pages_for_capture(
                     spec,
                     max_context_len=self.context_len,
                     max_tokens_per_req=max_tokens_per_req,
                     overlap_schedule_depth=overlap_schedule_depth,
                 )
+                self._cuda_graph_paged_cache_block_tables[gid] = torch.zeros(
+                    (flat_graph_allocation_rows, max_pages),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                self._cuda_graph_paged_cache_base_offsets[gid] = torch.zeros(
+                    (flat_graph_allocation_rows,),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+        if self._cuda_graph_flat_packed_storage is not None:
+            self._flat_graph_metadata_nbytes = int(
+                self._cuda_graph_flat_packed_storage.numel()
+            ) * int(self._cuda_graph_flat_packed_storage.element_size())
+        else:
+            self._flat_graph_metadata_nbytes = sum(
+                int(tensor.numel()) * int(tensor.element_size())
+                for tensor in (
+                    *self._cuda_graph_paged_cache_block_tables.values(),
+                    *self._cuda_graph_paged_cache_base_offsets.values(),
+                )
             )
-            self._cuda_graph_paged_cache_block_tables[gid] = torch.zeros(
-                (flat_graph_allocation_rows, max_pages),
-                dtype=torch.int32,
-                device=self.device,
-            )
-            # Flat export publishes explicit zero bases for history groups too;
-            # persistent graph addresses therefore exist for every group.
-            self._cuda_graph_paged_cache_base_offsets[gid] = torch.zeros(
-                (flat_graph_allocation_rows,),
-                dtype=torch.int32,
-                device=self.device,
-            )
-        self._flat_graph_metadata_nbytes = sum(
-            int(tensor.numel()) * int(tensor.element_size())
-            for tensor in (
-                *self._cuda_graph_paged_cache_block_tables.values(),
-                *self._cuda_graph_paged_cache_base_offsets.values(),
-            )
-        )
         if planned_capture_cols is not None:
             expected_nbytes = (
                 4
@@ -1999,13 +2055,12 @@ class DeepseekV4AttentionBackend(AttentionBackend):
                     # Radix sources may omit a group; preserve their legacy
                     # invalid/default contents without touching flat replay.
                     buf[:bs].fill_(pad_value)
-                    self._cuda_graph_flat_table_refresh_state.pop(group_id, None)
                 continue
-            if int(table.shape[0]) != bs:
+            rows = int(table.shape[0])
+            if rows > bs:
                 raise RuntimeError(
                     "DeepSeek V4 CUDA graph paged cache table row count "
-                    f"mismatch for {group_id!r}: got {int(table.shape[0])}, "
-                    f"expected padded bs {bs}"
+                    f"mismatch for {group_id!r}: got {rows}, padded bs is {bs}"
                 )
             cols = int(table.shape[1])
             if cols > int(buf.shape[1]):
@@ -2016,34 +2071,15 @@ class DeepseekV4AttentionBackend(AttentionBackend):
                 )
             if bs > 0:
                 capture_cols = int(buf.shape[1])
-                if require_all_groups:
-                    refresh_state = self._cuda_graph_flat_table_refresh_state
-                    previous = refresh_state.get(group_id)
-                    if previous is None or previous[2] != pad_value:
-                        if cols < capture_cols:
-                            buf[:bs, cols:].fill_(pad_value)
-                    else:
-                        previous_rows, previous_cols, _ = previous
-                        if cols < previous_cols and cols < capture_cols:
-                            buf[:bs, cols:].fill_(pad_value)
-                        elif bs > previous_rows and cols < capture_cols:
-                            buf[previous_rows:bs, cols:].fill_(pad_value)
-                    refresh_state[group_id] = (
-                        bs,
-                        cols,
-                        pad_value,
-                    )
-                else:
-                    # Radix sources remain source-optional, so retain their
-                    # stateless tail initialization behavior.
-                    if cols < capture_cols:
-                        buf[:bs, cols:].fill_(pad_value)
-                    self._cuda_graph_flat_table_refresh_state.pop(group_id, None)
+                if cols < capture_cols and rows > 0:
+                    buf[:rows, cols:].fill_(pad_value)
                 if cols > 0:
-                    source = table[:bs, :cols]
+                    source = table[:rows, :cols]
                     if not require_all_groups:
                         source = source.to(torch.int32)
-                    buf[:bs, :cols].copy_(source)
+                    buf[:rows, :cols].copy_(source)
+                if rows < bs:
+                    buf[rows:bs].zero_()
         return out
 
     def _refresh_cuda_graph_base_offsets(
@@ -2079,19 +2115,174 @@ class DeepseekV4AttentionBackend(AttentionBackend):
                     buf[:bs].fill_(0)
                 continue
             rows = int(src.shape[0])
-            if rows < bs:
+            if rows > bs:
                 raise RuntimeError(
                     "DeepSeek V4 CUDA-graph replay base-offsets row count "
-                    f"{rows} < bs={bs} for group {gid!r}"
+                    f"{rows} exceeds bs={bs} for group {gid!r}"
                 )
             if bs > 0:
-                # Flat replay requires every source, so this copy completely
-                # defines the active buffer; a preceding zero fill is dead.
-                source = src[:bs]
+                source = src[:rows]
                 if not require_all_groups:
                     source = source.to(torch.int32)
-                buf[:bs].copy_(source)
+                buf[:rows].copy_(source)
+                if rows < bs:
+                    buf[rows:bs].zero_()
         return out
+
+    def _refresh_cuda_graph_flat_packed(
+        self,
+        source: CacheTableSource,
+        *,
+        bs: int,
+        actual_bs: int,
+    ) -> None:
+        """Fused exact-width table/base refresh from one planned upload."""
+
+        packed = source.packed
+        if not isinstance(packed, FlatPackedTableOwnerSource):
+            raise RuntimeError(
+                "planned DeepSeek V4 flat replay requires owner-bound packed input"
+            )
+        destination = self._cuda_graph_flat_packed_storage
+        if destination is None or self._cuda_graph_flat_max_cols <= 0:
+            raise RuntimeError(
+                "planned DeepSeek V4 flat replay has no packed graph destination"
+            )
+        cache_key = id(packed.unpack_meta)
+        validated = self._cuda_graph_validated_packed_sources.get(cache_key)
+        if (
+            validated is None
+            or validated[0] is not packed.unpack_meta
+            or validated[1] is not packed.buffer
+            or validated[2] is not source.tables
+            or validated[3] is not source.base_offsets
+            or validated[4] is not packed.group_ids
+        ):
+            # Descriptor, storage, and group schema are immutable per ring
+            # slot. Dynamic rows and widths are checked below on every replay.
+            self._validate_cuda_graph_flat_packed_source(source, packed)
+            self._cuda_graph_validated_packed_sources[cache_key] = (
+                packed.unpack_meta,
+                packed.buffer,
+                source.tables,
+                source.base_offsets,
+                packed.group_ids,
+            )
+        self._validate_cuda_graph_flat_packed_shape(
+            source,
+            packed,
+            bs=bs,
+            actual_bs=actual_bs,
+        )
+        flat_tables_unpack(
+            packed.buffer,
+            packed.unpack_meta,
+            destination,
+            bs,
+            actual_bs=actual_bs,
+            tail_pad=-1,
+            max_cols=self._cuda_graph_flat_max_cols,
+        )
+
+    def _validate_cuda_graph_flat_packed_source(
+        self,
+        source: CacheTableSource,
+        packed: FlatPackedTableOwnerSource,
+    ) -> None:
+        """Validate one immutable ring-slot layout on its first replay."""
+
+        if packed.group_ids != self._cuda_graph_flat_group_ids:
+            raise RuntimeError(
+                "DeepSeek V4 packed replay groups disagree with graph capture: "
+                f"source={list(packed.group_ids)}, "
+                f"capture={list(self._cuda_graph_flat_group_ids)}"
+            )
+        if frozenset(source.tables) != frozenset(packed.group_ids):
+            raise RuntimeError(
+                "DeepSeek V4 packed replay source groups disagree with its header"
+            )
+        validate_flat_table_base_offsets(
+            source.tables,
+            source.base_offsets,
+            where="DeepSeek V4 packed CUDA graph replay",
+        )
+        destination = self._cuda_graph_flat_packed_storage
+        assert destination is not None
+        if (
+            not isinstance(packed.buffer, torch.Tensor)
+            or packed.buffer.dtype != torch.int32
+            or packed.buffer.dim() != 1
+            or packed.buffer.device != destination.device
+        ):
+            raise RuntimeError(
+                "DeepSeek V4 packed replay has an invalid packed source buffer"
+            )
+        meta = packed.unpack_meta
+        if (
+            not isinstance(meta, torch.Tensor)
+            or meta.dtype != torch.int32
+            or tuple(meta.shape) != (len(packed.group_ids), 6)
+            or meta.device != destination.device
+        ):
+            raise RuntimeError(
+                "DeepSeek V4 packed replay has an invalid owner unpack header"
+            )
+        source_storage = packed.buffer.untyped_storage().data_ptr()
+        if meta.untyped_storage().data_ptr() != source_storage:
+            raise RuntimeError(
+                "DeepSeek V4 packed replay header escaped its planned upload storage"
+            )
+        for group_id in packed.group_ids:
+            table = source.tables[group_id]
+            base = source.base_offsets[group_id]
+            if (
+                table.untyped_storage().data_ptr() != source_storage
+                or base.untyped_storage().data_ptr() != source_storage
+            ):
+                raise RuntimeError(
+                    f"DeepSeek V4 packed replay group {group_id!r} escaped its "
+                    "planned upload storage"
+                )
+
+    def _validate_cuda_graph_flat_packed_shape(
+        self,
+        source: CacheTableSource,
+        packed: FlatPackedTableOwnerSource,
+        *,
+        bs: int,
+        actual_bs: int,
+    ) -> None:
+        """Validate replay-varying rows and widths before the masked unpack."""
+
+        source_rows = None
+        for group_index, group_id in enumerate(packed.group_ids):
+            table = source.tables[group_id]
+            base = source.base_offsets[group_id]
+            rows = int(table.shape[0])
+            base_rows = int(base.shape[0])
+            if rows != base_rows:
+                raise RuntimeError(
+                    "DeepSeek V4 packed replay table/base rows disagree for "
+                    f"{group_id!r}: table={rows}, base={base_rows}"
+                )
+            if source_rows is None:
+                source_rows = rows
+            elif source_rows != rows:
+                raise RuntimeError(
+                    "DeepSeek V4 packed replay groups have different row counts"
+                )
+            source_cols = int(table.shape[1])
+            capture_cols = self._cuda_graph_flat_capture_cols[group_index]
+            if source_cols <= 0 or source_cols > capture_cols:
+                raise RuntimeError(
+                    "DeepSeek V4 packed replay table width exceeds capture for "
+                    f"{group_id!r}: source={source_cols}, capture={capture_cols}"
+                )
+        if source_rows is None or source_rows < actual_bs or source_rows > bs:
+            raise RuntimeError(
+                "DeepSeek V4 packed replay source rows do not cover the live "
+                f"batch: source={source_rows}, actual={actual_bs}, padded={bs}"
+            )
 
     def _cuda_graph_tokens_per_req(
         self,
@@ -2328,17 +2519,24 @@ class DeepseekV4AttentionBackend(AttentionBackend):
             rows=bs,
             device=self.device,
         )
-        self._refresh_cuda_graph_paged_cache_block_tables(
-            bs,
-            tables_on_device,
-            pad_value=-1,
-            require_all_groups=self._uses_flat_cache_tables,
-        )
-        self._refresh_cuda_graph_base_offsets(
-            bs,
-            offsets_on_device,
-            require_all_groups=self._uses_flat_cache_tables,
-        )
+        if self._uses_flat_cache_tables and table_source.packed is not None:
+            self._refresh_cuda_graph_flat_packed(
+                table_source,
+                bs=bs,
+                actual_bs=actual_bs,
+            )
+        else:
+            self._refresh_cuda_graph_paged_cache_block_tables(
+                bs,
+                tables_on_device,
+                pad_value=-1,
+                require_all_groups=self._uses_flat_cache_tables,
+            )
+            self._refresh_cuda_graph_base_offsets(
+                bs,
+                offsets_on_device,
+                require_all_groups=self._uses_flat_cache_tables,
+            )
         metadata_forward_mode = forward_mode
         is_decode = (
             metadata_forward_mode is not None and metadata_forward_mode.is_decode()

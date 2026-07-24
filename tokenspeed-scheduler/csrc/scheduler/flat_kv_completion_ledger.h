@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "cache/cache_types.h"
 #include "scheduler/operations/forward.h"
 #include "scheduler/outside_events/forward.h"
 
@@ -150,7 +151,7 @@ struct FlatKVCompletionPrepareResult {
 
 class FlatKVCompletionLedger {
 public:
-    FlatKVCompletionLedger(std::size_t max_outstanding_per_request, std::vector<std::int32_t> group_strides);
+    FlatKVCompletionLedger(std::size_t max_outstanding_per_request, std::span<const KvCacheGroupSchema> schema);
 
     FlatKVCompletionInput RecordDispatch(FlatKVCompletionState& state, FlatKVDispatchSpec spec);
 
@@ -167,7 +168,7 @@ private:
                                     const forward::FlatKVCompletion& completion, std::span<const std::int32_t> tokens);
 
     const std::size_t max_outstanding_per_request_;
-    const std::vector<std::int32_t> group_strides_;
+    const std::span<const KvCacheGroupSchema> schema_;
     std::vector<std::int32_t> ready_raw_ends_scratch_;
 };
 

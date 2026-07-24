@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Any
 
@@ -1595,8 +1595,7 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
             )
         if cache_owner not in ("target", "draft"):
             raise ValueError(
-                f"DeepSeek V4 cache_owner must be target or draft, got "
-                f"{cache_owner!r}"
+                f"DeepSeek V4 cache_owner must be target or draft, got {cache_owner!r}"
             )
         super().__init__(
             size=size,
@@ -1666,7 +1665,10 @@ class DeepseekV4TokenToKVPool(BaseTokenToKVPool):
                 else plan.draft_owner_group_specs
             )
             expected_by_id = {spec.group_id: spec for spec in expected_owner_specs}
-            actual_by_id = {spec.group_id: spec for spec in owner_specs}
+            actual_by_id = {
+                spec.group_id: replace(spec, owner_mask=owner_mask)
+                for spec in owner_specs
+            }
             if actual_by_id != expected_by_id:
                 raise ValueError(
                     "DeepSeek V4 flat owner specs disagree with layout/config: "

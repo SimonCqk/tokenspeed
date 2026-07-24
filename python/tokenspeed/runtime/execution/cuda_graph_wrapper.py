@@ -292,6 +292,13 @@ class CudaGraphWrapper:
             draft_attn_backend is not None
             and getattr(draft_attn_backend, "accepts_bound_cache_table_source", False)
         )
+        self._flat_graph_consumers_self_pad = bool(
+            getattr(attn_backend, "flat_tables_self_padding", False)
+            and (
+                not self._draft_uses_flat_source
+                or getattr(draft_attn_backend, "flat_tables_self_padding", False)
+            )
+        )
         self._draft_metadata_sequence = getattr(
             draft_attn_backend,
             "init_speculative_draft_metadata",
@@ -979,18 +986,16 @@ class CudaGraphWrapper:
                     "CUDA graph replay requires staged flat table/base maps"
                 )
             flat_staging = getattr(self.input_buffers, "flat_block_table_staging", None)
-            if flat_staging is not None:
-                if actual_bs == 0:
-                    # stage_idle already returned padded views backed by the
-                    # newly rotated slot. There is no active-row shape to pad.
-                    scheduler_flat_source = flat_cache_table_source
-                else:
-                    scheduler_flat_source = flat_staging.pad_current_for_graph(
-                        flat_cache_table_source,
-                        actual_rows=actual_bs,
-                        padded_rows=padded_bs,
-                    )
+            if self._flat_graph_consumers_self_pad:
+                # Preserve one packed upload. Consumers fill graph dummy rows
+                # while unpacking into their persistent exact-width buffers.
+                scheduler_flat_source = flat_cache_table_source
             else:
+                if flat_staging is not None:
+                    raise RuntimeError(
+                        "planned flat table staging requires graph consumers "
+                        "with flat_tables_self_padding"
+                    )
                 flat_block_tables = flat_cache_table_source.tables
                 flat_block_table_base_offsets = flat_cache_table_source.base_offsets
                 flat_table_bs = next(
@@ -1001,36 +1006,25 @@ class CudaGraphWrapper:
                     ),
                     int(req_pool_indices.shape[0]),
                 )
-                flat_consumers = [self.attn_backend]
-                if self._draft_uses_flat_source:
-                    flat_consumers.append(self.draft_attn_backend)
-                if all(
-                    getattr(backend, "flat_tables_self_padding", False)
-                    for backend in flat_consumers
-                ):
-                    # Preserve the packed/staged storage identity; these
-                    # backends fill dummy rows in their persistent stacks.
-                    scheduler_flat_source = flat_cache_table_source
-                else:
-                    scheduler_flat_block_tables = self._pad_block_tables_to_padded_bs(
-                        flat_block_tables,
-                        actual_bs=flat_table_bs,
+                scheduler_flat_block_tables = self._pad_block_tables_to_padded_bs(
+                    flat_block_tables,
+                    actual_bs=flat_table_bs,
+                    padded_bs=padded_bs,
+                    pad_value=0,
+                )
+                scheduler_flat_block_table_base_offsets = (
+                    self._pad_offsets_to_padded_bs(
+                        flat_block_table_base_offsets,
+                        actual_bs=actual_bs,
                         padded_bs=padded_bs,
-                        pad_value=0,
                     )
-                    scheduler_flat_block_table_base_offsets = (
-                        self._pad_offsets_to_padded_bs(
-                            flat_block_table_base_offsets,
-                            actual_bs=actual_bs,
-                            padded_bs=padded_bs,
-                        )
-                    )
-                    scheduler_flat_source = CacheTableSource(
-                        kind="flat",
-                        tables=scheduler_flat_block_tables,
-                        base_offsets=scheduler_flat_block_table_base_offsets,
-                        generation=flat_cache_table_source.generation,
-                    )
+                )
+                scheduler_flat_source = CacheTableSource(
+                    kind="flat",
+                    tables=scheduler_flat_block_tables,
+                    base_offsets=scheduler_flat_block_table_base_offsets,
+                    generation=flat_cache_table_source.generation,
+                )
             target_source = self._target_flat_inputs.bind(
                 scheduler_flat_source,
                 owner="target",

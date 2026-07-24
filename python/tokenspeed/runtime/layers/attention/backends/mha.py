@@ -415,38 +415,46 @@ class MHAAttnBackend(FlatCacheGroupsMixin, AttentionBackend):
             )
         )
 
+        prior_metadata = self.cuda_graph_decode_metadata.get(bs)
         if self.draft_block_decode and self.spec_num_tokens > 1:
             # DFLASH draft block: spec_num_tokens decode rows per request.
             expanded_bs = bs * self.spec_num_tokens
-            metadata = MHADecodeMetadata(
-                page_table=self.cuda_graph_page_table[:expanded_bs, :],
-                seq_lens=self.cuda_graph_seq_lens[:expanded_bs],
-                page_tables=page_tables,
-                block_table_base_offsets=block_table_base_offsets,
-                out_cache_locs=out_cache_locs,
-            )
+            page_table = self.cuda_graph_page_table[:expanded_bs, :]
+            graph_seq_lens = self.cuda_graph_seq_lens[:expanded_bs]
             # Uniform non-causal seq_lens are written by the drafter inside the
             # captured graph (see fill_block_decode_seq_lens); seed a safe
             # baseline for the capture run before that op records.
-            metadata.seq_lens.fill_(self.spec_num_tokens)
+            graph_seq_lens.fill_(self.spec_num_tokens)
         else:
+            page_table = (
+                None if page_tables is not None else self.cuda_graph_page_table[:bs, :]
+            )
+            graph_seq_lens = self.cuda_graph_seq_lens[:bs]
+        if prior_metadata is None:
             metadata = MHADecodeMetadata(
                 # Flat captures route reads through the per-group tables and
                 # replay never fills the radix single table, so mirror the
                 # eager flat path: page_table=None instead of a slice of the
                 # never-filled zero buffer.
-                page_table=(
-                    None
-                    if page_tables is not None
-                    else self.cuda_graph_page_table[:bs, :]
-                ),
-                seq_lens=self.cuda_graph_seq_lens[:bs],
+                page_table=page_table,
+                seq_lens=graph_seq_lens,
                 page_tables=page_tables,
                 block_table_base_offsets=block_table_base_offsets,
                 out_cache_locs=out_cache_locs,
             )
-            if self.spec_num_tokens > 1 and not self.is_draft:
-                metadata.seq_lens.copy_(seq_lens[:bs].clamp_min(self.spec_num_tokens))
+        else:
+            metadata = prior_metadata
+            metadata.page_table = page_table
+            metadata.seq_lens = graph_seq_lens
+            metadata.page_tables = page_tables
+            metadata.block_table_base_offsets = block_table_base_offsets
+            metadata.out_cache_locs = out_cache_locs
+        if (
+            not self.draft_block_decode
+            and self.spec_num_tokens > 1
+            and not self.is_draft
+        ):
+            metadata.seq_lens.copy_(seq_lens[:bs].clamp_min(self.spec_num_tokens))
         self.cuda_graph_decode_metadata[bs] = metadata
         self.forward_decode_metadata = metadata
 
