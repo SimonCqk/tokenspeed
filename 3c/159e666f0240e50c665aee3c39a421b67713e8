@@ -1,0 +1,61 @@
+test/runtime/cache/test_deepseek_v4_l2_offload.py
+  s_6486291bb56ff3::t_0dbbc8917b5075 328,333,334-335,347,348
+test/runtime/cache/test_transfer_host_executor.py
+  s_09aeb98b04b21a::t_77f8b365a39b36 163-164
+test/runtime/test_v4_prefix_cache_metadata.py
+  s_09aeb98b04b21a::t_aae63ad0a4bd98 183-185
+tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cuda/csrc/kvcacheio_transfer.cu
+  s_035b90c0746a6c::t_857f9e419684a5 555
+tokenspeed-kernel/test/test_kvcacheio_direct.py
+  s_035b90c0746a6c::t_af3bd71623aaaa 14,33,185
+tokenspeed-scheduler/bindings/python_module.cpp
+  s_09aeb98b04b21a::t_84f1ab97c1b60d 468,473
+tokenspeed-scheduler/csrc/fsm/forward_events.cpp
+  s_09aeb98b04b21a::t_28caea94f7e920 744,752
+tokenspeed-scheduler/csrc/fsm/forward_events.h
+  s_09aeb98b04b21a::t_d0de4b65544a53 89,328
+tokenspeed-scheduler/csrc/scheduler/execution_plan.h
+  s_09aeb98b04b21a::t_c52e11f99f997a 24,38,42-44
+tokenspeed-scheduler/csrc/scheduler/operations/forward.cpp
+  s_09aeb98b04b21a::t_a3cfc6e63fb96f 1249-1250,1252,1327
+tokenspeed-scheduler/csrc/scheduler/outside_event_handler.cpp
+  s_09aeb98b04b21a::t_257e172a2cc0e5 138,181
+tokenspeed-scheduler/tests/cpp/integration_test_helper.h
+  s_09aeb98b04b21a::t_d035ee6e5798aa 29,224-225,227,229-230
+tokenspeed-scheduler/tests/cpp/test_paged_cache_l2_offload.cpp
+  s_09aeb98b04b21a::t_b61c831a83e122 313-314,503,546-547
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "3c159e666f0240e50c665aee3c39a421b67713e8",
+  "prompts": {},
+  "sessions": {
+    "s_035b90c0746a6c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8dfe-8ceb-79b3-9780-78a1bf9c3109",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_09aeb98b04b21a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8de3-7171-7391-9c92-8a6a99bd6109",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    },
+    "s_6486291bb56ff3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ea133-0551-7bc3-b7f4-e3cb8e44f1dd",
+        "model": "unknown"
+      },
+      "human_author": "SimonCqk <cqk0100@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
