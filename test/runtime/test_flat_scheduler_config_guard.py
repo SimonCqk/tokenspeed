@@ -1,8 +1,8 @@
 """Flat-scheduler config guard (validate_flat_scheduler_config, called from
 engine/event_loop before the C++ Scheduler ctor).
 
-On a flat-built ext: a radix-populate-only backend (uses_paged_cache_groups
-without uses_flat_cache_groups, DeepSeek V4/MLA-style) is rejected loudly;
+On a flat-built ext: any radix-populate-only backend (uses_paged_cache_groups
+without uses_flat_cache_groups) is rejected loudly;
 zero published groups is rejected with the actual cause named; a
 flat-capable backend with >=1 group passes. On a radix-built ext the guard
 is a no-op. The validator is pure and torch-free, so this file runs on a
@@ -15,6 +15,7 @@ import importlib.util
 import os
 import sys
 import unittest
+from unittest import mock
 
 # CI Registration (parsed via AST, runtime no-op)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,12 +43,15 @@ def _load_paged_cache_spec():
             "configs",
             "paged_cache_spec.py",
         )
-        spec = importlib.util.spec_from_file_location("_paged_cache_spec_guard", path)
-        module = importlib.util.module_from_spec(spec)
-        # dataclass processing resolves cls.__module__ through sys.modules, so
-        # the module must be registered before exec.
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+        with mock.patch.dict(sys.modules):
+            spec = importlib.util.spec_from_file_location(
+                "_paged_cache_spec_guard", path
+            )
+            module = importlib.util.module_from_spec(spec)
+            # dataclass processing resolves cls.__module__ through sys.modules, so
+            # the module must be registered before exec.
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
         return module
 
 
@@ -55,10 +59,18 @@ _pcs = _load_paged_cache_spec()
 
 
 class FakeV4StyleBackend:
-    """DeepSeek V4/MLA shape: radix-populate consumer, not flat-capable."""
+    """Legacy V4-like shape: radix-populate consumer, not flat-capable."""
 
     uses_paged_cache_groups = True
     uses_flat_cache_groups = False
+
+
+class FakeV4FlatBackend:
+    """Migrated V4 shape: exactly-one radix/flat source selected by its pool."""
+
+    uses_paged_cache_groups = True
+    uses_flat_cache_groups = True
+    flat_spec_capable = True
 
 
 class FakeFlatMHABackend:
@@ -78,15 +90,15 @@ class FakeSpecIncapableBackend:
 
 
 class FakeV4Pool:
-    pass
+    runtime_contract = None
 
 
 class FakeMHAPool:
-    pass
+    runtime_contract = None
 
 
 class FakeMambaPool:
-    pass
+    runtime_contract = None
 
 
 class FakeGroup:
@@ -149,6 +161,15 @@ class ValidateFlatSchedulerConfigTest(unittest.TestCase):
             attn_backend=FakeFlatMHABackend(),
             kv_pool=FakeMHAPool(),
             speculative_algorithm=None,
+        )
+
+    def test_flat_ext_migrated_v4_groups_passes_with_spec(self):
+        _pcs.validate_flat_scheduler_config(
+            flat_kvcache_ext=True,
+            paged_cache_groups=[FakeGroup(), FakeGroup()],
+            attn_backend=FakeV4FlatBackend(),
+            kv_pool=FakeV4Pool(),
+            speculative_algorithm="EAGLE3",
         )
 
     def test_radix_ext_is_a_noop_regardless(self):

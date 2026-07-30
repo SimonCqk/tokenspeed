@@ -117,6 +117,9 @@ struct SchedulerConfig {
     // Explicit opt-in for the Flat KV Prefill/Decode lifecycle. This keeps
     // legacy non-flat PD and Flat standalone scheduling unchanged.
     bool enable_flatkv_pd{false};
+    // Runtime capability opt-in for Flat groups to omit leading null holes and
+    // publish their logical origins beside the tables.
+    bool compact_flat_block_tables{false};
 
     bool disable_prefix_cache{false};
     bool enable_mamba{false};

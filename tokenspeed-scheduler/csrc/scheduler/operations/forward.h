@@ -36,7 +36,8 @@ struct ForwardOperationBase {
     std::string request_id;
     std::int32_t request_pool_index;
     std::int32_t input_length;
-    // All pages currently occupied by this request (existing + newly allocated).
+    // All pages currently occupied by this request for the legacy scalar page
+    // table. Empty when a group-keyed compact table is the authoritative ABI.
     std::vector<int32_t> occupied_pages;
     // Index into occupied_pages where the emitted page-table refresh begins.
     // On the radix path this may precede newly allocated pages when publishing
@@ -54,13 +55,13 @@ struct ForwardOperationBase {
     // base_offset + c. For full-history groups base_offset is implicitly 0
     // and the key may be omitted from paged_cache_page_base_offsets.
     std::map<std::string, std::vector<std::int32_t>> paged_cache_pages;
-    // Per-request, per-sliding-group base logical-page offset.
+    // Per-request logical-page origin for compact paged/Flat rows.
     std::map<std::string, std::int32_t> paged_cache_page_base_offsets;
 
-    // flat KV-cache per-group block table. key = group_id, value = that group's
-    // physical page-id row (null hole = 0, absolute logical-page index, NOT
-    // compacted). Filled only on the flat path; empty on the radix path. Does
-    // not share a contract with paged_cache_pages (radix: compact + offset).
+    // Flat KV-cache per-group block table. Rows are absolute by default. An
+    // offset-capable runtime may opt in to omitting leading null holes;
+    // paged_cache_page_base_offsets then carries the row's logical origin.
+    // Internal null holes remain 0.
     std::map<std::string, std::vector<std::int32_t>> flat_block_tables;
 
     // Mamba extension (default: inactive)
@@ -114,13 +115,16 @@ struct FlatForwardOperation {
     // logical-page indexing. For full-history groups rows are absolute and
     // the offset is implicitly 0 (key omitted from the offsets map).
     std::map<std::string, std::vector<std::vector<std::int32_t>>> paged_cache_block_tables;
-    // Per-group [num_reqs] base logical-page offsets, only present for
-    // sliding-window groups. Missing key ⇔ offset is 0 for every row.
+    // Per-group [num_reqs] base logical-page offsets. Radix may omit
+    // all-zero full-history groups; Flat publishes the exact table key set so
+    // tables and offsets can be packed atomically by the runtime.
     std::map<std::string, std::vector<std::int32_t>> paged_cache_block_table_base_offsets;
 
-    // flat KV-cache per-group block table, batched: dict[group_id] =
-    // [num_reqs, max_pages_in_batch] padded with -1. Each row is absolute
-    // (null hole = 0, no compaction); there is no base-offset companion.
+    // Flat KV-cache per-group block table, batched: dict[group_id] =
+    // [num_reqs, max_live_pages_in_batch] padded with -1. Rows are absolute by
+    // default; an offset-capable runtime may compact leading reclaimed holes.
+    // Pair with paged_cache_block_table_base_offsets to recover logical block
+    // indices. Internal null holes remain 0.
     std::map<std::string, std::vector<std::vector<std::int32_t>>> flat_block_tables;
     // Contiguous row-major copy of flat_block_tables ([rows * cols], -1
     // padded), exposed zero-copy to Python as a 2-D ndarray -- the nested

@@ -99,6 +99,13 @@ def test_qwen_recipe_preserves_backend_kernel_page_size() -> None:
         "layer.0.conv": torch.bfloat16,
         "layer.0.ssm": torch.float32,
     }
+    full_history_tokens = (
+        setup.target.memory_plan.num_lcm_blocks
+        * setup.target.memory_plan.group(FULL_ATTENTION).cache_blocks_per_lcm_block
+        * setup.target.memory_plan.logical_block_tokens
+    )
+    assert setup.target.token_capacity == full_history_tokens
+    assert setup.target.token_capacity < setup.target.pool_size
     assert not hasattr(attn_config, "lcm_memory_plan")
     with mock.patch(_FLAT_PROBE, return_value=True):
         pool = create_lcm_pool(
@@ -109,3 +116,5 @@ def test_qwen_recipe_preserves_backend_kernel_page_size() -> None:
             enable_memory_saver=False,
         )
     assert isinstance(pool, LcmMHATokenToKVPool)
+    assert pool.size == setup.target.pool_size
+    assert pool.runtime_contract.token_capacity == setup.target.token_capacity

@@ -66,6 +66,7 @@ TEST(FlatForwardOperation, EmptyOpsProducesEmpty) {
     EXPECT_EQ(flat_op.num_extends(), 0u);
     EXPECT_TRUE(flat_op.request_ids.empty());
     EXPECT_TRUE(flat_op.flat_block_tables.empty());
+    EXPECT_TRUE(flat_op.paged_cache_block_table_base_offsets.empty());
 }
 
 TEST(FlatForwardOperation, MultiRequestPadsRaggedRowsWithMinusOne) {
@@ -80,6 +81,7 @@ TEST(FlatForwardOperation, MultiRequestPadsRaggedRowsWithMinusOne) {
     ASSERT_EQ(full.size(), 2u);
     EXPECT_EQ(full.at(0), (std::vector<std::int32_t>{10, 11, 12}));
     EXPECT_EQ(full.at(1), (std::vector<std::int32_t>{20, -1, -1}));
+    EXPECT_TRUE(flat_op.paged_cache_block_table_base_offsets.empty());
 }
 
 // Flat contract: 0 = real null-block hole, -1 = absent (pad) column.
@@ -98,22 +100,25 @@ TEST(FlatForwardOperation, NullHoleZeroDistinctFromPadMinusOne) {
     EXPECT_EQ(swa.at(1).at(1), -1);
 }
 
-TEST(FlatForwardOperation, PrefillBeforeDecodeKeepsRowsAlignedWithRequests) {
+TEST(FlatForwardOperation, PrefillBeforeDecodeKeepsRowsAndOffsetsAligned) {
     std::vector<ForwardOperation> ops;
-    ops.emplace_back(MakeDecode("d", FlatTable{{"full", {20}}}, /*decode_input_id=*/99));
-    ops.emplace_back(MakePrefill("p", FlatTable{{"full", {10, 11}}}, /*input_ids=*/{7, 8}));
+    DecodeOperation decode = MakeDecode("d", FlatTable{{"full", {20}}, {"state", {30}}},
+                                        /*decode_input_id=*/99);
+    decode.paged_cache_page_base_offsets = {{"full", 0}, {"state", 7}};
+    PrefillOperation prefill = MakePrefill("p", FlatTable{{"full", {10, 11}}, {"state", {12}}}, /*input_ids=*/{7, 8});
+    prefill.paged_cache_page_base_offsets = {{"full", 0}, {"state", 3}};
+    ops.emplace_back(std::move(decode));
+    ops.emplace_back(std::move(prefill));
 
     FlatForwardOperation flat_op{std::move(ops)};
 
     ASSERT_EQ(flat_op.request_ids.size(), 2u);
     EXPECT_EQ(flat_op.request_ids.at(0), "p");
     EXPECT_EQ(flat_op.request_ids.at(1), "d");
-
-    const auto& full = flat_op.flat_block_tables.at("full");
-    ASSERT_EQ(full.size(), 2u);
-    EXPECT_EQ(full.at(0), (std::vector<std::int32_t>{10, 11}));
-    EXPECT_EQ(full.at(1), (std::vector<std::int32_t>{20, -1}));
-
+    EXPECT_EQ(flat_op.flat_block_tables.at("full").at(0), (std::vector<std::int32_t>{10, 11}));
+    EXPECT_EQ(flat_op.flat_block_tables.at("full").at(1), (std::vector<std::int32_t>{20, -1}));
+    EXPECT_EQ(flat_op.paged_cache_block_table_base_offsets.at("full"), (std::vector<std::int32_t>{0, 0}));
+    EXPECT_EQ(flat_op.paged_cache_block_table_base_offsets.at("state"), (std::vector<std::int32_t>{3, 7}));
     EXPECT_EQ(flat_op.num_extends(), 1u);
     EXPECT_EQ(flat_op.input_ids, (std::vector<std::int32_t>{7, 8}));
     EXPECT_EQ(flat_op.decode_input_ids, (std::vector<std::int32_t>{99}));
@@ -128,16 +133,15 @@ TEST(FlatForwardOperation, GroupKeyUnionAcrossRequestsPadsMissingGroup) {
 
     ASSERT_EQ(flat_op.flat_block_tables.count("full"), 1u);
     ASSERT_EQ(flat_op.flat_block_tables.count("swa"), 1u);
-
     const auto& full = flat_op.flat_block_tables.at("full");
     const auto& swa = flat_op.flat_block_tables.at("swa");
     ASSERT_EQ(full.size(), 2u);
     ASSERT_EQ(swa.size(), 2u);
-
     EXPECT_EQ(full.at(0), (std::vector<std::int32_t>{10, 11}));
     EXPECT_EQ(full.at(1), (std::vector<std::int32_t>{-1, -1}));
     EXPECT_EQ(swa.at(0), (std::vector<std::int32_t>{-1, -1, -1}));
     EXPECT_EQ(swa.at(1), (std::vector<std::int32_t>{20, 21, 22}));
+    EXPECT_TRUE(flat_op.paged_cache_block_table_base_offsets.empty());
 }
 
 TEST(FlatForwardOperation, ScalarFieldsTrackPerRequestRows) {

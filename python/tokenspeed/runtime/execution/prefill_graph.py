@@ -205,6 +205,10 @@ class PrefillGraph:
         input_buffers: The shared static input buffers the graphs read from.
         config: Model-executor config (buckets, DP/world topology, device).
         req_to_page: Request page table; row 0 backs the dummy capture request.
+        compact_flat_block_tables: Whether capture metadata uses compact tables
+            with exact logical bases instead of legacy absolute tables.
+        use_flat_cache_tables: Whether this executor instance receives the
+            Flat scheduler's grouped-table transport.
         drafter: If present, aux-hidden capture (EAGLE3/MTP) is baked into the
             captured graphs.
     """
@@ -217,6 +221,8 @@ class PrefillGraph:
         input_buffers: InputBuffers,
         config: ModelExecutorConfig,
         req_to_page: torch.Tensor | None,
+        compact_flat_block_tables: bool = False,
+        use_flat_cache_tables: bool = False,
         drafter=None,
         decode_wrapper: CudaGraphWrapper | None = None,
         num_warmup: int = 3,
@@ -238,6 +244,10 @@ class PrefillGraph:
         self.input_buffers = input_buffers
         self.config = config
         self.req_to_page = req_to_page
+        self.compact_flat_block_tables = bool(compact_flat_block_tables)
+        self.use_flat_cache_tables = bool(
+            use_flat_cache_tables and attn_backend.uses_flat_cache_groups
+        )
         self.drafter = drafter
         self.num_warmup = num_warmup
         self.dp_size = config.data_parallel_size
@@ -435,13 +445,11 @@ class PrefillGraph:
     def _dummy_flat_tables(self, num_tokens: int) -> dict[str, "torch.Tensor"]:
         """Build capture tables: null KV pages and one writable state page."""
         backend = self.attn_backend
-        if not getattr(backend, "uses_flat_cache_groups", False):
+        if not self.use_flat_cache_tables:
             return {}
-        specs = tuple(getattr(self.token_to_kv_pool, "paged_cache_group_specs", ()))
+        specs = self.token_to_kv_pool.paged_cache_group_specs
         state_group_ids = {
-            str(spec.group_id)
-            for spec in specs
-            if getattr(spec, "family", "history") == "state"
+            str(spec.group_id) for spec in specs if spec.family == "state"
         }
         if not state_group_ids:
             state_group_ids = set(getattr(backend, "flat_state_group_ids", frozenset()))
@@ -475,11 +483,10 @@ class PrefillGraph:
         The prefill analogue of decode's ``_init_capture_metadata``. KV writes
         go to the reserved dummy slot and the page table points at page 0, so
         the forward runs (producing discarded garbage) without touching real
-        cache state. Backends with extra paged caches (DeepSeek-V4 DSA: SWA +
-        compressor + indexer state) also need per-cache block tables, or their
-        extend metadata comes up incomplete and the eager attention break
-        aborts the capture -- reuse the decode wrapper's dummy-table builder
-        (all zeros, the safe page 0) for those.
+        cache state. Backends with extra grouped caches also need one table per
+        cache group, or their extend metadata comes up incomplete and the eager
+        attention break aborts the capture -- reuse the decode wrapper's
+        dummy-table builder (all zeros, the safe page 0) for those.
         """
         ib = self.input_buffers
         ib.input_ids_buf[:num_tokens].fill_(1)
@@ -526,7 +533,7 @@ class PrefillGraph:
             extra_metadata_kwargs["positions"] = ib.positions_buf[:num_tokens]
         flat_tables = self._dummy_flat_tables(num_tokens)
         if flat_tables:
-            contract = getattr(self.token_to_kv_pool, "runtime_contract", None)
+            contract = self.token_to_kv_pool.runtime_contract
             if contract is not None:
                 arrays = {
                     group_id: table.cpu().numpy()
@@ -535,17 +542,32 @@ class PrefillGraph:
                 dummy_forward_op = SimpleNamespace(
                     flat_block_tables_arrays=lambda: arrays
                 )
+                if self.compact_flat_block_tables:
+                    base_arrays = {
+                        group_id: torch.zeros(1, dtype=torch.int32).numpy()
+                        for group_id in arrays
+                    }
+                    dummy_forward_op.paged_cache_block_table_base_offsets_arrays = (
+                        lambda: base_arrays
+                    )
                 flat_cache_metadata = FlatCacheBatchMetadata.from_forward_op(
                     dummy_forward_op,
                     device=self.config.device,
                     contract=contract,
                     num_requests=1,
+                    compact_tables=self.compact_flat_block_tables,
                 )
                 flat_tables = dict(
                     flat_cache_metadata.tables(active_forward_op=dummy_forward_op)
                 )
                 extra_metadata_kwargs["flat_cache_metadata"] = flat_cache_metadata
                 extra_metadata_kwargs["flat_cache_forward_op"] = dummy_forward_op
+                if self.compact_flat_block_tables:
+                    extra_metadata_kwargs["paged_cache_block_table_base_offsets"] = (
+                        flat_cache_metadata.base_offsets(
+                            active_forward_op=dummy_forward_op
+                        )
+                    )
             extra_metadata_kwargs["flat_block_tables"] = flat_tables
         self.attn_backend.init_forward_metadata(
             bs=1,

@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -154,10 +155,8 @@ def _validate_shared_lcm_geometry(pool, draft_pool) -> None:
                 "do not share page-id geometry"
             )
 
-    target_specs = {
-        spec.group_id: spec for spec in getattr(pool, "paged_cache_group_specs", ())
-    }
-    for draft_spec in getattr(draft_pool, "paged_cache_group_specs", ()):
+    target_specs = {spec.group_id: spec for spec in pool.paged_cache_group_specs}
+    for draft_spec in draft_pool.paged_cache_group_specs:
         target_spec = target_specs.get(draft_spec.group_id)
         if target_spec is None:
             raise RuntimeError(
@@ -1027,10 +1026,15 @@ def create_attn_components(
     use_lcm_gdn = is_hybrid_gdn and has_flat_state and flat_kvcache
     use_lcm_k3 = is_hybrid_mla_kda and flat_kvcache
     use_lcm_inkling = is_inkling and flat_kvcache
+    use_lcm_v4 = is_deepseek_v4_model and flat_kvcache
     lcm_family = (
-        "qwen_gdn"
-        if use_lcm_gdn
-        else "kimi_k3" if use_lcm_k3 else "inkling" if use_lcm_inkling else None
+        "deepseek_v4"
+        if use_lcm_v4
+        else (
+            "qwen_gdn"
+            if use_lcm_gdn
+            else "kimi_k3" if use_lcm_k3 else "inkling" if use_lcm_inkling else None
+        )
     )
     if has_flat_state and flat_kvcache and lcm_family is None:
         raise RuntimeError(
@@ -1084,14 +1088,18 @@ def create_attn_components(
     draft_deepseek_v4_layout = None
     profile_cache_cell_size = None
     draft_profile_cache_cell_size = None
-    if is_deepseek_v4_model:
+    if is_deepseek_v4_model or is_deepseek_v4_draft_model:
+        from tokenspeed.runtime.configs.deepseek_v4_cache_spec import (
+            V4_KERNEL_BLOCK_ROWS,
+        )
         from tokenspeed.runtime.layers.attention.kv_cache.deepseek_v4 import (
             deepseek_v4_cache_layout_from_config,
         )
 
+    if is_deepseek_v4_model:
         deepseek_v4_layout = deepseek_v4_cache_layout_from_config(
             model_config.hf_config,
-            page_size=server_args.block_size,
+            page_size=(V4_KERNEL_BLOCK_ROWS if use_lcm_v4 else server_args.block_size),
             use_fp4_indexer_cache=_attention_use_fp4_indexer_cache(
                 server_args, model_config.hf_config
             ),
@@ -1099,15 +1107,11 @@ def create_attn_components(
         )
         profile_cache_cell_size = deepseek_v4_layout.cache_cell_size(num_layers)
     if is_deepseek_v4_draft_model:
-        from tokenspeed.runtime.layers.attention.kv_cache.deepseek_v4 import (
-            deepseek_v4_cache_layout_from_config,
-        )
-
         draft_layer_start = draft_model_config.num_hidden_layers
         draft_num_layers = draft_model_config.num_attention_layers
         draft_deepseek_v4_layout = deepseek_v4_cache_layout_from_config(
             draft_model_config.hf_config,
-            page_size=server_args.block_size,
+            page_size=(V4_KERNEL_BLOCK_ROWS if use_lcm_v4 else server_args.block_size),
             use_fp4_indexer_cache=_attention_use_fp4_indexer_cache(
                 server_args, draft_model_config.hf_config
             ),
@@ -1119,6 +1123,16 @@ def create_attn_components(
         draft_profile_cache_cell_size = draft_deepseek_v4_layout.cache_cell_size(
             draft_model_config.num_attention_layers
         )
+    if use_lcm_v4:
+        # The V4 scheduler uses heterogeneous group spans, while its kernels
+        # consume the fixed row geometry published by the model cache recipe.
+        # Keep this model-local; do not rewrite ServerArgs or other LCM configs.
+        config = replace(config, page_size=V4_KERNEL_BLOCK_ROWS)
+        if draft_attn_config is not None and is_deepseek_v4_draft_model:
+            draft_attn_config = replace(
+                draft_attn_config,
+                page_size=V4_KERNEL_BLOCK_ROWS,
+            )
 
     hf_config = getattr(model_config, "hf_config", None)
     text_config = getattr(hf_config, "text_config", hf_config) if hf_config else None
@@ -1164,7 +1178,7 @@ def create_attn_components(
         ),
     )
 
-    if is_deepseek_v4_model:
+    if is_deepseek_v4_model and not use_lcm_v4:
         from tokenspeed.runtime.layers.attention.kv_cache.deepseek_v4 import (
             profile_deepseek_v4_max_num_pages,
         )
@@ -1225,22 +1239,31 @@ def create_attn_components(
             cache_budget_bytes=cache_memory,
             decode_input_tokens=decode_input_tokens,
             overlap_schedule_depth=overlap_schedule_depth,
+            deepseek_v4_layout=deepseek_v4_layout,
+            draft_deepseek_v4_layout=draft_deepseek_v4_layout,
         )
         logical_page_size = lcm_setup.target.memory_plan.logical_block_tokens
-        _validate_lcm_page_size(
-            config,
-            logical_page_size=logical_page_size,
-        )
-        if draft_attn_config is not None:
+        # Generic Kimi/Qwen LCM tables are expanded from one logical page size
+        # to the kernel page size. V4 publishes already-resolved child tables
+        # with a distinct span per group, so the uniform validator is not its
+        # interface.
+        if lcm_family != "deepseek_v4":
             _validate_lcm_page_size(
-                draft_attn_config,
+                config,
                 logical_page_size=logical_page_size,
             )
+            if draft_attn_config is not None:
+                _validate_lcm_page_size(
+                    draft_attn_config,
+                    logical_page_size=logical_page_size,
+                )
         cache_budget_bytes = lcm_setup.cache_budget_bytes
         fixed_workspace_bytes = lcm_setup.fixed_workspace_bytes
-        max_num_tokens = lcm_setup.target.pool_size
+        max_num_tokens = lcm_setup.target.token_capacity
         draft_max_num_tokens = (
-            lcm_setup.draft.pool_size if lcm_setup.draft is not None else max_num_tokens
+            lcm_setup.draft.token_capacity
+            if lcm_setup.draft is not None
+            else max_num_tokens
         )
         max_total_num_pages = lcm_setup.target.memory_plan.num_lcm_blocks
         logger.info(
@@ -1372,7 +1395,11 @@ def create_attn_components(
 
         backend = _create_attn_backend(arch, config)
         pool = DeepseekV4TokenToKVPool(
-            size=max_num_tokens,
+            size=(
+                lcm_setup.target.pool_size
+                if use_lcm_v4 and lcm_setup is not None
+                else max_num_tokens
+            ),
             model_dtype=model_config.dtype,
             layout=deepseek_v4_layout,
             layer_num=num_layers,
@@ -1380,12 +1407,13 @@ def create_attn_components(
             enable_memory_saver=enable_memory_saver,
             max_batch_size=config.max_bs,
             max_context_len=config.context_len,
-            page_size=server_args.block_size,
+            page_size=deepseek_v4_layout.page_size,
             rank=rank,
             hf_config=model_config.hf_config,
             max_scheduled_tokens=server_args.chunked_prefill_size,
             decode_input_tokens=decode_input_tokens,
             overlap_schedule_depth=overlap_schedule_depth,
+            lcm_spec=lcm_setup.target if use_lcm_v4 else None,
         )
     elif is_hybrid_linear:
         backend, pool, mamba_pool = _create_hybrid_linear_attn(
@@ -1468,7 +1496,13 @@ def create_attn_components(
                 draft_model_config.attention_arch, draft_attn_config
             )
             draft_pool = DeepseekV4TokenToKVPool(
-                size=draft_max_num_tokens,
+                size=(
+                    lcm_setup.draft.pool_size
+                    if use_lcm_v4
+                    and lcm_setup is not None
+                    and lcm_setup.draft is not None
+                    else draft_max_num_tokens
+                ),
                 model_dtype=draft_model_config.dtype,
                 layout=draft_deepseek_v4_layout,
                 layer_num=draft_model_config.num_attention_layers,
@@ -1476,12 +1510,15 @@ def create_attn_components(
                 enable_memory_saver=enable_memory_saver,
                 max_batch_size=draft_attn_config.max_bs,
                 max_context_len=draft_attn_config.context_len,
-                page_size=server_args.block_size,
+                page_size=draft_deepseek_v4_layout.page_size,
                 rank=rank,
                 hf_config=draft_model_config.hf_config,
                 max_scheduled_tokens=server_args.chunked_prefill_size,
                 decode_input_tokens=decode_input_tokens,
                 overlap_schedule_depth=overlap_schedule_depth,
+                lcm_spec=(
+                    lcm_setup.draft if use_lcm_v4 and lcm_setup is not None else None
+                ),
             )
         elif draft_is_hybrid_gdn:
             draft_attn_backend, draft_pool, _ = _create_hybrid_linear_attn(

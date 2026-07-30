@@ -94,6 +94,15 @@ class DeepseekV4TokenToKVPoolHost:
             raise ValueError("DeepSeek V4 KVStore host pool only supports layer_first")
         if host_to_device_ratio <= 0 and host_size_gb <= 0:
             raise ValueError("host_to_device_ratio must be positive")
+        if (
+            device_pool.runtime_contract is not None
+            or device_pool.lcm_pool is not None
+            or not device_pool.supports_hierarchical_kv_cache
+        ):
+            raise NotImplementedError(
+                "DeepSeek V4 Flat LCM cache has no L2 host adapter; use the "
+                "Radix pool or pass --disable-kvstore."
+            )
 
         self.device_pool = device_pool
         self.layout = layout

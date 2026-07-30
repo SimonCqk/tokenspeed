@@ -33,6 +33,7 @@ the cache never stores NaN without allocating temporary tensors.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from tokenspeed.runtime.layers.attention.backends.hybrid_linear_attn import (
@@ -61,6 +62,31 @@ class _RecordingInnerPool:
 class _Layer:
     def __init__(self, layer_id: int):
         self.layer_id = layer_id
+
+
+@pytest.mark.parametrize(
+    ("contract", "specs", "page_counts"),
+    (
+        (object(), (object(),), {"history": 3}),
+        (None, (), {}),
+    ),
+    ids=("flat", "radix"),
+)
+def test_layer_mapped_pool_explicitly_forwards_cache_geometry(
+    contract,
+    specs,
+    page_counts,
+):
+    inner = _RecordingInnerPool()
+    inner.runtime_contract = contract
+    inner.paged_cache_group_specs = specs
+    inner.paged_cache_group_page_counts = page_counts
+    pool = LayerMappedKVPool(inner, [3, 7, 11])
+
+    assert pool.page_size == inner.page_size
+    assert pool.runtime_contract is contract
+    assert pool.paged_cache_group_specs is specs
+    assert pool.paged_cache_group_page_counts is page_counts
 
 
 def test_set_mla_kv_buffer_remaps_layer_and_forwards_untouched():

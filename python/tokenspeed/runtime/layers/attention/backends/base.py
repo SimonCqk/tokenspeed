@@ -28,9 +28,9 @@ from typing import TYPE_CHECKING
 import torch
 
 from tokenspeed.runtime.execution.breakable_cuda_graph import break_point
+from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
 
 if TYPE_CHECKING:
-    from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
     from tokenspeed.runtime.layers.attention.configs.base import BaseAttnConfig
     from tokenspeed.runtime.layers.attention.kv_cache.base import BaseTokenToKVPool
     from tokenspeed.runtime.layers.paged_attention import PagedAttention
@@ -67,6 +67,11 @@ class AttentionBackend(ABC):
     # different hole/index semantics; a group-aware flat backend (Phase 4) sets
     # this True. Default False keeps every existing backend on today's path.
     uses_flat_cache_groups: bool = False
+    # The backend can consume compact per-request Flat block-table rows together
+    # with their canonical logical base offsets. Keep this separate from
+    # uses_flat_cache_groups: legacy Flat consumers require absolute columns
+    # even when their pool publishes a runtime contract.
+    supports_compact_flat_block_tables: bool = False
     # False for flat-capable backends whose spec-verify path is not wired yet.
     flat_spec_capable: bool = True
     uses_padded_decode_token_mask: bool = False
@@ -165,6 +170,7 @@ class AttentionBackend(ABC):
         forward_mode: ForwardMode = None,
         req_to_page: torch.Tensor = None,
         flat_block_tables: dict[str, torch.Tensor] | None = None,
+        flat_block_table_base_offsets: dict[str, torch.Tensor] | None = None,
         **kwargs,
     ):
         """Update pre-allocated CUDA-graph metadata buffers in-place before replay.
@@ -172,9 +178,11 @@ class AttentionBackend(ABC):
         Called instead of init_forward_metadata when use_cuda_graph=True, so
         that the captured kernels (which hold pointers into the pre-allocated
         buffers) see the current batch's data without any new allocations.
-        ``flat_block_tables`` carries the per-group flat page tables
-        (group_id -> [>=bs, cols]) for flat-capable backends; a backend that
-        captured flat buffers must be handed non-empty tables whenever bs > 0.
+        ``flat_block_tables`` and ``flat_block_table_base_offsets`` carry the
+        atomic per-group flat page-table ABI (group_id -> [>=bs, cols] and
+        group_id -> [>=bs]); their group keys and row counts must match. A
+        backend that captured flat buffers must be handed non-empty tables and
+        bases whenever bs > 0.
         Default: fall back to init_forward_metadata (correct but may not work
         for all backends that use separate cuda-graph buffer pools).
         """

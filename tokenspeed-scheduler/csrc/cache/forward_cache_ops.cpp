@@ -53,8 +53,18 @@ std::vector<KvCacheSpec> MakeSpecsFromConfig(const SchedulerConfig& config) {
     specs.reserve(config.paged_cache_groups.size());
     for (const PagedCacheGroupConfig& group : config.paged_cache_groups) {
         _assert(group.cache_blocks_per_lcm_block > 0, "cache_blocks_per_lcm_block must be > 0");
-        _assert(group.block_size == 0 || group.block_size == config.block_size,
-                "per-group block_size cannot override the shared cache_block_tokens");
+        _assert(group.block_size >= 0, "group block_size must be >= 0");
+        const std::int32_t block_size = group.block_size > 0 ? group.block_size : config.block_size;
+        _assert(block_size % config.block_size == 0, "group block_size must be a multiple of the base hash grain");
+        // Legacy/Radix configs may leave block_size unset while carrying a
+        // physical paged-cache geometry unrelated to the Flat hash grain.
+        // Cross-check only an explicit group-local logical span.
+        if (group.block_size > 0 && group.rows_per_page > 0 && group.entry_stride_tokens > 0) {
+            const std::int64_t raw_tokens_per_page =
+                static_cast<std::int64_t>(group.rows_per_page) * group.entry_stride_tokens;
+            _assert(raw_tokens_per_page == block_size,
+                    "group block_size must equal rows_per_page * entry_stride_tokens");
+        }
         // family=State marks trailing-window prefix reuse and covers both SWA and
         // linear-attention groups; only a State group WITHOUT SlidingWindow
         // retention is a mamba-style state group.
@@ -76,6 +86,7 @@ std::vector<KvCacheSpec> MakeSpecsFromConfig(const SchedulerConfig& config) {
         if (final_state_manager) {
             specs.push_back(KvCacheSpec{
                 .kind = AttnKind::kMambaState,
+                .block_size = block_size,
                 .sliding_window = 0,
                 .cache_blocks_per_lcm_block = group.cache_blocks_per_lcm_block,
             });
@@ -88,6 +99,7 @@ std::vector<KvCacheSpec> MakeSpecsFromConfig(const SchedulerConfig& config) {
         }
         specs.push_back(KvCacheSpec{
             .kind = is_swa ? AttnKind::kSlidingWindow : AttnKind::kFull,
+            .block_size = block_size,
             .sliding_window = is_swa ? *group.sliding_window_tokens : 0,
             .cache_blocks_per_lcm_block = group.cache_blocks_per_lcm_block,
         });
@@ -102,16 +114,31 @@ void FreeRequest(KvCacheCoordinator& coordinator, std::vector<BlockTable>& table
     coordinator.Free(tables);
 }
 
-std::map<std::string, std::vector<std::int32_t>> BuildFlatBlockTables(const KvCacheCoordinator& coordinator,
-                                                                      const std::vector<BlockTable>& tables,
-                                                                      std::span<const std::string> group_ids) {
-    _assert(tables.size() == group_ids.size(), "BuildFlatBlockTables: tables/group_ids size mismatch");
+FlatBlockTableRows BuildFlatBlockTableRows(const KvCacheCoordinator& coordinator, const std::vector<BlockTable>& tables,
+                                           std::span<const std::string> group_ids, bool compact_flat_block_tables) {
+    _assert(tables.size() == group_ids.size(), "BuildFlatBlockTableRows: tables/group_ids size mismatch");
     _assert(tables.size() == static_cast<std::size_t>(coordinator.NumGroups()),
-            "BuildFlatBlockTables: tables/coordinator size mismatch");
-    std::map<std::string, std::vector<std::int32_t>> out;
+            "BuildFlatBlockTableRows: tables/coordinator size mismatch");
+
+    FlatBlockTableRows out;
     for (std::size_t i = 0; i < tables.size(); ++i) {
-        out.emplace(group_ids[i], coordinator.GroupManager(static_cast<std::int32_t>(i)).BlockTablePageIds(tables[i]));
+        const KvCacheManager& manager = coordinator.GroupManager(static_cast<std::int32_t>(i));
+        const std::span<const CacheBlockRef> blocks = tables[i].Blocks();
+        const std::size_t base = compact_flat_block_tables ? static_cast<std::size_t>(tables[i].FirstLiveBlock()) : 0;
+        _assert(base <= blocks.size(), "BlockTable first-live offset exceeds its logical size");
+        std::vector<std::int32_t> page_ids;
+        page_ids.reserve(blocks.size() - base);
+        for (const CacheBlockRef& block_ref : blocks.subspan(base)) {
+            page_ids.push_back(block_ref ? manager.ResolveKernelPageId(block_ref->Location()) : 0);
+        }
+        out.tables.emplace(group_ids[i], std::move(page_ids));
+        if (compact_flat_block_tables) {
+            out.base_offsets.emplace(group_ids[i], static_cast<std::int32_t>(base));
+        }
     }
+    _assert(out.tables.size() == tables.size(), "Flat block tables require the exact configured group key set");
+    _assert(!compact_flat_block_tables || out.base_offsets.size() == out.tables.size(),
+            "Compact Flat block tables and base offsets require the same group key set");
     return out;
 }
 

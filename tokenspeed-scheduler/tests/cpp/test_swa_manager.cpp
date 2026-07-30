@@ -20,6 +20,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <optional>
 #include <span>
 #include <string>
@@ -78,6 +79,14 @@ std::int32_t CacheOnePage(SwaManager& manager, BlockPool& pool, const CacheKey& 
     manager.RegisterCachedBlock(pool, got, key);
     got.reset();
     return id;
+}
+
+void ExpectFirstLiveBlockInvariant(const BlockTable& table, std::int32_t expected) {
+    const std::span<const CacheBlockRef> blocks = table.Blocks();
+    const auto first_live =
+        std::find_if(blocks.begin(), blocks.end(), [](const CacheBlockRef& block) { return static_cast<bool>(block); });
+    EXPECT_EQ(table.FirstLiveBlock(), expected);
+    EXPECT_EQ(table.FirstLiveBlock(), static_cast<std::int32_t>(first_live - blocks.begin()));
 }
 
 TEST(SwaManagerTest, ConstructsWithWindow) {
@@ -347,6 +356,56 @@ TEST(BlockTableTest, EvictToNullIsIdempotentOnNullSlot) {
     CacheBlockRef again = table.EvictToNull(0);
     EXPECT_FALSE(again);  // empty on already-null
     EXPECT_FALSE(table.Blocks()[0]);
+}
+
+TEST(BlockTableTest, FirstLiveBlockTracksEveryLivenessMutation) {
+    BlockPool device_pool(/*num_lcm_blocks=*/512);
+    BlockPool host_pool(/*num_lcm_blocks=*/128);
+    SwaManager mgr(/*block_size=*/4, /*sliding_window=*/4);
+    BlockTable table;
+    ExpectFirstLiveBlockInvariant(table, 0);
+
+    ASSERT_TRUE(mgr.Acquire(device_pool, table, /*num_tokens=*/160));
+    ExpectFirstLiveBlockInvariant(table, 0);
+
+    mgr.ReclaimExpired(device_pool, table, /*num_computed_tokens=*/160);
+    ExpectFirstLiveBlockInvariant(table, 39);
+    mgr.ReclaimExpired(device_pool, table, /*num_computed_tokens=*/1000);
+    ExpectFirstLiveBlockInvariant(table, 40);
+    ASSERT_TRUE(mgr.Acquire(device_pool, table, /*num_tokens=*/4));
+    ExpectFirstLiveBlockInvariant(table, 40);
+
+    mgr.Free(table);
+    ExpectFirstLiveBlockInvariant(table, 0);
+
+    PrefixMatch hit;
+    hit.blocks.resize(129);
+    std::vector<CacheBlockRef> hit_blocks =
+        device_pool.AcquireBlocks(/*group_id=*/0, /*cache_blocks_per_lcm_block=*/1, /*num=*/2);
+    ASSERT_EQ(hit_blocks.size(), 2u);
+    hit.blocks[64] = std::move(hit_blocks[0]);
+    hit.blocks[128] = std::move(hit_blocks[1]);
+    mgr.ClaimHitBlocks(table, std::move(hit));
+    ExpectFirstLiveBlockInvariant(table, 64);
+
+    mgr.Free(table);
+    GroupDemand sparse{
+        .table = &table,
+        .num_tokens = 520,
+        .materialized_suffix_start = 128,
+    };
+    ASSERT_TRUE(mgr.Acquire(device_pool, table, sparse));
+    ExpectFirstLiveBlockInvariant(table, 128);
+
+    mgr.Free(table);
+    std::vector<CacheBlockRef> host_blocks(65);
+    host_blocks.back() = host_pool.AcquireBlock(/*group_id=*/0, /*cache_blocks_per_lcm_block=*/1);
+    std::vector<BlockTransfer> transfers;
+    mgr.AppendHostExtension(device_pool, table, std::move(host_blocks), transfers);
+    ExpectFirstLiveBlockInvariant(table, 64);
+
+    mgr.Free(table);
+    ExpectFirstLiveBlockInvariant(table, 0);
 }
 
 TEST(SwaManagerTest, ReclaimExpiredMirrorsVllmBoundarySequence) {

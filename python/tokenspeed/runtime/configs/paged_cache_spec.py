@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 Retention = Literal["full_history", "sliding_window"]
 Family = Literal["history", "state"]
@@ -43,6 +43,113 @@ class PagedCacheGroupSpec:
 
 
 _PAGED_CACHE_GROUP_DUMMY_PAGES = 1
+
+
+def full_history_lcm_group_capacities(
+    specs: Sequence[PagedCacheGroupSpec],
+    *,
+    base_block_size: int,
+    num_lcm_blocks: int,
+) -> dict[str, int]:
+    """Return token capacities of full-history groups in one LCM arena.
+
+    Physical child-page packing is group-specific. Admission is therefore
+    bounded by the narrowest history group that must retain every token, not
+    by the largest child-address extent used to allocate the shared arena.
+    """
+    if (
+        isinstance(base_block_size, bool)
+        or not isinstance(base_block_size, int)
+        or base_block_size <= 0
+    ):
+        raise ValueError(
+            f"base_block_size must be a positive integer, got {base_block_size!r}"
+        )
+    if (
+        isinstance(num_lcm_blocks, bool)
+        or not isinstance(num_lcm_blocks, int)
+        or num_lcm_blocks <= 0
+    ):
+        raise ValueError(
+            f"num_lcm_blocks must be a positive integer, got {num_lcm_blocks!r}"
+        )
+
+    capacities: dict[str, int] = {}
+    for spec in specs:
+        if spec.family != "history" or spec.retention != "full_history":
+            continue
+        group_block_size = (
+            spec.block_size if spec.block_size is not None else base_block_size
+        )
+        if (
+            isinstance(group_block_size, bool)
+            or not isinstance(group_block_size, int)
+            or group_block_size <= 0
+        ):
+            raise ValueError(
+                f"block_size for {spec.group_id!r} must be a positive integer, "
+                f"got {group_block_size!r}"
+            )
+        packing = spec.cache_blocks_per_lcm_block
+        if isinstance(packing, bool) or not isinstance(packing, int) or packing <= 0:
+            raise ValueError(
+                "cache_blocks_per_lcm_block for "
+                f"{spec.group_id!r} must be a positive integer, got {packing!r}"
+            )
+        capacities[spec.group_id] = num_lcm_blocks * group_block_size * packing
+    return capacities
+
+
+def legacy_flat_loc_group_id(
+    group_specs: Sequence[PagedCacheGroupSpec],
+    *,
+    legacy_page_size: int,
+) -> str | None:
+    """Return the sole Flat group safe for the legacy scalar location table.
+
+    Runtime-contract consumers are group keyed and bypass this compatibility
+    path. Legacy Flat exports are absolute; their mirror candidate must retain
+    full history at stride one, and its token span must cover an integral
+    number of legacy pages so its table cannot exceed ``req_to_page`` width.
+    Ambiguous or incompatible inputs fail closed by returning ``None``.
+    """
+    if (
+        isinstance(legacy_page_size, bool)
+        or not isinstance(legacy_page_size, int)
+        or legacy_page_size <= 0
+    ):
+        raise ValueError(
+            f"legacy_page_size must be a positive integer, got {legacy_page_size!r}"
+        )
+
+    candidates: list[str] = []
+    for spec in group_specs:
+        if (
+            spec.family != "history"
+            or spec.retention != "full_history"
+            or isinstance(spec.entry_stride_tokens, bool)
+            or spec.entry_stride_tokens != 1
+        ):
+            continue
+        block_span = spec.block_size
+        if block_span is None:
+            if (
+                isinstance(spec.rows_per_page, bool)
+                or not isinstance(spec.rows_per_page, int)
+                or spec.rows_per_page <= 0
+            ):
+                continue
+            block_span = spec.rows_per_page
+        if (
+            isinstance(block_span, bool)
+            or not isinstance(block_span, int)
+            or block_span <= 0
+            or block_span % legacy_page_size
+            or not spec.group_id
+        ):
+            continue
+        candidates.append(spec.group_id)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 _KIMI_K3_ARCHITECTURES = frozenset({"KimiK3ForConditionalGeneration"})
@@ -209,7 +316,7 @@ def validate_flat_scheduler_config(
     flat_kvcache_ext: bool,
     paged_cache_groups: Sequence[object],
     attn_backend: object,
-    kv_pool: object,
+    kv_pool: Any,
     speculative_algorithm: str | None = None,
 ) -> None:
     """Fail fast, before the C++ ``Scheduler`` ctor, when a flat-built ext
@@ -217,7 +324,7 @@ def validate_flat_scheduler_config(
     consume the per-group flat tables, or zero published groups. No-op on a
     radix build.
     """
-    contract = getattr(kv_pool, "runtime_contract", None)
+    contract = kv_pool.runtime_contract
     if contract is not None and not flat_kvcache_ext:
         raise RuntimeError(
             "KV pool publishes a runtime contract and requires a flat scheduler "
@@ -773,8 +880,10 @@ __all__ = [
     "STATE_LAYER_TYPES",
     "compute_max_logical_pages_for_capture",
     "compute_paged_cache_group_page_counts",
+    "full_history_lcm_group_capacities",
     "group_specs_from_layer_types",
     "hybrid_slab_group_size",
+    "legacy_flat_loc_group_id",
     "layer_group_ids",
     "publish_paged_cache_groups",
     "preflight_kimi_k3_flat_consumers",

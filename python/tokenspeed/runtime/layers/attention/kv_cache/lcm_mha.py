@@ -49,6 +49,7 @@ class LcmMHATokenToKVPool(MHATokenToKVPool):
         *,
         memory_plan: LcmMemoryPlan,
         layer_group_ids: tuple[str, ...],
+        token_capacity: int,
         state_field_dtypes: Mapping[str, torch.dtype] | None = None,
         **kwargs,
     ):
@@ -69,7 +70,7 @@ class LcmMHATokenToKVPool(MHATokenToKVPool):
         if len(self.layer_cache_group_ids) != kwargs["layer_num"]:
             raise ValueError("LCM cache group ids must cover every model layer")
 
-        super().__init__(**kwargs)
+        super().__init__(admission_token_capacity=token_capacity, **kwargs)
 
         # Boundary checkpoints default to BF16. Direct FP8-E5M2 storage is an
         # explicit capacity mode because its restore error affects model output.
@@ -81,7 +82,7 @@ class LcmMHATokenToKVPool(MHATokenToKVPool):
         self.runtime_contract = FlatPagedCacheRuntimeContract(
             block_size=self.page_size,
             num_lcm_blocks=memory_plan.num_lcm_blocks,
-            token_capacity=self.size,
+            token_capacity=token_capacity,
             group_specs=self.paged_cache_group_specs,
             group_page_counts=self.paged_cache_group_page_counts,
         )

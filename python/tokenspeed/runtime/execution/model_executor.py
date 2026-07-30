@@ -31,6 +31,7 @@ from tokenspeed_kernel.platform import current_platform
 
 from tokenspeed.runtime.configs.model_config import ModelConfig
 from tokenspeed.runtime.configs.paged_cache_spec import (
+    legacy_flat_loc_group_id,
     scheduler_ext_flat_kvcache,
     validate_flat_scheduler_config,
 )
@@ -59,6 +60,7 @@ from tokenspeed.runtime.execution.types import ModelExecutionResult
 from tokenspeed.runtime.grammar.capturable_grammar import setup_grammar_step
 from tokenspeed.runtime.layers.attention.backends.flat_cache_metadata import (
     FlatCacheBatchMetadata,
+    resolve_flat_runtime_contracts,
 )
 from tokenspeed.runtime.layers.logits_processor import LogitsProcessorOutput
 from tokenspeed.runtime.layers.paged_attention import (
@@ -97,7 +99,7 @@ def _get_drafter_impl(spec_algo: str, model: torch.nn.Module):
     DRAFTER_MAPPING = {"EAGLE3": Eagle, "MTP": Eagle, "DFLASH": DFlash}
 
     # "MTP" covers two algorithms:
-    # (1) Eagle-like MTP (e.g. DeepSeek) stays on Eagle in eagle.py;
+    # (1) Eagle-like MTP stays on Eagle in eagle.py;
     # (2) Vanilla MTP (e.g. Inkling) with multi-layer weights stays on Mtp in mtp.py.
     if spec_algo == "MTP" and isinstance(model, InklingForConditionalGenerationNextN):
         return Mtp
@@ -185,7 +187,7 @@ class ModelExecutorConfig:
     overlap_schedule_depth: int = 0
     dp_sampling: bool = False
     dp_sampling_min_bs: int | None = None
-    use_v4_mtp_paged_metadata: bool = False
+    use_target_verify_paged_metadata: bool = False
 
     # ====== GRAMMAR =========
     # "none" disables all grammar handling; otherwise the backend name
@@ -252,7 +254,9 @@ class ModelExecutorConfig:
             dp_sampling=server_args.dp_sampling,
             dp_sampling_min_bs=server_args.dp_sampling_min_bs,
             enable_nan_detection=server_args.enable_nan_detection,
-            use_v4_mtp_paged_metadata=model_config.use_v4_mtp_paged_metadata,
+            use_target_verify_paged_metadata=(
+                model_config.use_target_verify_paged_metadata
+            ),
             grammar_backend=server_args.grammar_backend,
             disable_capturable_grammar=server_args.disable_capturable_grammar,
         )
@@ -281,24 +285,57 @@ class ModelExecutor:
         self.sampling_backend = sampling_backend
         self.attn_backend = attn_backend
         self.token_to_kv_pool = token_to_kv_pool
-        # FlatKV contract pools publish a runtime
-        # contract; on that path per-step tables travel as
-        # FlatCacheBatchMetadata and the legacy req_to_page mirror is
-        # forbidden.
-        self._flat_runtime_contract = getattr(
-            token_to_kv_pool, "runtime_contract", None
+        flat_kvcache_ext = scheduler_ext_flat_kvcache()
+        # Bind the scheduler transport once. Backend capability describes what
+        # a backend can consume; it does not select Radix versus Flat for this
+        # executor instance.
+        self._use_flat_cache_tables = bool(flat_kvcache_ext)
+        (
+            self._flat_runtime_contract,
+            active_draft_runtime_contract,
+            self.compact_flat_block_tables,
+        ) = resolve_flat_runtime_contracts(
+            target_pool=token_to_kv_pool,
+            target_backend=attn_backend,
+            draft_pool=draft_token_to_kv_pool,
+            draft_backend=draft_attn_backend,
+            flat_kvcache_ext=flat_kvcache_ext,
         )
-        # Full-attention group mirrored into req_to_page each step (flat+spec).
-        _group_specs = getattr(token_to_kv_pool, "paged_cache_group_specs", ()) or ()
-        self._flat_full_group_id = next(
-            (
-                str(spec.group_id)
-                for spec in _group_specs
-                if getattr(spec, "family", "history") != "state"
-                and getattr(spec, "retention", None) == "full_history"
-            ),
-            None,
+        self._flat_target_group_ids = (
+            tuple(
+                str(spec.group_id) for spec in self._flat_runtime_contract.group_specs
+            )
+            if self._flat_runtime_contract is not None
+            else ()
         )
+        self._flat_draft_group_ids = (
+            tuple(
+                str(spec.group_id) for spec in active_draft_runtime_contract.group_specs
+            )
+            if active_draft_runtime_contract is not None
+            else ()
+        )
+        self._uses_group_keyed_cache_locs = self._flat_runtime_contract is not None
+        _group_specs = token_to_kv_pool.paged_cache_group_specs
+        self._legacy_flat_loc_group_id = (
+            None
+            if self._uses_group_keyed_cache_locs
+            else legacy_flat_loc_group_id(
+                _group_specs,
+                legacy_page_size=config.logical_page_size,
+            )
+        )
+        if (
+            flat_kvcache_ext
+            and config.spec_algo is not None
+            and not self._uses_group_keyed_cache_locs
+            and self._legacy_flat_loc_group_id is None
+        ):
+            raise RuntimeError(
+                "legacy Flat speculative cache locations require exactly one "
+                "stride-1 full-history group whose block span is compatible "
+                "with the scalar req_to_page page size"
+            )
         self._mirror_idx_cpu: torch.Tensor | None = None
         self._mirror_idx_dev: torch.Tensor | None = None
         self._mirror_row_buf: torch.Tensor | None = None
@@ -310,14 +347,17 @@ class ModelExecutor:
         # (e.g. spec on a backend without flat_spec_capable) would otherwise
         # die on a capture-path assert instead of this actionable error.
         validate_flat_scheduler_config(
-            flat_kvcache_ext=scheduler_ext_flat_kvcache(),
+            flat_kvcache_ext=flat_kvcache_ext,
             paged_cache_groups=_group_specs,
             attn_backend=attn_backend,
             kv_pool=token_to_kv_pool,
             speculative_algorithm=config.spec_algo,
         )
 
-        if config.spec_algo is not None:
+        if self._uses_group_keyed_cache_locs:
+            # Contract consumers never dereference the radix scalar table.
+            max_num_pages_per_req = 1
+        elif config.spec_algo is not None:
             # The DFLASH overlap scheduler reserves a fresh draft block per
             # decode step a request stays scheduled, including the few steps it
             # lingers between finishing and eviction, so peak page count runs
@@ -368,6 +408,7 @@ class ModelExecutor:
             state_write_padding_pool_index=config.max_req_pool_size,
             device=self.device,
             has_mamba=(mamba_pool is not None),
+            uses_group_keyed_cache_locs=self._uses_group_keyed_cache_locs,
         )
         self.runtime_states = RuntimeStates(
             req_pool_size=config.max_req_pool_size,
@@ -562,6 +603,8 @@ class ModelExecutor:
             drafter=self.drafter,
             draft_attn_backend=draft_attn_backend,
             draft_token_to_kv_pool=draft_token_to_kv_pool,
+            compact_flat_block_tables=self.compact_flat_block_tables,
+            use_flat_cache_tables=self._use_flat_cache_tables,
             capturable_grammar=self.capturable_grammar,
             eager_grammar_buffers=self.eager_grammar_buffers,
             sampling_backend=self.sampling_backend,
@@ -583,6 +626,8 @@ class ModelExecutor:
             input_buffers=self.input_buffers,
             config=config,
             req_to_page=self.req_to_page,
+            compact_flat_block_tables=self.compact_flat_block_tables,
+            use_flat_cache_tables=self._use_flat_cache_tables,
             drafter=self.drafter,
             decode_wrapper=self.forward_step,
         )
@@ -698,7 +743,7 @@ class ModelExecutor:
     def _mirror_flat_full_table_into_req_to_page(
         self, forward_op, flat_block_tables
     ) -> None:
-        """Flat + spec: scatter the full-attention group's per-batch table
+        """Flat + spec: scatter the validated history group's per-batch table
         into req_to_page rows, restoring the radix contract for every
         legacy consumer (input prep's out_cache_loc kernels, the drafter's
         per-step location chains). The flat scheduler never populates
@@ -709,15 +754,18 @@ class ModelExecutor:
         req_to_page would resurrect the forbidden legacy path.
         """
         if (
-            self._flat_runtime_contract is not None
-            or self.drafter is None
+            self.drafter is None
             or not flat_block_tables
-            or self._flat_full_group_id is None
+            or self._legacy_flat_loc_group_id is None
         ):
             return
-        table = flat_block_tables.get(self._flat_full_group_id)
+        table = flat_block_tables.get(self._legacy_flat_loc_group_id)
         if table is None:
-            return
+            raise RuntimeError(
+                "legacy Flat req_to_page mirror is missing its validated group "
+                f"{self._legacy_flat_loc_group_id!r}; delivered groups="
+                f"{sorted(flat_block_tables)}"
+            )
         bs = len(forward_op.request_pool_indices)
         if self._mirror_idx_cpu is None or self._mirror_idx_cpu.shape[0] < bs:
             cap = max(bs, self.input_buffers.max_bs)
@@ -732,6 +780,12 @@ class ModelExecutor:
         idx = self._mirror_idx_dev[:bs]
         width = table.shape[1]
         max_width = self.req_to_page.shape[1]
+        if width > max_width:
+            raise RuntimeError(
+                "legacy Flat mirror table exceeds req_to_page width: "
+                f"group={self._legacy_flat_loc_group_id!r}, "
+                f"table_width={width}, req_to_page_width={max_width}"
+            )
         if self._mirror_row_buf is None:
             self._mirror_row_buf = torch.zeros(
                 (self.input_buffers.max_bs, max_width),
@@ -1798,21 +1852,32 @@ class ModelExecutor:
             # Outside the graph: in-graph sites only OR into the flag buffer.
             self.nan_guard.reset(bs)
             flat_cache_metadata = None
+            draft_flat_cache_metadata = None
             if self._flat_runtime_contract is not None and bs > 0:
                 # FlatKV contract path: validate + pack the per-group tables
                 # once, bound to this forward operation. The MLA backend
                 # consumes the full-attention table through this bridge;
                 # req_to_page is never populated.
-                flat_cache_metadata = FlatCacheBatchMetadata.from_forward_op(
+                scheduler_flat_metadata = FlatCacheBatchMetadata.from_forward_op(
                     forward_op,
                     device=self.device,
                     contract=self._flat_runtime_contract,
                     num_requests=bs,
+                    compact_tables=self.compact_flat_block_tables,
                 )
-                flat_block_tables = dict(
-                    flat_cache_metadata.tables(active_forward_op=forward_op)
+                flat_cache_metadata = scheduler_flat_metadata.for_groups(
+                    self._flat_target_group_ids,
+                    owner="target",
                 )
-            else:
+                if self._flat_draft_group_ids:
+                    draft_flat_cache_metadata = scheduler_flat_metadata.for_groups(
+                        self._flat_draft_group_ids,
+                        owner="draft",
+                    )
+                # CudaGraphWrapper binds the operation-provenanced target and
+                # draft views exactly once at the eager/replay boundary.
+                flat_block_tables = None
+            elif self._use_flat_cache_tables:
                 # Mirror the full group's flat table into req_to_page
                 # (flat+spec legacy consumers only).
                 flat_block_tables = flat_block_tables_from_forward_op(
@@ -1823,6 +1888,10 @@ class ModelExecutor:
                 self._mirror_flat_full_table_into_req_to_page(
                     forward_op, flat_block_tables
                 )
+            else:
+                # A dual-capable backend still consumes the Radix paged-table
+                # transport when paired with a Radix scheduler build.
+                flat_block_tables = None
             decode_input_ids = self.input_buffers.fill_input_buffers(
                 forward_op=forward_op,
                 runtime_states=self.runtime_states,
@@ -1997,20 +2066,27 @@ class ModelExecutor:
                         if self.input_buffers.has_mamba
                         else {}
                     )
-                    paged_cache_block_tables = paged_cache_block_tables_from_forward_op(
-                        forward_op,
-                        device=self.device,
-                        num_reqs=bs,
-                    )
-                    # flat_block_tables computed once in pre_fill above.
-                    (
-                        paged_cache_block_table_base_offsets,
-                        _paged_cache_block_table_base_offset_max,
-                    ) = paged_cache_block_table_base_offsets_from_forward_op(
-                        forward_op,
-                        device=self.device,
-                        num_reqs=bs,
-                    )
+                    if flat_cache_metadata is None:
+                        paged_cache_block_tables = (
+                            paged_cache_block_tables_from_forward_op(
+                                forward_op,
+                                device=self.device,
+                                num_reqs=bs,
+                            )
+                        )
+                        (
+                            paged_cache_block_table_base_offsets,
+                            _paged_cache_block_table_base_offset_max,
+                        ) = paged_cache_block_table_base_offsets_from_forward_op(
+                            forward_op,
+                            device=self.device,
+                            num_reqs=bs,
+                        )
+                    else:
+                        # Contract tables and their canonical paged logical
+                        # bases already share one packed H2D allocation.
+                        paged_cache_block_tables = None
+                        paged_cache_block_table_base_offsets = None
                     self._log_dp_sampling_route(bs, ctx)
                     forward_step_start = 0.0
                     if timing_enabled:
@@ -2045,6 +2121,7 @@ class ModelExecutor:
                         ),
                         flat_block_tables=flat_block_tables,
                         flat_cache_metadata=flat_cache_metadata,
+                        draft_flat_cache_metadata=draft_flat_cache_metadata,
                         flat_cache_forward_op=(
                             forward_op if flat_cache_metadata is not None else None
                         ),

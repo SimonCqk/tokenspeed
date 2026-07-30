@@ -162,6 +162,7 @@ class PoollessFlatMetadataTest(unittest.TestCase):
         )
         backend = MambaAttnBackend(config)
         stub_pool = SimpleNamespace(
+            runtime_contract=None,
             state_slabs=[(object(), object())],
             paged_cache_group_specs=(SimpleNamespace(group_id="linear_attention"),),
             _layer_types=("linear_attention",),
@@ -275,6 +276,7 @@ class LegacyLcmVerifyMetadataTest(unittest.TestCase):
             for layer_id in range(2)
         }
         stub_pool = SimpleNamespace(
+            runtime_contract=None,
             state_slabs=tuple(self.state_buffers.values()),
             paged_cache_group_specs=(
                 SimpleNamespace(group_id="linear_attention_0"),
@@ -392,6 +394,7 @@ class GDNFlatStatePagingGPUTest(unittest.TestCase):
             )
         )
         stub_pool = SimpleNamespace(
+            runtime_contract=None,
             state_slabs=[(conv_slab, ssm_slab)],
             paged_cache_group_specs=(SimpleNamespace(group_id="linear_attention"),),
             _layer_types=("linear_attention",),

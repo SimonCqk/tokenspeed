@@ -254,6 +254,7 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
         .def_rw("overlap_schedule_depth", &tokenspeed::SchedulerConfig::overlap_schedule_depth)
         .def_rw("role", &tokenspeed::SchedulerConfig::role)
         .def_rw("enable_flatkv_pd", &tokenspeed::SchedulerConfig::enable_flatkv_pd)
+        .def_rw("compact_flat_block_tables", &tokenspeed::SchedulerConfig::compact_flat_block_tables)
         .def_prop_rw(
             "num_device_pages", [](const tokenspeed::SchedulerConfig& c) { return c.device_allocator.total_pages; },
             [](tokenspeed::SchedulerConfig& c, std::int32_t v) { c.device_allocator.total_pages = v; })
@@ -378,6 +379,19 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
                 return op.paged_cache_block_table_base_offsets;
             },
             nb::rv_policy::reference_internal)
+        .def("paged_cache_block_table_base_offsets_arrays",
+             [](nb::handle self) {
+                 // Zero-copy 1-D int32 views. The same owner and lexical map
+                 // ordering as flat_block_tables_arrays make the two exports
+                 // safe to pin and pack together.
+                 auto& op = nb::cast<tokenspeed::FlatForwardOperation&>(self);
+                 nb::dict out;
+                 for (auto& [gid, offsets] : op.paged_cache_block_table_base_offsets) {
+                     out[nb::str(gid.c_str())] = nb::ndarray<nb::numpy, const std::int32_t, nb::ndim<1>>(
+                         offsets.data(), {offsets.size()}, self);
+                 }
+                 return out;
+             })
         .def_prop_ro(
             "flat_block_tables",
             [](const tokenspeed::FlatForwardOperation& op)

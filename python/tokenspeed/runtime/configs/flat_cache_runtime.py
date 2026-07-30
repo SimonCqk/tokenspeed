@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from tokenspeed.runtime.configs.paged_cache_spec import PagedCacheGroupSpec
+from tokenspeed.runtime.configs.paged_cache_spec import (
+    PagedCacheGroupSpec,
+    full_history_lcm_group_capacities,
+)
 
 
 def flat_cache_debug_enabled() -> bool:
@@ -53,11 +56,24 @@ def require_positive_int(name: str, value: object) -> int:
 
 @dataclass(frozen=True)
 class FlatPagedCacheRuntimeContract:
+    """Immutable runtime geometry for one scheduler-visible FlatKV group union.
+
+    ``block_size`` is the scheduler's base allocation/hash grain. Individual
+    groups may span more raw tokens per child page through
+    ``PagedCacheGroupSpec.block_size``; consumers must use
+    ``group_block_sizes`` rather than assuming the base grain is uniform.
+
+    ``token_capacity`` is the scheduler admission ceiling. It can be smaller
+    than the device pool's physical child-address extent when heterogeneous
+    groups pack different numbers of child pages into each LCM parent.
+    """
+
     block_size: int
     num_lcm_blocks: int
     token_capacity: int
     group_specs: tuple[PagedCacheGroupSpec, ...]
     group_page_counts: Mapping[str, int]
+    group_block_sizes: Mapping[str, int] = field(init=False)
 
     def __post_init__(self) -> None:
         block_size = require_positive_int("block_size", self.block_size)
@@ -85,6 +101,23 @@ class FlatPagedCacheRuntimeContract:
             )
             for group_id in group_ids
         }
+        group_block_sizes = {
+            spec.group_id: require_positive_int(
+                f"block_size for {spec.group_id!r}",
+                spec.block_size if spec.block_size is not None else block_size,
+            )
+            for spec in self.group_specs
+        }
+        non_multiple_groups = {
+            group_id: group_block_size
+            for group_id, group_block_size in group_block_sizes.items()
+            if group_block_size % block_size
+        }
+        if non_multiple_groups:
+            raise ValueError(
+                "group block sizes must be integer multiples of the scheduler "
+                f"base block_size={block_size}: {non_multiple_groups}"
+            )
         expected_counts = {
             spec.group_id: num_lcm_blocks
             * require_positive_int(
@@ -100,9 +133,23 @@ class FlatPagedCacheRuntimeContract:
                 "cache_blocks_per_lcm_block + 1: "
                 f"expected={expected_counts}, got={counts}"
             )
-        max_child_pages = max(counts.values()) - 1
-        if token_capacity > max_child_pages * block_size:
+        full_history_capacities = full_history_lcm_group_capacities(
+            self.group_specs,
+            base_block_size=block_size,
+            num_lcm_blocks=num_lcm_blocks,
+        )
+        if full_history_capacities and token_capacity > min(
+            full_history_capacities.values()
+        ):
             raise ValueError(
-                "token_capacity exceeds the largest group's child-page capacity"
+                "token_capacity exceeds a full-history group's child-page "
+                "capacity: "
+                f"token_capacity={token_capacity}, "
+                f"group_capacities={full_history_capacities}"
             )
         object.__setattr__(self, "group_page_counts", MappingProxyType(counts))
+        object.__setattr__(
+            self,
+            "group_block_sizes",
+            MappingProxyType(group_block_sizes),
+        )

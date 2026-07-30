@@ -67,6 +67,7 @@ class MHATokenToKVPool(BaseTokenToKVPool):
         layer_types: tuple[str, ...] = (),
         sliding_window_tokens: int | tuple[int | None, ...] | None = None,
         max_scheduled_tokens: int = 0,
+        admission_token_capacity: int | None = None,
         pd_disaggregation_enabled: bool = False,
         enable_kv_cache_copy: bool = False,
         enable_alt_stream: bool = True,
@@ -76,6 +77,20 @@ class MHATokenToKVPool(BaseTokenToKVPool):
         layer_kv_head_counts: tuple[int, ...] | None = None,
         kv_alloc_head_count: int | None = None,
     ):
+        if admission_token_capacity is None:
+            admission_token_capacity = size
+        elif (
+            isinstance(admission_token_capacity, bool)
+            or not isinstance(admission_token_capacity, int)
+            or admission_token_capacity <= 0
+            or admission_token_capacity > size
+        ):
+            raise ValueError(
+                "admission_token_capacity must be a positive integer no greater "
+                f"than the physical pool size ({size}), got "
+                f"{admission_token_capacity!r}"
+            )
+
         super().__init__(
             size, dtype, device, max_batch_size, max_context_len, page_size, rank
         )
@@ -152,7 +167,7 @@ class MHATokenToKVPool(BaseTokenToKVPool):
             extra_groups=extra_paged_groups,
             max_live_requests=max_batch_size,
             max_scheduled_tokens=max_scheduled_tokens,
-            max_total_tokens=size,
+            max_total_tokens=admission_token_capacity,
             max_context_len=max_context_len,
         )
         if published is None:

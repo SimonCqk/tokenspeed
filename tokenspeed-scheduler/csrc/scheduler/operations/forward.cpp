@@ -97,12 +97,20 @@ void AddUniqueNode(std::vector<TreeNode*>& nodes, TreeNode* node) {
 
 template <typename Op>
 static void maybeFillFlatBlockTables(Op& op, Request* request, const KvCacheCoordinator& coordinator,
-                                     std::span<const std::string> flat_group_ids) {
+                                     std::span<const std::string> flat_group_ids, bool compact_flat_block_tables) {
     if (!request->FlatBlockTablesEmpty()) {
-        op.flat_block_tables = BuildFlatBlockTables(coordinator, request->FlatBlockTablesRef(), flat_group_ids);
-        // occupied_pages is the legacy single-table bridge. It must expose the
-        // same kernel page ids as the first Flat group, never LCM parent ids.
-        op.occupied_pages = op.flat_block_tables.at(flat_group_ids.front());
+        const std::vector<BlockTable>& block_tables = request->FlatBlockTablesRef();
+        FlatBlockTableRows rows =
+            BuildFlatBlockTableRows(coordinator, block_tables, flat_group_ids, compact_flat_block_tables);
+        op.flat_block_tables = std::move(rows.tables);
+        // Reuse the model-agnostic compact-table offset seam already consumed
+        // by runtime backends; Flat and radix never populate an op together.
+        op.paged_cache_page_base_offsets = std::move(rows.base_offsets);
+        // occupied_pages is the legacy single-table bridge. A group-keyed
+        // consumer has no use for that absolute duplicate or its update slice.
+        if (!compact_flat_block_tables) {
+            op.occupied_pages = op.flat_block_tables.at(flat_group_ids.front());
+        }
     }
 }
 
@@ -984,16 +992,19 @@ void Scheduler::finalizeRadixPageTableEmission(Request* request, ForwardOperatio
 template <typename Event>
     requires(std::same_as<Event, fsm::SchedulePrefillFirstChunkEvent> || std::same_as<Event, fsm::SchedulePrefillEvent>)
 static PrefillOperation applyPrefillEvent(Request* request, Event& event, const KvCacheCoordinator* coordinator,
-                                          std::span<const std::string> flat_group_ids) {
+                                          std::span<const std::string> flat_group_ids, bool compact_flat_block_tables) {
     // begin/size are PAGE-space: the req_to_page refresh slice for this operation.
     // The builder starts with appended pages; radix finalization may move begin
     // backward when publication canonicalizes an already-emitted physical page.
     // A first-chunk prefix hit enters during the event, so begin stays 0 and size counts the hit rows too;
     // the op's token-space INPUT window intentionally starts past the hit.
-    std::int32_t begin = static_cast<std::int32_t>(request->GetOccupiedPages().size());
+    std::int32_t begin = compact_flat_block_tables ? 0 : static_cast<std::int32_t>(request->GetOccupiedPages().size());
     request->Apply(event);
-    std::vector<std::int32_t> all_pages = request->GetOccupiedPages();
-    std::int32_t sz = static_cast<std::int32_t>(all_pages.size()) - begin;
+    std::vector<std::int32_t> all_pages;
+    if (!compact_flat_block_tables) {
+        all_pages = request->GetOccupiedPages();
+    }
+    const std::int32_t sz = static_cast<std::int32_t>(all_pages.size()) - begin;
 
     auto info = request->GetPrefillInfo();
     auto op = PrefillOperation{{
@@ -1019,7 +1030,7 @@ static PrefillOperation applyPrefillEvent(Request* request, Event& event, const 
 
 #if TOKENSPEED_FLAT_KVCACHE
     _assert(coordinator != nullptr, "flat operation requires a cache coordinator");
-    maybeFillFlatBlockTables(op, request, *coordinator, flat_group_ids);
+    maybeFillFlatBlockTables(op, request, *coordinator, flat_group_ids, compact_flat_block_tables);
 #else
     (void)coordinator;
     (void)flat_group_ids;
@@ -1035,9 +1046,9 @@ PrefillOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Sched
     auto match = event.GetMatchResult();
 #endif
 #if TOKENSPEED_FLAT_KVCACHE
-    auto op = applyPrefillEvent(request, event, &coordinator_, FlatGroupIds());
+    auto op = applyPrefillEvent(request, event, &coordinator_, FlatGroupIds(), config_.compact_flat_block_tables);
 #else
-    auto op = applyPrefillEvent(request, event, nullptr, FlatGroupIds());
+    auto op = applyPrefillEvent(request, event, nullptr, FlatGroupIds(), /*compact_flat_block_tables=*/false);
 #endif
 #if TOKENSPEED_FLAT_KVCACHE
     // Host-loaded pages ride the same LoadBackOperation channel as radix loadbacks.
@@ -1083,9 +1094,9 @@ PrefillOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Sched
 
 PrefillOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::SchedulePrefillEvent event) {
 #if TOKENSPEED_FLAT_KVCACHE
-    auto op = applyPrefillEvent(request, event, &coordinator_, FlatGroupIds());
+    auto op = applyPrefillEvent(request, event, &coordinator_, FlatGroupIds(), config_.compact_flat_block_tables);
 #else
-    auto op = applyPrefillEvent(request, event, nullptr, FlatGroupIds());
+    auto op = applyPrefillEvent(request, event, nullptr, FlatGroupIds(), /*compact_flat_block_tables=*/false);
 #endif
 #if !TOKENSPEED_FLAT_KVCACHE
     if (hybrid_prefix_cache_) {
@@ -1104,11 +1115,14 @@ template <typename Event>
              std::same_as<Event, fsm::ScheduleDecodeFromRetractedEvent>)
 static DecodeOperation applyDecodeEvent(Request* request, Event event, std::int32_t decode_input_tokens,
                                         const KvCacheCoordinator* coordinator,
-                                        std::span<const std::string> flat_group_ids) {
-    std::int32_t begin = static_cast<std::int32_t>(request->GetOccupiedPages().size());
+                                        std::span<const std::string> flat_group_ids, bool compact_flat_block_tables) {
+    std::int32_t begin = compact_flat_block_tables ? 0 : static_cast<std::int32_t>(request->GetOccupiedPages().size());
     request->Apply(std::move(event));
-    std::vector<std::int32_t> all_pages = request->GetOccupiedPages();
-    std::int32_t sz = static_cast<std::int32_t>(all_pages.size()) - begin;
+    std::vector<std::int32_t> all_pages;
+    if (!compact_flat_block_tables) {
+        all_pages = request->GetOccupiedPages();
+    }
+    const std::int32_t sz = static_cast<std::int32_t>(all_pages.size()) - begin;
 
     auto op = DecodeOperation{{
         .request_id = request->Id(),
@@ -1130,7 +1144,7 @@ static DecodeOperation applyDecodeEvent(Request* request, Event event, std::int3
 
 #if TOKENSPEED_FLAT_KVCACHE
     _assert(coordinator != nullptr, "flat operation requires a cache coordinator");
-    maybeFillFlatBlockTables(op, request, *coordinator, flat_group_ids);
+    maybeFillFlatBlockTables(op, request, *coordinator, flat_group_ids, compact_flat_block_tables);
 #else
     (void)coordinator;
     (void)flat_group_ids;
@@ -1148,9 +1162,11 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
 #endif
 
 #if TOKENSPEED_FLAT_KVCACHE
-    auto op = applyDecodeEvent(request, std::move(event), config_.decode_input_tokens, &coordinator_, FlatGroupIds());
+    auto op = applyDecodeEvent(request, std::move(event), config_.decode_input_tokens, &coordinator_, FlatGroupIds(),
+                               config_.compact_flat_block_tables);
 #else
-    auto op = applyDecodeEvent(request, std::move(event), config_.decode_input_tokens, nullptr, FlatGroupIds());
+    auto op = applyDecodeEvent(request, std::move(event), config_.decode_input_tokens, nullptr, FlatGroupIds(),
+                               /*compact_flat_block_tables=*/false);
 #endif
     if (need_bootstrap_token) {
         op.decode_input_id = bootstrap_token;
@@ -1182,8 +1198,15 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
             "Scheduler::applyEventAndGenerateOp: expected state=Decoding after loadback recovery; got state=" +
             request->StateName());
     }
-    std::vector<std::int32_t> all_pages = request->GetOccupiedPages();
-    std::int32_t sz = static_cast<std::int32_t>(all_pages.size());
+    std::vector<std::int32_t> all_pages;
+#if TOKENSPEED_FLAT_KVCACHE
+    if (!config_.compact_flat_block_tables) {
+        all_pages = request->GetOccupiedPages();
+    }
+#else
+    all_pages = request->GetOccupiedPages();
+#endif
+    const std::int32_t sz = static_cast<std::int32_t>(all_pages.size());
     DecodeOperation op{{
         .request_id = request->Id(),
         .request_pool_index = request->GetReqPoolIndex(),
@@ -1222,7 +1245,7 @@ DecodeOperation Scheduler::applyEventAndGenerateOp(Request* request, fsm::Schedu
 #endif
 
 #if TOKENSPEED_FLAT_KVCACHE
-    maybeFillFlatBlockTables(op, request, coordinator_, FlatGroupIds());
+    maybeFillFlatBlockTables(op, request, coordinator_, FlatGroupIds(), config_.compact_flat_block_tables);
 #endif
 
     return op;

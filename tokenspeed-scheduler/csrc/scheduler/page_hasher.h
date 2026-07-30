@@ -146,4 +146,15 @@ inline std::vector<std::string> AdvancePagedHashes(std::span<const std::span<con
                               prior);
 }
 
+// Local offset of the first cumulative base hash that ends a group block.
+inline std::int32_t FirstProjectedBaseHashOffset(std::int32_t first_base, std::int32_t fold) {
+    _assert(first_base >= 0, "first_base must be >= 0");
+    _assert(fold >= 1, "fold factor must be >= 1");
+    return (fold - 1 - first_base % fold + fold) % fold;
+}
+
+inline std::int32_t FirstProjectedGroupSlot(std::int32_t first_base, std::int32_t fold) {
+    return (first_base + FirstProjectedBaseHashOffset(first_base, fold)) / fold;
+}
+
 }  // namespace tokenspeed

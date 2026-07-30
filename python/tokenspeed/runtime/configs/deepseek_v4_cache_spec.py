@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 from tokenspeed.runtime.configs.paged_cache_spec import PagedCacheGroupSpec
@@ -24,6 +25,7 @@ from tokenspeed.runtime.configs.paged_cache_spec import PagedCacheGroupSpec
 V4_KERNEL_BLOCK_ROWS: int = 64
 V4_SWA_KV_GROUP_ID = "v4.swa_kv"
 V4_INDEXER_COMPRESSOR_STATE_GROUP_ID = "v4.c4a.indexer_compressor_state"
+
 DEEPSEEK_V4_FP8_MAX = 448.0
 DEEPSEEK_V4_FP8_BLOCK_SIZE = 128
 DEEPSEEK_V4_FP8_QUANT_BLOCK = 64
@@ -194,6 +196,17 @@ def build_v4_cache_specs(
     *,
     layer_ratio: Sequence[int],
 ) -> list[PagedCacheGroupSpec]:
+    """Return the V4 logical groups and their page geometry.
+
+    Args:
+        hf_config: Model config containing a positive ``sliding_window``.
+        layer_ratio: Per-layer compression ratios present in this model.
+
+    Returns:
+        The Radix-compatible groups required by the ratios actually present.
+        Flat-only block spans and physical LCM packing are added by the Flat
+        recipe so they cannot change Radix/L2 page units.
+    """
     swa_window = _resolve_sliding_window(hf_config)
     unique_compress_ratios = sorted({int(r) for r in layer_ratio if int(r) > 1})
 
@@ -248,6 +261,21 @@ def build_v4_cache_specs(
     return specs
 
 
+def build_v4_flat_cache_specs(
+    hf_config: Any,
+    *,
+    layer_ratio: Sequence[int],
+) -> list[PagedCacheGroupSpec]:
+    """Add heterogeneous scheduler spans to the V4 Flat-LCM group recipe."""
+    return [
+        replace(
+            spec,
+            block_size=int(spec.rows_per_page) * int(spec.entry_stride_tokens),
+        )
+        for spec in build_v4_cache_specs(hf_config, layer_ratio=layer_ratio)
+    ]
+
+
 __all__ = [
     "DEEPSEEK_V4_FP8_BLOCK_SIZE",
     "DEEPSEEK_V4_COMPRESSED_LOGICAL_BLOCK_SIZE",
@@ -262,6 +290,7 @@ __all__ = [
     "V4_KERNEL_BLOCK_ROWS",
     "V4_SWA_KV_GROUP_ID",
     "build_v4_cache_specs",
+    "build_v4_flat_cache_specs",
     "deepseek_v4_indexer_fp8_layout_from_row_bytes",
     "deepseek_v4_indexer_fp8_row_bytes",
     "deepseek_v4_indexer_fp8_scale_bytes",

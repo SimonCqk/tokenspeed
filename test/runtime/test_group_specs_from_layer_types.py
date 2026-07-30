@@ -5,6 +5,7 @@ import os
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 # CI Registration (parsed via AST, runtime no-op)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,8 +33,11 @@ def _load(mod_name: str, file_name: str):
     return mod
 
 
-_pcs = _load("paged_cache_spec_under_test", "paged_cache_spec.py")
+with mock.patch.dict(sys.modules):
+    _pcs = _load("paged_cache_spec_under_test", "paged_cache_spec.py")
 group_specs_from_layer_types = _pcs.group_specs_from_layer_types
+full_history_lcm_group_capacities = _pcs.full_history_lcm_group_capacities
+legacy_flat_loc_group_id = _pcs.legacy_flat_loc_group_id
 layer_group_ids = _pcs.layer_group_ids
 PagedCacheGroupSpec = _pcs.PagedCacheGroupSpec
 
@@ -44,6 +48,91 @@ class GroupSpecsFromLayerTypesTest(unittest.TestCase):
             "materializes_all_boundaries",
             PagedCacheGroupSpec.__dataclass_fields__,
         )
+
+    def test_full_history_lcm_capacity_uses_each_groups_geometry(self):
+        specs = (
+            PagedCacheGroupSpec(
+                group_id="full",
+                retention="full_history",
+                rows_per_page=256,
+                entry_stride_tokens=1,
+                sliding_window_tokens=None,
+                block_size=256,
+                cache_blocks_per_lcm_block=2,
+            ),
+            PagedCacheGroupSpec(
+                group_id="state",
+                retention="full_history",
+                rows_per_page=4,
+                entry_stride_tokens=1,
+                sliding_window_tokens=None,
+                family="state",
+                block_size=4,
+                cache_blocks_per_lcm_block=64,
+            ),
+        )
+
+        self.assertEqual(
+            full_history_lcm_group_capacities(
+                specs,
+                base_block_size=4,
+                num_lcm_blocks=3,
+            ),
+            {"full": 1536},
+        )
+
+    def test_legacy_flat_location_mirror_requires_one_compatible_group(self):
+        def spec(
+            group_id,
+            *,
+            retention="full_history",
+            family="history",
+            block_size=64,
+            entry_stride_tokens=1,
+        ):
+            return PagedCacheGroupSpec(
+                group_id=group_id,
+                retention=retention,
+                rows_per_page=block_size,
+                entry_stride_tokens=entry_stride_tokens,
+                sliding_window_tokens=(128 if retention == "sliding_window" else None),
+                family=family,
+                block_size=block_size,
+            )
+
+        compatible = spec("full", block_size=128)
+        cases = (
+            (
+                "one compatible amid heterogeneous groups",
+                (
+                    spec("sliding", retention="sliding_window"),
+                    spec("state", family="state"),
+                    compatible,
+                ),
+                "full",
+            ),
+            ("no compatible history", (spec("state", family="state"),), None),
+            (
+                "ambiguous histories",
+                (compatible, spec("other")),
+                None,
+            ),
+            (
+                "non-unit stride",
+                (spec("stride", entry_stride_tokens=2),),
+                None,
+            ),
+            ("span below legacy page", (spec("small", block_size=32),), None),
+        )
+        for name, specs, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    legacy_flat_loc_group_id(specs, legacy_page_size=64),
+                    expected,
+                )
+
+        with self.assertRaisesRegex(ValueError, "legacy_page_size"):
+            legacy_flat_loc_group_id((compatible,), legacy_page_size=0)
 
     def test_gpt_oss_mixed_shape_yields_two_groups(self):
         layer_types = [
@@ -362,22 +451,52 @@ class PoolToPagedCacheGroupsIntegrationTest(unittest.TestCase):
     scheduler config. Needs torch + the tokenspeed_scheduler ext; skips
     where those are absent."""
 
-    def _import_converter(self):
+    def _import_scheduler_utils(self):
         try:
-            from tokenspeed.runtime.engine.scheduler_utils import (
-                pool_to_paged_cache_groups,
-            )
+            from tokenspeed.runtime.engine import scheduler_utils
         except (ImportError, ModuleNotFoundError) as exc:
             self.skipTest(
-                f"pool_to_paged_cache_groups unavailable (needs torch + "
+                f"scheduler_utils unavailable (needs torch + "
                 f"tokenspeed_scheduler ext): {exc}"
             )
-        return pool_to_paged_cache_groups
+        return scheduler_utils
+
+    def _heterogeneous_groups(self):
+        from types import SimpleNamespace
+
+        scheduler_utils = self._import_scheduler_utils()
+        specs = (
+            PagedCacheGroupSpec(
+                group_id="full_attention",
+                retention="full_history",
+                rows_per_page=256,
+                entry_stride_tokens=1,
+                sliding_window_tokens=None,
+                block_size=256,
+            ),
+            PagedCacheGroupSpec(
+                group_id="state_c4",
+                retention="sliding_window",
+                rows_per_page=4,
+                entry_stride_tokens=1,
+                sliding_window_tokens=8,
+                family="state",
+                block_size=4,
+            ),
+        )
+        pool = SimpleNamespace(
+            runtime_contract=None,
+            paged_cache_group_specs=specs,
+            paged_cache_group_page_counts={spec.group_id: 4096 for spec in specs},
+        )
+        return scheduler_utils, scheduler_utils.pool_to_paged_cache_groups(pool)
 
     def test_two_group_specs_convert_to_two_scheduler_groups(self):
         from types import SimpleNamespace
 
-        pool_to_paged_cache_groups = self._import_converter()
+        pool_to_paged_cache_groups = (
+            self._import_scheduler_utils().pool_to_paged_cache_groups
+        )
 
         specs = group_specs_from_layer_types(
             layer_types=["full_attention", "sliding_attention"],
@@ -386,6 +505,7 @@ class PoolToPagedCacheGroupsIntegrationTest(unittest.TestCase):
         )
         # Duck-typed stand-in: only the two attributes the converter reads.
         fake_pool = SimpleNamespace(
+            runtime_contract=None,
             paged_cache_group_specs=specs,
             paged_cache_group_page_counts={s.group_id: 1024 for s in specs},
         )
@@ -397,15 +517,83 @@ class PoolToPagedCacheGroupsIntegrationTest(unittest.TestCase):
         self.assertEqual(group_ids, {"full_attention", "sliding_attention"})
 
     def test_empty_specs_convert_to_no_groups(self):
-        pool_to_paged_cache_groups = self._import_converter()
+        pool_to_paged_cache_groups = (
+            self._import_scheduler_utils().pool_to_paged_cache_groups
+        )
 
         from types import SimpleNamespace
 
         fake_pool = SimpleNamespace(
+            runtime_contract=None,
             paged_cache_group_specs=(),
             paged_cache_group_page_counts={},
         )
         self.assertEqual(pool_to_paged_cache_groups(fake_pool), [])
+
+    def test_scheduler_block_size_is_selected_by_backend(self):
+        scheduler_utils, groups = self._heterogeneous_groups()
+        self.assertEqual([group.block_size for group in groups], [256, 4])
+
+        for scheduler_backend, expected in (("radix", 256), ("flat", 4)):
+            with self.subTest(scheduler_backend=scheduler_backend):
+                self.assertEqual(
+                    scheduler_utils.resolve_scheduler_block_size(
+                        256,
+                        groups,
+                        scheduler_backend=scheduler_backend,
+                    ),
+                    expected,
+                )
+
+    def test_radix_config_retains_metadata_and_admits_300_token_request(self):
+        scheduler_utils, groups = self._heterogeneous_groups()
+        try:
+            import tokenspeed_scheduler as ts
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"tokenspeed_scheduler unavailable: {exc}")
+        if ts.FLAT_KVCACHE:
+            self.skipTest("admission regression is specific to the radix scheduler")
+
+        config = scheduler_utils.make_config(
+            num_device_pages=64,
+            max_scheduled_tokens=8192,
+            max_batch_size=1,
+            page_size=256,
+            scheduler_backend="radix",
+            num_host_pages=0,
+            disable_l2_cache=True,
+            enable_l3_storage=False,
+            prefetch_threshold=0,
+            role="null",
+            disable_prefix_cache=False,
+            paged_cache_groups=groups,
+            prefix_cache_adjunct=scheduler_utils.pool_to_prefix_cache_adjunct_spec(
+                ["full_attention"]
+            ),
+        )
+        self.assertEqual(config.block_size, 256)
+        self.assertEqual(config.num_device_pages, 64)
+        self.assertEqual(
+            [group.group_id for group in config.paged_cache_groups],
+            ["full_attention", "state_c4"],
+        )
+        self.assertEqual(
+            config.prefix_cache_adjunct.required_groups,
+            ["full_attention"],
+        )
+
+        scheduler = ts.Scheduler(config)
+        scheduler.submit_requests(
+            [scheduler_utils.make_spec("request", list(range(300)))]
+        )
+
+        plan = scheduler.next_execution_plan()
+        scheduled = {
+            request_id: input_length
+            for op in plan.forward
+            for request_id, input_length in zip(op.request_ids, op.input_lengths)
+        }
+        self.assertEqual(scheduled, {"request": 300})
 
 
 if __name__ == "__main__":

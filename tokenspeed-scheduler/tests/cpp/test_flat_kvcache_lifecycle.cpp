@@ -69,6 +69,15 @@ protected:
     }
 };
 
+class CompactFlatKvCacheLifecycleTestSuite : public FlatKvCacheLifecycleTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        SchedulerConfig cfg = FlatKvCacheLifecycleTestSuite::MakeConfig();
+        cfg.compact_flat_block_tables = true;
+        return cfg;
+    }
+};
+
 TEST_F(FlatKvCacheLifecycleTestSuite, Construct_AndSubmit_Waiting) {
     Submit(MakeRequestSpec("r1", /*num_pages=*/2));
     EXPECT_EQ(scheduler_->WaitingSize(), 1u);
@@ -127,6 +136,37 @@ TEST_F(FlatKvCacheLifecycleTestSuite, SingleRequest_PrefillDecodeFinish) {
     PlanOnce();
     EXPECT_EQ(scheduler_->DecodingSize(), 0u);
     EXPECT_EQ(scheduler_->FlatPoolFreeBlocks(), free_at_start);
+}
+
+TEST_F(CompactFlatKvCacheLifecycleTestSuite, GroupKeyedRowsDoNotPublishLegacyScalarTable) {
+    Submit(MakeRequestSpec("r1", /*num_pages=*/2));
+    ExecutionPlan prefill_plan = PlanOnce();
+    const FlatForwardOperation* prefill = FindFlatOp(prefill_plan);
+    ASSERT_NE(prefill, nullptr);
+    ASSERT_EQ(prefill->occupied_pages.size(), 1u);
+    EXPECT_TRUE(prefill->occupied_pages.front().empty());
+    EXPECT_EQ(prefill->begins, std::vector<std::int32_t>{0});
+    EXPECT_EQ(prefill->sizes, std::vector<std::int32_t>{0});
+    EXPECT_EQ(prefill->paged_cache_block_table_base_offsets.at("full"), std::vector<std::int32_t>{0});
+    EXPECT_EQ(prefill->paged_cache_block_table_base_offsets.at("swa"), std::vector<std::int32_t>{0});
+
+    SendForwardDone("r1", {42});
+    std::optional<ExecutionPlan> last_plan;
+    for (std::int32_t token = 43; token < 47; ++token) {
+        last_plan = PlanOnce();
+        SendForwardDone("r1", {token});
+    }
+
+    const FlatForwardOperation* last_decode = FindFlatOp(*last_plan);
+    ASSERT_NE(last_decode, nullptr);
+    ASSERT_EQ(last_decode->occupied_pages.size(), 1u);
+    EXPECT_TRUE(last_decode->occupied_pages.front().empty());
+    EXPECT_EQ(last_decode->begins, std::vector<std::int32_t>{0});
+    EXPECT_EQ(last_decode->sizes, std::vector<std::int32_t>{0});
+    ASSERT_EQ(last_decode->flat_block_tables.at("swa").size(), 1u);
+    EXPECT_GT(last_decode->paged_cache_block_table_base_offsets.at("swa").front(), 0);
+    EXPECT_TRUE(std::ranges::all_of(last_decode->flat_block_tables.at("swa").front(),
+                                    [](std::int32_t page_id) { return page_id > 0; }));
 }
 
 // AvailableKvPages() must report the flat shared BlockPool, not the radix

@@ -36,8 +36,8 @@ namespace tokenspeed {
 
 struct KvCacheCoordinatorTestAccess;
 
-// num_common_tokens is in tokens at the one shared CacheBlock granularity P.
-// per_group[i] is group i's PrefixMatch at exactly that length.
+// num_common_tokens is a raw-token boundary shared by every group.
+// per_group[i] is expressed in that group's logical block span.
 struct CoordinatorMatch {
     std::int32_t num_common_tokens{0};
     std::vector<PrefixMatch> per_group;
@@ -53,7 +53,10 @@ public:
 
     std::int32_t NumGroups() const { return static_cast<std::int32_t>(groups_.size()); }
 
+    // The base GCD is the request hash-chain grain, not every group's block
+    // span. GroupManager(i).CacheBlockTokens() reports the latter.
     std::int32_t CacheBlockTokens() const noexcept { return cache_block_tokens_; }
+    std::int32_t PrefixAlignmentTokens() const noexcept { return prefix_alignment_tokens_; }
     bool HasMambaStateGroup() const;
 
     KvCacheManager& GroupManager(std::int32_t i) { return groups_[static_cast<std::size_t>(i)].Manager(); }
@@ -130,7 +133,8 @@ private:
         CoordinatorMatch host;
     };
 
-    std::vector<CacheKey> keysForGroup(std::span<const std::string> content_hashes, GroupId group_id) const;
+    std::vector<CacheKey> keysForGroup(std::span<const std::string> content_hashes, GroupId group_id,
+                                       std::int32_t first_base_slot = 0) const;
     std::vector<std::vector<CacheKey>> buildGroupKeys(std::span<const std::string> content_hashes) const;
     PrefixProbe::Tier probeTierWithKeys(const BlockPool& pool, std::span<const std::vector<CacheKey>> group_keys,
                                         std::span<const std::size_t> match_order, std::int32_t num_cache_blocks,
@@ -148,12 +152,16 @@ private:
     std::vector<std::size_t> match_order_;
     BlockPool& pool_;
     BlockPool* host_pool_{nullptr};
+    // Base hash-chain grain. Every group block span is a positive multiple.
     std::int32_t cache_block_tokens_{0};
+    // Common raw-token boundary on which all group-local block grids meet.
+    std::int32_t prefix_alignment_tokens_{0};
     std::uint64_t next_access_epoch_{0};
     std::vector<StoreCandidate> pending_stores_;
 };
 
-// One CacheGroup per spec (group_id = index), all sharing cache_block_tokens.
+// One CacheGroup per spec (group_id = index). cache_block_tokens is the base
+// hash-chain grain; a spec's positive block_size overrides the manager span.
 KvCacheCoordinator MakeCoordinator(std::span<const KvCacheSpec> specs, std::int32_t cache_block_tokens, BlockPool& pool,
                                    BlockPool* host_pool = nullptr);
 

@@ -150,6 +150,14 @@ class DeepseekV4CachePool:
         host_pool: DeepseekV4TokenToKVPoolHost,
         io_backend: str,
     ) -> None:
+        if (
+            device_pool.runtime_contract is not None
+            or device_pool.lcm_pool is not None
+            or not device_pool.supports_hierarchical_kv_cache
+        ):
+            raise NotImplementedError(
+                "DeepSeek V4 paged L2 transfers require the Radix device pool"
+            )
         if io_backend not in ("kernel", "direct"):
             raise ValueError(
                 f"Unsupported DeepSeek V4 paged-cache io_backend={io_backend}"

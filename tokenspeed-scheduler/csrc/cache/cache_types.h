@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -64,6 +65,9 @@ struct CacheKeyHash {
 
 struct KvCacheSpec {
     AttnKind kind;
+    // Logical token span of one block in this group. Zero inherits the
+    // coordinator's base hash grain for legacy/equal-grain callers.
+    std::int32_t block_size{0};
     // Only kSlidingWindow uses this value. Mamba's one-checkpoint lookback is
     // an internal Manager policy rather than a model window.
     std::int32_t sliding_window;
@@ -77,27 +81,93 @@ class BlockTable {
 public:
     std::span<const CacheBlockRef> Blocks() const noexcept { return blocks_; }
     std::int32_t NumBlocks() const { return static_cast<std::int32_t>(blocks_.size()); }
+    // Logical index of the first owned block, or NumBlocks() when the table
+    // contains only null holes. Maintained by every table mutation so compact
+    // row publication does not rescan the reclaimed prefix.
+    std::int32_t FirstLiveBlock() const noexcept { return first_live_block_; }
     std::int32_t AvailableTokens() const { return available_tokens_; }
 
     CacheBlockRef EvictToNull(std::int32_t index) {
         _assert(0 <= index && index < static_cast<std::int32_t>(blocks_.size()), "EvictToNull index out of range");
-        return std::exchange(blocks_[static_cast<std::size_t>(index)], {});
+        CacheBlockRef old = std::exchange(blocks_[static_cast<std::size_t>(index)], {});
+        if (old && index == first_live_block_) {
+            advanceFirstLiveBlock();
+        }
+        return old;
     }
 
 private:
     friend class KvCacheManager;
 
+    void replaceBlocks(std::vector<CacheBlockRef> blocks) {
+        blocks_ = std::move(blocks);
+        first_live_block_ = 0;
+        advanceFirstLiveBlock();
+    }
+
+    void appendBlock(CacheBlockRef block) {
+        const std::int32_t index = NumBlocks();
+        const bool had_live_block = first_live_block_ < index;
+        const bool appending_live_block = static_cast<bool>(block);
+        blocks_.push_back(std::move(block));
+        if (!had_live_block) {
+            first_live_block_ = appending_live_block ? index : NumBlocks();
+        }
+    }
+
+    void appendLiveBlocks(std::vector<CacheBlockRef> blocks) {
+        const std::int32_t first_new_block = NumBlocks();
+        const bool had_live_block = first_live_block_ < first_new_block;
+        blocks_.reserve(blocks_.size() + blocks.size());
+        for (CacheBlockRef& block : blocks) {
+            blocks_.push_back(std::move(block));
+        }
+        if (!had_live_block && NumBlocks() > first_new_block) {
+            first_live_block_ = first_new_block;
+        }
+    }
+
+    void resizeWithNullBlocks(std::int32_t size) {
+        _assert(size >= NumBlocks(), "BlockTable cannot shrink through resizeWithNullBlocks");
+        const bool had_live_block = first_live_block_ < NumBlocks();
+        blocks_.resize(static_cast<std::size_t>(size));
+        if (!had_live_block) {
+            first_live_block_ = NumBlocks();
+        }
+    }
+
+    void setLiveBlock(std::int32_t index, CacheBlockRef block) {
+        _assert(0 <= index && index < NumBlocks(), "setLiveBlock index out of range");
+        _assert(static_cast<bool>(block), "setLiveBlock requires an owned block");
+        _assert(!blocks_[static_cast<std::size_t>(index)], "setLiveBlock requires a null slot");
+        blocks_[static_cast<std::size_t>(index)] = std::move(block);
+        first_live_block_ = std::min(first_live_block_, index);
+    }
+
+    void clearBlocks() {
+        blocks_.clear();
+        first_live_block_ = 0;
+    }
+
+    void advanceFirstLiveBlock() noexcept {
+        while (first_live_block_ < NumBlocks() && !blocks_[static_cast<std::size_t>(first_live_block_)]) {
+            ++first_live_block_;
+        }
+    }
+
     std::vector<CacheBlockRef> blocks_{};
+    std::int32_t first_live_block_{0};
     // Unconsumed capacity at the logical tail. This may span multiple blocks
     // when admission preallocates a later decode/MTP step.
     std::int32_t available_tokens_{0};
 };
 
 // Per-group input for one admission. page_hashes is the request's cumulative
-// completed-page history; first_new_page_slot splits the newly completed
-// suffix used by prefix-closed groups. Non-closed groups select the trailing
-// pages required to resume num_computed_tokens. The request owns table and
-// the storage behind page_hashes.
+// completed base-grain hash history; first_new_page_slot is also measured in
+// base-grain slots and splits the newly completed suffix. Managers translate
+// it to their group-local logical block span. Non-closed groups select the
+// trailing pages required to resume num_computed_tokens. The request owns
+// table and the storage behind page_hashes.
 struct GroupDemand {
     BlockTable* table{nullptr};
     std::int32_t num_tokens{0};
@@ -106,9 +176,10 @@ struct GroupDemand {
     CacheBoundaryKind boundary_kind{CacheBoundaryKind::kChunk};
     std::int32_t num_computed_tokens{-1};
     std::int32_t reserve_tokens{0};
-    // -1 materializes the ordinary dense suffix. A non-negative value keeps
-    // earlier logical slots as null holes and materializes only this suffix.
-    // Decode-side PD uses this for latest-snapshot state groups.
+    // -1 materializes the ordinary dense suffix. A non-negative input is a
+    // base-grain slot; the coordinator translates it to each group's logical
+    // slot before admission. Earlier slots remain null holes. Decode-side PD
+    // uses this for latest-snapshot state groups.
     std::int32_t materialized_suffix_start{-1};
 };
 

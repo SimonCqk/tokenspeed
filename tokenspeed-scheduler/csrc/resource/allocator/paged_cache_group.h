@@ -64,9 +64,9 @@ struct PagedCacheGroupConfig {
     std::int32_t rows_per_page{};
     std::int32_t entry_stride_tokens{};
     std::int32_t total_pages{};
-    // Legacy serialization field. Flat prefix-cache configurations may leave
-    // it unset or set it equal to SchedulerConfig::block_size, but may not use
-    // it to define a different logical prefix granularity.
+    // Logical token span of one cache block in this group. Zero inherits
+    // SchedulerConfig::block_size; otherwise it must be a positive multiple
+    // of that base hash grain.
     std::int32_t block_size{0};
     // Fixed-byte placement recipe: how many logical CacheBlocks from this
     // group fit in one physical LCM block.

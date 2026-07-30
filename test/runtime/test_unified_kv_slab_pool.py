@@ -586,6 +586,7 @@ class LcmPoolFieldBindingTest(unittest.TestCase):
                 max_batch_size=2,
                 max_context_len=32,
                 page_size=4,
+                token_capacity=4,
                 rank=0,
                 layer_types=("linear_attention", "full_attention"),
                 state_field_dtypes={

@@ -22,14 +22,16 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import torch
 
 from tokenspeed.runtime.configs.lcm_layouts import (
+    deepseek_v4_lcm_fields,
     draft_history_lcm_fields,
     inkling_lcm_fields,
     mla_history_lcm_fields,
@@ -43,6 +45,9 @@ from tokenspeed.runtime.configs.paged_cache_spec import (
     FULL_ATTENTION,
     LINEAR_ATTENTION,
     PagedCacheGroupSpec,
+    compute_paged_cache_group_page_counts,
+    full_history_lcm_group_capacities,
+    group_specs_from_layer_types,
     split_recurrent_state_groups,
 )
 from tokenspeed.runtime.layers.attention.configs.base import BaseAttnConfig
@@ -50,15 +55,26 @@ from tokenspeed.runtime.layers.attention.configs.mha import MHAConfig
 from tokenspeed.runtime.layers.attention.configs.mla import MLAConfig
 from tokenspeed.runtime.layers.attention.kv_cache.base import BaseTokenToKVPool
 
-LcmModelFamily = Literal["qwen_gdn", "inkling", "kimi_k3"]
+LcmModelFamily = Literal["qwen_gdn", "inkling", "kimi_k3", "deepseek_v4"]
 
 _LOGICAL_BLOCK_TOKENS = 128
 _MAX_PADDING_FRACTION = 1.0
+# The production 43-layer V4 target peaks below 2.6x per-group parent slack:
+# the c4 history tenant is intentionally overlaid with wider state tenants.
+# Keep finite 8x headroom so new layouts fail closed instead of silently
+# degenerating to one physical plane set per group.
+_DEEPSEEK_V4_MAX_PADDING_FRACTION = 8.0
+_DEEPSEEK_V4_LCM_ALIGNMENT = 256
 
 
 @dataclass(frozen=True)
 class LcmPoolSpec:
-    """Everything needed to bind one model's compute views to an LCM arena."""
+    """Everything needed to bind one model's compute views to an LCM arena.
+
+    ``pool_size`` is the physical child-address extent. ``token_capacity`` is
+    independently bounded by the narrowest full-history group and is the only
+    value scheduler admission may consume.
+    """
 
     memory_plan: LcmMemoryPlan
     layer_types: tuple[str, ...]
@@ -70,6 +86,7 @@ class LcmPoolSpec:
 
     @property
     def pool_size(self) -> int:
+        """Return child-address extent; admission uses ``token_capacity``."""
         max_packing = max(
             group.cache_blocks_per_lcm_block for group in self.memory_plan.groups
         )
@@ -92,6 +109,85 @@ def _packing(plan: LcmMemoryPlan) -> dict[str, int]:
     return {
         group.group_id: int(group.cache_blocks_per_lcm_block) for group in plan.groups
     }
+
+
+def _deepseek_v4_base_block_size(
+    specs: tuple[PagedCacheGroupSpec, ...],
+) -> int:
+    return math.gcd(*(int(spec.block_size) for spec in specs))
+
+
+def _deepseek_v4_lcm_blocks_needed(
+    specs: tuple[PagedCacheGroupSpec, ...],
+    packing: Mapping[str, int],
+    *,
+    token_capacity: int,
+    max_scheduled_tokens: int,
+    max_live_requests: int,
+    max_context_len: int,
+    decode_input_tokens: int,
+    overlap_schedule_depth: int,
+) -> int:
+    counts = compute_paged_cache_group_page_counts(
+        specs,
+        max_live_requests=max_live_requests,
+        max_scheduled_tokens=max_scheduled_tokens,
+        max_total_tokens=token_capacity,
+        max_context_len=max_context_len,
+        decode_input_tokens=decode_input_tokens,
+        overlap_schedule_depth=overlap_schedule_depth,
+    )
+    return sum(
+        (max(0, counts[spec.group_id] - 1) + packing[spec.group_id] - 1)
+        // packing[spec.group_id]
+        for spec in specs
+    )
+
+
+def _deepseek_v4_token_capacity(
+    specs: tuple[PagedCacheGroupSpec, ...],
+    packing: Mapping[str, int],
+    *,
+    num_lcm_blocks: int,
+    upper_bound_tokens: int | None,
+    max_scheduled_tokens: int,
+    max_live_requests: int,
+    max_context_len: int,
+    decode_input_tokens: int,
+    overlap_schedule_depth: int,
+) -> int:
+    sizing = dict(
+        max_scheduled_tokens=max_scheduled_tokens,
+        max_live_requests=max_live_requests,
+        max_context_len=max_context_len,
+        decode_input_tokens=decode_input_tokens,
+        overlap_schedule_depth=overlap_schedule_depth,
+    )
+    if upper_bound_tokens is None:
+        upper_bound_tokens = num_lcm_blocks * max(
+            packing[spec.group_id] * int(spec.block_size) for spec in specs
+        )
+    low, high = 0, upper_bound_tokens
+    while low < high:
+        candidate = (low + high + 1) // 2
+        if (
+            _deepseek_v4_lcm_blocks_needed(
+                specs,
+                packing,
+                token_capacity=candidate,
+                **sizing,
+            )
+            <= num_lcm_blocks
+        ):
+            low = candidate
+        else:
+            high = candidate - 1
+    if low == 0:
+        raise ValueError(
+            f"num_lcm_blocks={num_lcm_blocks} cannot admit one token with "
+            "the configured DeepSeek V4 Flat KV scheduler limits"
+        )
+    return low
 
 
 def _token_limit(server_args) -> int | None:
@@ -378,6 +474,178 @@ def _prepare_kimi_k3(
     )
 
 
+def _deepseek_v4_pool_spec(
+    *,
+    layout,
+    specs: tuple[PagedCacheGroupSpec, ...],
+    fields,
+    num_lcm_blocks: int,
+    packing: Mapping[str, int],
+    logical_block_tokens: int,
+    token_capacity: int,
+) -> LcmPoolSpec:
+    group_ids = {field.group_id for field in fields}
+    group_packing = {group_id: packing[group_id] for group_id in group_ids}
+    plan = plan_lcm_fields(
+        fields,
+        logical_block_tokens=logical_block_tokens,
+        num_lcm_blocks=num_lcm_blocks,
+        cache_blocks_per_lcm_block=group_packing,
+        alignment=_DEEPSEEK_V4_LCM_ALIGNMENT,
+        max_padding_fraction=_DEEPSEEK_V4_MAX_PADDING_FRACTION,
+    )
+    packed_specs = tuple(
+        replace(
+            spec,
+            cache_blocks_per_lcm_block=group_packing[spec.group_id],
+        )
+        for spec in specs
+    )
+    return LcmPoolSpec(
+        memory_plan=plan,
+        layer_types=("deepseek_v4",) * len(layout.layer_ratio),
+        layer_group_ids=("deepseek_v4",) * len(layout.layer_ratio),
+        state_field_dtypes={},
+        token_capacity=token_capacity,
+        extra_paged_groups=packed_specs,
+    )
+
+
+def _prepare_deepseek_v4(
+    *,
+    server_args,
+    model_config,
+    draft_model_config,
+    target_layout,
+    draft_layout,
+    cache_budget_bytes: int,
+    max_scheduled_tokens: int,
+    max_live_requests: int,
+    max_context_len: int,
+    decode_input_tokens: int,
+    overlap_schedule_depth: int,
+) -> LcmSetup:
+    from tokenspeed.runtime.configs.deepseek_v4_cache_spec import (
+        build_v4_flat_cache_specs,
+    )
+
+    target_specs = tuple(
+        build_v4_flat_cache_specs(
+            model_config.hf_config,
+            layer_ratio=target_layout.layer_ratio,
+        )
+    )
+    target_fields = deepseek_v4_lcm_fields(
+        layout=target_layout,
+        group_specs=target_specs,
+    )
+    base_block_size = _deepseek_v4_base_block_size(target_specs)
+    reference_plan = plan_lcm_fields(
+        target_fields,
+        logical_block_tokens=base_block_size,
+        num_lcm_blocks=1,
+        alignment=_DEEPSEEK_V4_LCM_ALIGNMENT,
+        max_padding_fraction=_DEEPSEEK_V4_MAX_PADDING_FRACTION,
+    )
+    target_packing = _packing(reference_plan)
+
+    draft_specs: tuple[PagedCacheGroupSpec, ...] = ()
+    draft_fields = ()
+    draft_parent_bytes = 0
+    draft_packing: dict[str, int] = {}
+    if draft_layout is not None:
+        if draft_model_config is None:
+            raise ValueError("DeepSeek V4 draft layout requires a draft model")
+        draft_specs = tuple(
+            build_v4_flat_cache_specs(
+                draft_model_config.hf_config,
+                layer_ratio=draft_layout.layer_ratio,
+            )
+        )
+        draft_fields = deepseek_v4_lcm_fields(
+            layout=draft_layout,
+            group_specs=draft_specs,
+        )
+        draft_groups = {field.group_id for field in draft_fields}
+        unknown = draft_groups - target_packing.keys()
+        if unknown:
+            raise ValueError(
+                "DeepSeek V4 draft cache groups are absent from the target "
+                f"LCM plan: {sorted(unknown)}"
+            )
+        draft_packing = {
+            group_id: target_packing[group_id] for group_id in draft_groups
+        }
+        draft_parent_bytes = plan_lcm_fields(
+            draft_fields,
+            logical_block_tokens=base_block_size,
+            num_lcm_blocks=1,
+            cache_blocks_per_lcm_block=draft_packing,
+            alignment=_DEEPSEEK_V4_LCM_ALIGNMENT,
+            max_padding_fraction=_DEEPSEEK_V4_MAX_PADDING_FRACTION,
+        ).lcm_block_bytes
+
+    parent_bytes = reference_plan.lcm_block_bytes + draft_parent_bytes
+    num_lcm_blocks = cache_budget_bytes // parent_bytes - 1
+    if num_lcm_blocks < 1:
+        raise ValueError(
+            "DeepSeek V4 cache budget must hold a null parent and one usable LCM parent"
+        )
+
+    token_limit = _token_limit(server_args)
+    sizing = dict(
+        max_scheduled_tokens=max_scheduled_tokens,
+        max_live_requests=max_live_requests,
+        max_context_len=max_context_len,
+        decode_input_tokens=decode_input_tokens,
+        overlap_schedule_depth=overlap_schedule_depth,
+    )
+    if token_limit is not None:
+        num_lcm_blocks = min(
+            num_lcm_blocks,
+            _deepseek_v4_lcm_blocks_needed(
+                target_specs,
+                target_packing,
+                token_capacity=token_limit,
+                **sizing,
+            ),
+        )
+    admitted_tokens = _deepseek_v4_token_capacity(
+        target_specs,
+        target_packing,
+        num_lcm_blocks=num_lcm_blocks,
+        upper_bound_tokens=token_limit,
+        **sizing,
+    )
+
+    target_spec = _deepseek_v4_pool_spec(
+        layout=target_layout,
+        specs=target_specs,
+        fields=target_fields,
+        num_lcm_blocks=num_lcm_blocks,
+        packing=target_packing,
+        logical_block_tokens=base_block_size,
+        token_capacity=admitted_tokens,
+    )
+    draft_spec = None
+    if draft_layout is not None:
+        draft_spec = _deepseek_v4_pool_spec(
+            layout=draft_layout,
+            specs=draft_specs,
+            fields=draft_fields,
+            num_lcm_blocks=num_lcm_blocks,
+            packing=draft_packing,
+            logical_block_tokens=base_block_size,
+            token_capacity=admitted_tokens,
+        )
+    return LcmSetup(
+        target=target_spec,
+        draft=draft_spec,
+        cache_budget_bytes=cache_budget_bytes,
+        fixed_workspace_bytes=0,
+    )
+
+
 def _prepare_mha(
     *,
     family: LcmModelFamily,
@@ -519,14 +787,34 @@ def _prepare_mha(
             "cache budget must hold a null parent and one usable LCM parent"
         )
 
-    max_packing = max(target_packing.values())
+    layer_group_packings = {
+        group_id: target_packing[group_id] for group_id in set(group_ids)
+    }
+    layer_group_specs = group_specs_from_layer_types(
+        layer_types=layer_types,
+        group_ids=group_ids,
+        sliding_window_tokens=attn_config.sliding_window_tokens,
+        page_size=_LOGICAL_BLOCK_TOKENS,
+        cache_blocks_per_lcm_block=layer_group_packings,
+    )
+    full_history_capacities = full_history_lcm_group_capacities(
+        layer_group_specs,
+        base_block_size=_LOGICAL_BLOCK_TOKENS,
+        num_lcm_blocks=1,
+    )
+    if not full_history_capacities:
+        raise ValueError(
+            "MHA LCM cache requires at least one full-history history group "
+            "to define scheduler admission capacity"
+        )
+    admission_tokens_per_parent = min(full_history_capacities.values())
     token_limit = _token_limit(server_args)
     if token_limit is not None:
-        requested = token_limit // _LOGICAL_BLOCK_TOKENS // max_packing
+        requested = token_limit // admission_tokens_per_parent
         if requested < 1:
             raise ValueError(
                 "the configured token limit must hold at least one LCM parent "
-                f"({_LOGICAL_BLOCK_TOKENS * max_packing} child tokens)"
+                f"({admission_tokens_per_parent} admitted tokens)"
             )
         num_lcm_blocks = min(num_lcm_blocks, requested)
 
@@ -543,7 +831,7 @@ def _prepare_mha(
         layer_types=layer_types,
         layer_group_ids=group_ids,
         state_field_dtypes=state_dtypes,
-        token_capacity=(num_lcm_blocks * max_packing * _LOGICAL_BLOCK_TOKENS),
+        token_capacity=num_lcm_blocks * admission_tokens_per_parent,
         layer_kv_head_counts=layer_kv_head_counts,
         extra_paged_groups=(
             _inkling_checkpoint_groups(target_plan) if family == "inkling" else ()
@@ -586,8 +874,26 @@ def prepare_lcm_setup(
     cache_budget_bytes: int,
     decode_input_tokens: int,
     overlap_schedule_depth: int,
+    deepseek_v4_layout=None,
+    draft_deepseek_v4_layout=None,
 ) -> LcmSetup:
     """Apply one model recipe and size target/draft arenas from one budget."""
+    if family == "deepseek_v4":
+        if deepseek_v4_layout is None:
+            raise ValueError("DeepSeek V4 LCM setup requires its cache layout")
+        return _prepare_deepseek_v4(
+            server_args=server_args,
+            model_config=model_config,
+            draft_model_config=draft_model_config,
+            target_layout=deepseek_v4_layout,
+            draft_layout=draft_deepseek_v4_layout,
+            cache_budget_bytes=cache_budget_bytes,
+            max_scheduled_tokens=server_args.chunked_prefill_size,
+            max_live_requests=attn_config.max_bs,
+            max_context_len=attn_config.context_len,
+            decode_input_tokens=decode_input_tokens,
+            overlap_schedule_depth=overlap_schedule_depth,
+        )
     if family == "kimi_k3":
         return _prepare_kimi_k3(
             server_args=server_args,
@@ -650,6 +956,7 @@ def create_lcm_pool(
             kv_alloc_head_count=config.num_kv_heads,
             memory_plan=plan,
             layer_group_ids=spec.layer_group_ids,
+            token_capacity=spec.token_capacity,
             state_field_dtypes=spec.state_field_dtypes,
         )
     if isinstance(config, MLAConfig):

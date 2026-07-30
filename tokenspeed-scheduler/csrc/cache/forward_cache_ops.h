@@ -32,7 +32,8 @@ namespace tokenspeed {
 
 struct SchedulerConfig;
 
-// One KvCacheSpec per config paged_cache_group (group_id = index); all groups share config.block_size.
+// One KvCacheSpec per config paged_cache_group (group_id = index).
+// config.block_size is the base hash grain; each spec carries its group span.
 std::vector<KvCacheSpec> MakeSpecsFromConfig(const SchedulerConfig& config);
 
 std::int32_t AlignFlatPrefillChunk(std::int32_t first_pos, std::int32_t unscheduled, std::int32_t token_budget,
@@ -40,10 +41,17 @@ std::int32_t AlignFlatPrefillChunk(std::int32_t first_pos, std::int32_t unschedu
 
 void FreeRequest(KvCacheCoordinator& coordinator, std::vector<BlockTable>& tables);
 
-// One row per config group_id. Each manager resolves the group's LCM placement
-// to the kernel-visible page id.
-std::map<std::string, std::vector<std::int32_t>> BuildFlatBlockTables(const KvCacheCoordinator& coordinator,
-                                                                      const std::vector<BlockTable>& tables,
-                                                                      std::span<const std::string> group_ids);
+struct FlatBlockTableRows {
+    std::map<std::string, std::vector<std::int32_t>> tables;
+    // Exact same key set as tables. Column c addresses absolute logical block
+    // base_offsets[group] + c.
+    std::map<std::string, std::int32_t> base_offsets;
+};
+
+// Canonical runtime export. The default preserves absolute rows. When the
+// consumer explicitly supports offsets, every group may omit leading null
+// holes and carries its logical origin in base_offsets.
+FlatBlockTableRows BuildFlatBlockTableRows(const KvCacheCoordinator& coordinator, const std::vector<BlockTable>& tables,
+                                           std::span<const std::string> group_ids, bool compact_flat_block_tables);
 
 }  // namespace tokenspeed

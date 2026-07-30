@@ -356,8 +356,12 @@ class FlatMemoryExecutorTest(unittest.TestCase):
             max_padding_fraction=1.0,
         )
         max_packing = max(group.cache_blocks_per_lcm_block for group in plan.groups)
+        full_attention_packing = plan.group("full_attention").cache_blocks_per_lcm_block
         kwargs = dict(
             size=plan.num_lcm_blocks * max_packing * plan.logical_block_tokens,
+            token_capacity=(
+                plan.num_lcm_blocks * full_attention_packing * plan.logical_block_tokens
+            ),
             dtype=self.torch.bfloat16,
             head_num=1,
             head_dim=8,

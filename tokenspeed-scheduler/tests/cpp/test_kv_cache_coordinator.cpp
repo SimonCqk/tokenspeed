@@ -73,6 +73,35 @@ CacheKey Key(const std::string& content_hash, GroupId group_id) {
     return CacheKey{.group_id = group_id, .content_hash = content_hash};
 }
 
+std::vector<KvCacheSpec> V4HeterogeneousSpecs() {
+    return {
+        {.kind = AttnKind::kSlidingWindow, .block_size = 64, .sliding_window = 128, .cache_blocks_per_lcm_block = 1},
+        {.kind = AttnKind::kSlidingWindow, .block_size = 4, .sliding_window = 8, .cache_blocks_per_lcm_block = 19},
+        {.kind = AttnKind::kSlidingWindow, .block_size = 8, .sliding_window = 16, .cache_blocks_per_lcm_block = 2},
+        {.kind = AttnKind::kFull, .block_size = 256, .sliding_window = 0, .cache_blocks_per_lcm_block = 70},
+    };
+}
+
+std::vector<std::string> BaseHashes(std::int32_t count) {
+    std::vector<std::string> hashes;
+    hashes.reserve(static_cast<std::size_t>(count));
+    for (std::int32_t i = 0; i < count; ++i) {
+        hashes.push_back("base-" + std::to_string(i));
+    }
+    return hashes;
+}
+
+std::vector<std::string> GroupContentHashes(const KvCacheCoordinator& coordinator,
+                                            std::span<const std::string> base_hashes, GroupId group_id) {
+    const std::vector<CacheKey> keys = KvCacheCoordinatorTestAccess::KeysForGroup(coordinator, base_hashes, group_id);
+    std::vector<std::string> hashes;
+    hashes.reserve(keys.size());
+    for (const CacheKey& key : keys) {
+        hashes.push_back(key.content_hash);
+    }
+    return hashes;
+}
+
 // Cache then free, so the block is prefix-hittable via MatchPrefix.
 std::int32_t CacheForGroup(KvCacheCoordinator& coordinator, BlockPool& pool, const std::string& content_hash,
                            std::uint32_t group_id) {
@@ -160,6 +189,91 @@ TEST(MakeCoordinatorTest, Qwen35UsesUniformLogicalPWithDifferentPacking) {
     for (const PrefixMatch& group_match : match.per_group) {
         EXPECT_EQ(group_match.blocks.size(), 1u);
     }
+}
+
+TEST(MakeCoordinatorTest, HeterogeneousGroupsProjectBaseHashesAndSlotsOnTheirOwnGrid) {
+    BlockPool pool(/*num_lcm_blocks=*/32);
+    const std::vector<KvCacheSpec> specs = V4HeterogeneousSpecs();
+    KvCacheCoordinator coordinator = MakeCoordinator(specs, /*cache_block_tokens=*/4, pool);
+
+    EXPECT_EQ(coordinator.CacheBlockTokens(), 4);
+    EXPECT_EQ(coordinator.PrefixAlignmentTokens(), 256);
+    EXPECT_EQ(coordinator.GroupManager(0).CacheBlockTokens(), 64);
+    EXPECT_EQ(coordinator.GroupManager(1).CacheBlockTokens(), 4);
+    EXPECT_EQ(coordinator.GroupManager(2).CacheBlockTokens(), 8);
+    EXPECT_EQ(coordinator.GroupManager(3).CacheBlockTokens(), 256);
+
+    std::vector<BlockTable> tables(coordinator.NumGroups());
+    ASSERT_TRUE(AdmitForTest(coordinator, tables, /*num_tokens=*/256));
+    EXPECT_EQ(tables[0].NumBlocks(), 4);
+    EXPECT_EQ(tables[1].NumBlocks(), 64);
+    EXPECT_EQ(tables[2].NumBlocks(), 32);
+    EXPECT_EQ(tables[3].NumBlocks(), 1);
+
+    const std::vector<std::string> hashes = BaseHashes(/*count=*/64);
+    CacheFullBlocksForTest(coordinator, tables, hashes);
+    for (std::size_t group = 0; group < specs.size(); ++group) {
+        const std::vector<std::string> folded = GroupContentHashes(coordinator, hashes, static_cast<GroupId>(group));
+        ASSERT_EQ(folded.size(), static_cast<std::size_t>(tables[group].NumBlocks()));
+        EXPECT_TRUE(coordinator.GroupManager(static_cast<std::int32_t>(group))
+                        .ContainsCachedBlock(pool, Key(folded.back(), static_cast<GroupId>(group))));
+    }
+    coordinator.Free(tables);
+
+    const KvCacheCoordinator::PrefixProbe probe = coordinator.ProbePrefix(hashes);
+    EXPECT_EQ(probe.device.num_common_tokens, 256);
+    ASSERT_EQ(probe.device.per_group.size(), specs.size());
+    EXPECT_EQ(probe.device.per_group[0].hits.size(), 4u);
+    EXPECT_EQ(probe.device.per_group[1].hits.size(), 64u);
+    EXPECT_EQ(probe.device.per_group[2].hits.size(), 32u);
+    EXPECT_EQ(probe.device.per_group[3].hits.size(), 1u);
+}
+
+TEST(KvCacheCoordinatorTest, ContinuationMissConvergesAtSharedRawTokenBoundary) {
+    BlockPool pool(/*num_lcm_blocks=*/8);
+    const std::vector<KvCacheSpec> specs = V4HeterogeneousSpecs();
+    KvCacheCoordinator coordinator = MakeCoordinator(specs, /*cache_block_tokens=*/4, pool);
+    const std::vector<std::string> hashes = BaseHashes(/*count=*/64);
+    std::array<std::vector<std::string>, 4> folded{
+        GroupContentHashes(coordinator, hashes, /*group_id=*/0),
+        GroupContentHashes(coordinator, hashes, /*group_id=*/1),
+        GroupContentHashes(coordinator, hashes, /*group_id=*/2),
+        GroupContentHashes(coordinator, hashes, /*group_id=*/3),
+    };
+
+    CacheForGroup(coordinator, pool, folded[0][2], /*group_id=*/0);
+    CacheForGroup(coordinator, pool, folded[0][3], /*group_id=*/0);
+    CacheForGroup(coordinator, pool, folded[1][62], /*group_id=*/1);
+    CacheForGroup(coordinator, pool, folded[1][63], /*group_id=*/1);
+    CacheForGroup(coordinator, pool, folded[2][29], /*group_id=*/2);
+    CacheForGroup(coordinator, pool, folded[2][30], /*group_id=*/2);
+    CacheForGroup(coordinator, pool, folded[3][0], /*group_id=*/3);
+
+    EXPECT_EQ(coordinator.ProbePrefix(hashes).device.num_common_tokens, 0);
+
+    CacheForGroup(coordinator, pool, folded[2][31], /*group_id=*/2);
+    EXPECT_EQ(coordinator.ProbePrefix(hashes).device.num_common_tokens, 256);
+}
+
+TEST(KvCacheCoordinatorTest, UnalignedNewBaseSlicePublishesNextCompletedGroupBlockOnce) {
+    BlockPool pool(/*num_lcm_blocks=*/2);
+    const std::vector<KvCacheSpec> specs{
+        {.kind = AttnKind::kFull, .block_size = 256, .sliding_window = 0, .cache_blocks_per_lcm_block = 1},
+    };
+    KvCacheCoordinator coordinator = MakeCoordinator(specs, /*cache_block_tokens=*/4, pool);
+    std::vector<BlockTable> tables(coordinator.NumGroups());
+    ASSERT_TRUE(AdmitForTest(coordinator, tables, /*num_tokens=*/256));
+    const std::vector<std::string> hashes = BaseHashes(/*count=*/64);
+    std::vector<GroupDemand> demands{{
+        .table = &tables[0],
+        .page_hashes = hashes,
+        .first_new_page_slot = 62,
+    }};
+
+    ASSERT_TRUE(coordinator.Admit(coordinator.ProbePrefix({}), demands));
+    EXPECT_EQ(coordinator.GroupManager(0).NumCachedBlocks(pool), 1);
+    EXPECT_TRUE(coordinator.GroupManager(0).ContainsCachedBlock(pool, Key(hashes[63], /*group_id=*/0)));
+    coordinator.Free(tables);
 }
 
 TEST(MakeCoordinatorTest, RejectsNonPositiveLogicalPOrPacking) {

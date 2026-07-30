@@ -30,6 +30,9 @@ from tokenspeed.runtime.utils import get_colorful_logger
 
 if TYPE_CHECKING:
     from tokenspeed.runtime.cache.kvstore_controller import LayerDoneCounter
+    from tokenspeed.runtime.configs.flat_cache_runtime import (
+        FlatPagedCacheRuntimeContract,
+    )
 
 logger = get_colorful_logger(__name__)
 
@@ -37,9 +40,14 @@ logger = get_colorful_logger(__name__)
 class BaseTokenToKVPool:
     """A memory pool that maps a token location to its kv cache data."""
 
+    # Flat LCM pools publish their scheduler/runtime geometry here. Radix pools
+    # inherit the explicit None value; callers must not probe optional pool
+    # properties to infer the allocation backend.
+    runtime_contract: FlatPagedCacheRuntimeContract | None = None
     paged_cache_group_specs: tuple[PagedCacheGroupSpec, ...] = ()
     paged_cache_group_page_counts: dict[str, int] = {}
     supports_hierarchical_kv_cache: bool = True
+    supports_disaggregation: bool = False
     # Flat-cache pools that alias recurrent-state bytes and KV in one slab must
     # zero physical pages on reuse to avoid poisoned tails. Pure-attention
     # pools do not alias state, so reused pages need no sanitization.

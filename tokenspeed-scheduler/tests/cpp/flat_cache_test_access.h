@@ -37,6 +37,12 @@ struct KvCacheCoordinatorTestAccess {
     }
 
     static std::uint64_t NextAccessEpoch(KvCacheCoordinator& coordinator) { return ++coordinator.next_access_epoch_; }
+
+    static std::vector<CacheKey> KeysForGroup(const KvCacheCoordinator& coordinator,
+                                              std::span<const std::string> content_hashes, GroupId group_id,
+                                              std::int32_t first_base_slot = 0) {
+        return coordinator.keysForGroup(content_hashes, group_id, first_base_slot);
+    }
 };
 
 inline auto MatchPrefixForTest(KvCacheCoordinator& coordinator, std::span<const std::string> content_hashes) {

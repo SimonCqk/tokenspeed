@@ -356,20 +356,21 @@ class EventLoop:
             mamba_l2_io_backend=server_args.mamba_l2_io_backend,
         )
         paged_cache_host_group_pages = {}
-        if scheduler_ext_flat_kvcache() and server_args.enable_kvstore:
+        flat_kvcache_ext = scheduler_ext_flat_kvcache()
+        if flat_kvcache_ext and server_args.enable_kvstore:
             if server_args.kvstore_storage_backend is not None:
                 raise NotImplementedError(
                     "flat scheduler build (TOKENSPEED_FLAT_KVCACHE) has no L3 "
                     "storage tier yet; unset --kvstore-storage-backend."
                 )
-            if getattr(token_to_kv_pool, "runtime_contract", None) is not None:
-                # FlatKV contract pools (Kimi-K3) have no host tier yet:
-                # FlatMemoryExecutor mirrors k_buffer/v_buffer layouts the
-                # raw-slab pool does not expose. Reject this unsupported
+            if token_to_kv_pool.runtime_contract is not None:
+                # Shared-LCM/runtime-contract pools do not expose the raw-slab
+                # layout mirrored by FlatMemoryExecutor. Reject this unsupported
                 # combination at startup.
                 raise NotImplementedError(
                     "the flat host tier (kvstore L2) does not support FlatKV "
-                    "contract pools (Kimi-K3) yet; pass --disable-kvstore."
+                    "runtime-contract/shared-LCM pool layouts yet; pass "
+                    "--disable-kvstore."
                 )
             self.memory_executor = FlatMemoryExecutor(
                 device_pool=token_to_kv_pool,
@@ -417,11 +418,11 @@ class EventLoop:
                 f"(ratio={server_args.mamba_full_memory_ratio})."
             )
 
-        # Adjunct is device-side prefix-cache metadata and must stay enabled
-        # under --disable-kvstore to match the non-L2 DeepSeek V4 path.
+        # Adjunct is device-side prefix-cache metadata and remains independent
+        # of the optional host tier selected by --disable-kvstore.
         self._flatkv_pd_enabled = bool(
             server_args.disaggregation_mode in ("prefill", "decode")
-            and getattr(token_to_kv_pool, "supports_disaggregation", False) is True
+            and token_to_kv_pool.supports_disaggregation
         )
         if self._flatkv_pd_enabled:
             unsupported = []
@@ -455,7 +456,7 @@ class EventLoop:
                     "FlatKV PD currently does not support: " + ", ".join(unsupported)
                 )
         validate_flat_scheduler_config(
-            flat_kvcache_ext=scheduler_ext_flat_kvcache(),
+            flat_kvcache_ext=flat_kvcache_ext,
             paged_cache_groups=paged_cache_groups,
             attn_backend=attn_backend,
             kv_pool=token_to_kv_pool,
@@ -507,6 +508,8 @@ class EventLoop:
             paged_cache_host_group_pages=paged_cache_host_group_pages,
             enable_mixed_prefill_decode=server_args.enable_mixed_batch,
             prefix_cache_adjunct=prefix_cache_adjunct,
+            scheduler_backend="flat" if flat_kvcache_ext else "radix",
+            compact_flat_block_tables=self.model_executor.compact_flat_block_tables,
         )
         scheduler_cfg.enable_flatkv_pd = self._flatkv_pd_enabled
         logger.info(
@@ -515,8 +518,9 @@ class EventLoop:
             "overlap_schedule_depth=%s disable_l2_cache=%s "
             "max_batch_size=%s (global max_num_seqs=%s, dp_size=%s) "
             "mamba_pool_total_chunks=%s enable_mamba=%s "
-            "disable_prefix_cache=%s paged_cache_groups=%s "
-            "paged_cache_host_group_pages=%s prefix_cache_adjunct_groups=%s",
+            "disable_prefix_cache=%s compact_flat_block_tables=%s "
+            "paged_cache_groups=%s paged_cache_host_group_pages=%s "
+            "prefix_cache_adjunct_groups=%s",
             scheduler_cfg.block_size,
             scheduler_cfg.num_device_pages,
             scheduler_cfg.num_host_pages,
@@ -530,6 +534,7 @@ class EventLoop:
             mamba_pool_total_chunks,
             has_mamba,
             scheduler_cfg.disable_prefix_cache,
+            scheduler_cfg.compact_flat_block_tables,
             [group.group_id for group in paged_cache_groups],
             paged_cache_host_group_pages,
             (

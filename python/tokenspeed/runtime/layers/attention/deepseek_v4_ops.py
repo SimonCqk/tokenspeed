@@ -243,7 +243,7 @@ def dequantize_deepseek_v4_fp8_ds_mla_cache(
     if slot_mapping.numel() == 0:
         return torch.empty(out_shape, device=cache_2d.device, dtype=torch.bfloat16)
 
-    flat_cache = cache_2d.reshape(-1)
+    cache_pages = cache_2d
     num_nope_blocks = nope_dim // DEEPSEEK_V4_FP8_QUANT_BLOCK
 
     slots = slot_mapping.to(torch.int64)
@@ -251,15 +251,14 @@ def dequantize_deepseek_v4_fp8_ds_mla_cache(
     safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
     pages = torch.div(safe_slots, block_size, rounding_mode="floor")
     pos = safe_slots % block_size
-    page_base = pages * cache_2d.stride(0)
-    value_base = page_base + pos * token_stride
-    scale_base = page_base + block_size * token_stride + pos * scale_dim
+    value_base = pos * token_stride
+    scale_base = block_size * token_stride + pos * scale_dim
 
     value_offsets = (
         value_base[:, None]
         + torch.arange(token_stride, device=cache_2d.device, dtype=torch.int64)[None, :]
     )
-    row_bytes = flat_cache[value_offsets]
+    row_bytes = cache_pages[pages[:, None], value_offsets]
     nope = row_bytes[:, :nope_dim].contiguous().view(torch.float8_e4m3fn)
 
     scale_offsets = (
@@ -268,7 +267,10 @@ def dequantize_deepseek_v4_fp8_ds_mla_cache(
             None, :
         ]
     )
-    scales = torch.pow(2.0, flat_cache[scale_offsets].to(torch.int32) - 127)
+    scales = torch.pow(
+        2.0,
+        cache_pages[pages[:, None], scale_offsets].to(torch.int32) - 127,
+    )
     scales = scales.float().repeat_interleave(DEEPSEEK_V4_FP8_QUANT_BLOCK, dim=1)
 
     rope = row_bytes[:, nope_dim:token_stride].contiguous()
@@ -404,16 +406,13 @@ def _write_fp8_ds_mla_cache_rows_capturable(
     safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
     block_idx = torch.div(safe_slots, kv_cache_block_size, rounding_mode="floor")
     pos_in_block = safe_slots % kv_cache_block_size
-    block_base = block_idx * kv_cache_2d.stride(0)
-    token_base = block_base + pos_in_block * token_stride
-    scale_base = (
-        block_base + kv_cache_block_size * token_stride + pos_in_block * scale_dim
-    )
+    token_base = pos_in_block * token_stride
+    scale_base = kv_cache_block_size * token_stride + pos_in_block * scale_dim
 
     value_bytes, scale_bytes, rope_bytes = _fp8_ds_mla_cache_rows(
         normed[:num_rows], positions[:num_rows], cos_sin_cache, compress_ratio
     )
-    flat_cache = kv_cache_2d.reshape(-1)
+    cache_pages = kv_cache_2d
     value_offsets = (
         token_base[:, None]
         + torch.arange(
@@ -439,9 +438,10 @@ def _write_fp8_ds_mla_cache_rows_capturable(
             dtype=torch.int64,
         )[None, :]
     )
-    flat_cache[value_offsets] = value_bytes
-    flat_cache[scale_offsets] = scale_bytes
-    flat_cache[rope_offsets] = rope_bytes
+    page_indices = block_idx[:, None]
+    cache_pages[page_indices, value_offsets] = value_bytes
+    cache_pages[page_indices, scale_offsets] = scale_bytes
+    cache_pages[page_indices, rope_offsets] = rope_bytes
 
 
 def save_deepseek_v4_compressor_state(
@@ -526,11 +526,10 @@ def write_deepseek_v4_indexer_fp8_cache(
     min_stride = block_size * row_bytes
     if cache_2d.dim() != 2 or cache_2d.shape[1] < min_stride:
         raise ValueError(
-            f"cache_2d must be [pages, >= {min_stride}], "
-            f"got {tuple(cache_2d.shape)}"
+            f"cache_2d must be [pages, >= {min_stride}], got {tuple(cache_2d.shape)}"
         )
 
-    flat_cache = cache_2d.reshape(-1)
+    cache_pages = cache_2d
     num_actual = min(slot_mapping.numel(), index_k.shape[0])
     for token_idx in range(num_actual):
         slot = int(slot_mapping[token_idx].item())
@@ -538,12 +537,11 @@ def write_deepseek_v4_indexer_fp8_cache(
             continue
         page = slot // block_size
         pos = slot % block_size
-        page_base = page * cache_2d.stride(0)
-        value_base = page_base + pos * index_head_dim
-        scale_base = page_base + block_size * index_head_dim + pos * scale_bytes
+        value_base = pos * index_head_dim
+        scale_base = block_size * index_head_dim + pos * scale_bytes
         q_bytes, scale = _fp8_e4m3_pow2_bytes(index_k[token_idx].float())
-        flat_cache[value_base : value_base + index_head_dim].copy_(q_bytes)
-        flat_cache[scale_base : scale_base + scale_bytes].copy_(
+        cache_pages[page, value_base : value_base + index_head_dim].copy_(q_bytes)
+        cache_pages[page, scale_base : scale_base + scale_bytes].copy_(
             scale.reshape(1).view(torch.uint8)
         )
 
@@ -625,11 +623,10 @@ def _write_deepseek_v4_indexer_fp8_cache_capturable(
     safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
     pages = torch.div(safe_slots, block_size, rounding_mode="floor")
     pos = safe_slots % block_size
-    page_base = pages * cache_2d.stride(0)
-    value_base = page_base + pos * index_head_dim
-    scale_base = page_base + block_size * index_head_dim + pos * scale_bytes
+    value_base = pos * index_head_dim
+    scale_base = block_size * index_head_dim + pos * scale_bytes
 
-    flat_cache = cache_2d.reshape(-1)
+    cache_pages = cache_2d
     value_offsets = (
         value_base[:, None]
         + torch.arange(
@@ -642,8 +639,12 @@ def _write_deepseek_v4_indexer_fp8_cache_capturable(
         scale_base[:, None]
         + torch.arange(scale_bytes, device=cache_2d.device, dtype=torch.int64)[None, :]
     )
-    flat_cache[value_offsets] = value_bytes
-    flat_cache[scale_offsets] = scale.view(torch.uint8).reshape(num_rows, scale_bytes)
+    page_indices = pages[:, None]
+    cache_pages[page_indices, value_offsets] = value_bytes
+    cache_pages[page_indices, scale_offsets] = scale.view(torch.uint8).reshape(
+        num_rows,
+        scale_bytes,
+    )
 
 
 def read_deepseek_v4_indexer_mxfp4_cache(
@@ -668,15 +669,14 @@ def read_deepseek_v4_indexer_mxfp4_cache(
     if slot_mapping.numel() == 0:
         return torch.empty(out_shape, device=cache_2d.device, dtype=torch.float32)
 
-    flat_cache = cache_2d.reshape(-1)
+    cache_pages = cache_2d
     slots = slot_mapping.to(torch.int64)
     valid = slots >= 0
     safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
     pages = torch.div(safe_slots, block_size, rounding_mode="floor")
     pos = safe_slots % block_size
-    page_base = pages * cache_2d.stride(0)
-    value_base = page_base + pos * value_bytes
-    scale_base = page_base + block_size * value_bytes + pos * scale_bytes
+    value_base = pos * value_bytes
+    scale_base = block_size * value_bytes + pos * scale_bytes
 
     value_offsets = (
         value_base[:, None]
@@ -686,7 +686,7 @@ def read_deepseek_v4_indexer_mxfp4_cache(
             dtype=torch.int64,
         )[None, :]
     )
-    packed = flat_cache[value_offsets]
+    packed = cache_pages[pages[:, None], value_offsets]
 
     scale_offsets = (
         scale_base[:, None]
@@ -696,7 +696,10 @@ def read_deepseek_v4_indexer_mxfp4_cache(
             dtype=torch.int64,
         )[None, :]
     )
-    scales = torch.pow(2.0, flat_cache[scale_offsets].to(torch.int32) - 127)
+    scales = torch.pow(
+        2.0,
+        cache_pages[pages[:, None], scale_offsets].to(torch.int32) - 127,
+    )
     byte_scales = scales.float().repeat_interleave(
         DEEPSEEK_V4_MXFP4_BLOCK_SIZE // 2, dim=1
     )
@@ -731,18 +734,19 @@ def read_deepseek_v4_indexer_fp8_cache(
         device=cache_2d.device,
         dtype=torch.float32,
     )
-    flat_cache = cache_2d.reshape(-1)
+    cache_pages = cache_2d
     for token_idx, raw_slot in enumerate(slot_mapping.tolist()):
         slot = int(raw_slot)
         if slot < 0:
             continue
         page = slot // block_size
         pos = slot % block_size
-        page_base = page * cache_2d.stride(0)
-        value_base = page_base + pos * index_head_dim
-        scale_base = page_base + block_size * index_head_dim + pos * scale_bytes
-        scale = flat_cache[scale_base : scale_base + scale_bytes].view(torch.float32)[0]
-        values = flat_cache[value_base : value_base + index_head_dim].view(
+        value_base = pos * index_head_dim
+        scale_base = block_size * index_head_dim + pos * scale_bytes
+        scale = cache_pages[page, scale_base : scale_base + scale_bytes].view(
+            torch.float32
+        )[0]
+        values = cache_pages[page, value_base : value_base + index_head_dim].view(
             torch.float8_e4m3fn
         )
         out[token_idx].copy_(values.float() * scale)

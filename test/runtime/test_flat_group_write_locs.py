@@ -63,9 +63,45 @@ class _MHACase(_TorchCase):
         self.backend = MHAAttnBackend.__new__(MHAAttnBackend)
         self.backend.page_size = PAGE
         self.backend.flat_group_page_sizes = {}
+        self.backend.flat_group_specs_published = False
 
 
 class ComputeFlatOutCacheLocsTest(_MHACase):
+    def test_group_page_size_falls_back_only_without_flat_specs(self):
+        for group_id in ("", "radix-layer-label"):
+            with self.subTest(legacy_group_id=group_id):
+                self.assertEqual(self.backend._group_page_size(group_id), PAGE)
+
+        self.backend._learn_flat_state_groups(
+            (
+                SimpleNamespace(
+                    group_id="full",
+                    family="history",
+                    rows_per_page=4,
+                    entry_stride_tokens=1,
+                ),
+            )
+        )
+        self.assertEqual(self.backend._group_page_size("full"), 4)
+        for group_id in ("", "unknown"):
+            with self.subTest(flat_group_id=group_id), self.assertRaisesRegex(
+                RuntimeError, "absent from.*cache specs"
+            ):
+                self.backend._group_page_size(group_id)
+
+        self.backend._learn_flat_state_groups(
+            (
+                SimpleNamespace(
+                    group_id="state",
+                    family="state",
+                    rows_per_page=4,
+                    entry_stride_tokens=1,
+                ),
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "absent from.*cache specs"):
+            self.backend._group_page_size("unknown")
+
     def test_decode_locs_formula(self):
         torch = self.torch
         # 2 reqs, page_size=2. r0: seq_len 5 -> pos 4 -> page_idx 2, off 0.

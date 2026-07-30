@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <tuple>
@@ -287,16 +288,28 @@ std::optional<AdmissionPlan> planAdmission(const std::vector<CacheGroup>& groups
 
 std::optional<KvCacheCoordinator::AdmissionResult> KvCacheCoordinator::Admit(
     PrefixProbe&& prefix, std::span<const GroupDemand> demands, std::optional<std::uint64_t> request_access_epoch) {
-    std::optional<AdmissionPlan> candidate = planAdmission(groups_, pool_, std::move(prefix), demands);
+    _assert(demands.size() == groups_.size(), "demands/groups size mismatch");
+    std::vector<GroupDemand> group_demands{demands.begin(), demands.end()};
+    for (std::size_t i = 0; i < group_demands.size(); ++i) {
+        GroupDemand& demand = group_demands[i];
+        _assert(demand.table != nullptr, "group demand requires a block table");
+        if (demand.materialized_suffix_start < 0) {
+            continue;
+        }
+        const std::int64_t suffix_token =
+            static_cast<std::int64_t>(demand.materialized_suffix_start) * cache_block_tokens_;
+        const std::int32_t group_block_tokens = groups_[i].Manager().CacheBlockTokens();
+        _assert(suffix_token <= std::numeric_limits<std::int32_t>::max(),
+                "materialized suffix token offset exceeds int32");
+        _assert(suffix_token % group_block_tokens == 0, "materialized suffix must be aligned to the group block span");
+        demand.materialized_suffix_start = static_cast<std::int32_t>(suffix_token / group_block_tokens);
+    }
+
+    std::optional<AdmissionPlan> candidate = planAdmission(groups_, pool_, std::move(prefix), group_demands);
     if (!candidate) {
         return std::nullopt;
     }
     AdmissionPlan plan = std::move(*candidate);
-
-    _assert(demands.size() == groups_.size(), "demands/groups size mismatch");
-    for (const GroupDemand& demand : demands) {
-        _assert(demand.table != nullptr, "group demand requires a block table");
-    }
 
     if (request_access_epoch.has_value()) {
         _assert(*request_access_epoch > 0 && *request_access_epoch <= next_access_epoch_,
@@ -317,7 +330,8 @@ std::optional<KvCacheCoordinator::AdmissionResult> KvCacheCoordinator::Admit(
     };
     if (acquired_prefix.device.num_common_tokens > 0) {
         for (std::size_t i = 0; i < groups_.size(); ++i) {
-            groups_[i].Manager().ClaimHitBlocks(*demands[i].table, std::move(acquired_prefix.device.per_group[i]));
+            groups_[i].Manager().ClaimHitBlocks(*group_demands[i].table,
+                                                std::move(acquired_prefix.device.per_group[i]));
         }
     }
     std::vector<std::pair<GroupId, CacheBlockLocation>> prospective_victims;
@@ -332,7 +346,7 @@ std::optional<KvCacheCoordinator::AdmissionResult> KvCacheCoordinator::Admit(
         }
     }
     for (std::size_t i = 0; i < groups_.size(); ++i) {
-        const GroupDemand& demand = demands[i];
+        const GroupDemand& demand = group_demands[i];
         if (!demand.page_hashes.empty()) {
             cacheCompletedBlocksForGroup(i, demand, access_epoch);
         }
@@ -347,7 +361,7 @@ std::optional<KvCacheCoordinator::AdmissionResult> KvCacheCoordinator::Admit(
     }
 
     for (std::size_t i = 0; i < groups_.size(); ++i) {
-        const GroupDemand& demand = demands[i];
+        const GroupDemand& demand = group_demands[i];
         if (!acquired_prefix.host.per_group.empty() && !acquired_prefix.host.per_group[i].blocks.empty()) {
             groups_[i].Manager().AppendHostExtension(
                 pool_, *demand.table, std::move(acquired_prefix.host.per_group[i].blocks), result.load_pairs);

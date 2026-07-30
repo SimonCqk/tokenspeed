@@ -42,6 +42,7 @@ from tokenspeed_scheduler import (
 )
 
 from tokenspeed.runtime.configs.flat_cache_runtime import require_positive_int
+from tokenspeed.runtime.configs.paged_cache_spec import scheduler_ext_flat_kvcache
 
 _CACHE_EVENT_TYPES = {
     "WriteBackDoneEvent": Cache.WriteBackDoneEvent,
@@ -84,42 +85,28 @@ def scheduler_cache_geometry_from_pool(
     fallback_token_capacity: int,
     fallback_page_size: int,
 ) -> SchedulerCacheGeometry:
-    contract = getattr(pool, "runtime_contract", None)
-    num_lcm_blocks = getattr(pool, "num_lcm_blocks", None)
-    if num_lcm_blocks is not None:
-        num_lcm_blocks = require_positive_int("num_lcm_blocks", num_lcm_blocks)
-        if contract is not None and contract.num_lcm_blocks != num_lcm_blocks:
-            raise ValueError("pool and runtime contract disagree on num_lcm_blocks")
+    """Resolve scheduler units from the pool's explicit Flat contract or Radix data.
+
+    Every cache pool publishes ``runtime_contract`` through the base interface;
+    Flat LCM pools provide a contract and Radix pools provide ``None``. Do not
+    infer the backend from unrelated optional geometry properties.
+    """
+
+    runtime_contract = pool.runtime_contract
+    if runtime_contract is not None:
+        num_lcm_blocks = require_positive_int(
+            "contract.num_lcm_blocks", runtime_contract.num_lcm_blocks
+        )
         return SchedulerCacheGeometry(
             page_size=require_positive_int(
-                "contract.block_size" if contract is not None else "fallback_page_size",
-                contract.block_size if contract is not None else fallback_page_size,
+                "contract.block_size", runtime_contract.block_size
             ),
             # Parent 0 is reserved as the null LCM block.
             num_device_pages=num_lcm_blocks + 1,
             num_usable_pages=num_lcm_blocks,
             token_capacity=require_positive_int(
-                (
-                    "contract.token_capacity"
-                    if contract is not None
-                    else "fallback_token_capacity"
-                ),
-                (
-                    contract.token_capacity
-                    if contract is not None
-                    else fallback_token_capacity
-                ),
+                "contract.token_capacity", runtime_contract.token_capacity
             ),
-        )
-    if contract is not None:
-        num_lcm_blocks = require_positive_int(
-            "contract.num_lcm_blocks", contract.num_lcm_blocks
-        )
-        return SchedulerCacheGeometry(
-            page_size=contract.block_size,
-            num_device_pages=num_lcm_blocks + 1,
-            num_usable_pages=num_lcm_blocks,
-            token_capacity=contract.token_capacity,
         )
     if fallback_page_size <= 0 or fallback_token_capacity <= 0:
         raise ValueError("fallback scheduler cache geometry must be positive")
@@ -136,13 +123,39 @@ def scheduler_cache_geometry_from_pool(
     )
 
 
-def resolve_scheduler_block_size(page_size: int, paged_cache_groups) -> int:
-    """Scheduler block_size = hash-grain BASE: gcd of group block sizes, not the KV page geometry."""
-    base = page_size
+def resolve_scheduler_block_size(
+    page_size: int,
+    paged_cache_groups,
+    *,
+    scheduler_backend: str | None = None,
+) -> int:
+    """Resolve the scheduler block grain without changing Radix page units.
+
+    Radix hashes, admission, and host/device page accounting share the physical
+    ``page_size`` ABI. FlatKV instead schedules heterogeneous group pages and
+    therefore uses the greatest common divisor of their raw-token spans.
+    """
+
+    page_size = require_positive_int("page_size", page_size)
+    if scheduler_backend is None:
+        scheduler_backend = "flat" if scheduler_ext_flat_kvcache() else "radix"
+    if scheduler_backend not in ("radix", "flat"):
+        raise ValueError(
+            f"scheduler_backend must be 'radix' or 'flat', got {scheduler_backend!r}"
+        )
+    if scheduler_backend == "radix":
+        return page_size
+
+    base = 0
     for group in paged_cache_groups or ():
-        gb = int(getattr(group, "block_size", 0) or 0) or page_size
-        base = math.gcd(base, gb)
-    return base
+        raw_group_size = group.block_size
+        group_size = (
+            page_size
+            if raw_group_size in (None, 0)
+            else require_positive_int("paged cache group block_size", raw_group_size)
+        )
+        base = math.gcd(base, group_size)
+    return base or page_size
 
 
 def aligned_max_scheduled_tokens(
@@ -220,12 +233,18 @@ def make_config(
     paged_cache_host_group_pages: Mapping[str, int] | None = None,
     enable_mixed_prefill_decode: bool = False,
     prefix_cache_adjunct: "PrefixCacheAdjunctSpec | None" = None,
+    scheduler_backend: str | None = None,
+    compact_flat_block_tables: bool = False,
 ) -> SchedulerConfig:
     cfg = SchedulerConfig()
     cfg.num_device_pages = num_device_pages
     cfg.max_scheduled_tokens = max_scheduled_tokens
     cfg.max_batch_size = max_batch_size
-    cfg.block_size = resolve_scheduler_block_size(page_size, paged_cache_groups)
+    cfg.block_size = resolve_scheduler_block_size(
+        page_size,
+        paged_cache_groups,
+        scheduler_backend=scheduler_backend,
+    )
 
     cfg.num_host_pages = num_host_pages
     cfg.enable_l3_storage = enable_l3_storage
@@ -249,6 +268,9 @@ def make_config(
     cfg.enable_mamba_l2 = enable_mamba_l2
     cfg.mamba_l2_host_slots = mamba_l2_host_slots
     cfg.enable_mixed_prefill_decode = enable_mixed_prefill_decode
+    # Explicit consumer capability. Legacy Flat backends index table columns
+    # absolutely; runtime-contract consumers carry canonical per-row bases.
+    cfg.compact_flat_block_tables = bool(compact_flat_block_tables)
     if paged_cache_groups:
         cfg.paged_cache_groups = list(paged_cache_groups)
     if paged_cache_host_group_pages:
@@ -264,7 +286,7 @@ def make_config(
 
 def pool_to_paged_cache_groups(pool: Any) -> list:
     """Convert authoritative contract specs, or legacy pool properties."""
-    contract = getattr(pool, "runtime_contract", None)
+    contract = pool.runtime_contract
     if contract is not None:
         specs = contract.group_specs
         counts = contract.group_page_counts
@@ -294,11 +316,9 @@ def pool_to_paged_cache_groups(pool: Any) -> list:
             total_pages=int(counts[spec.group_id]),
             retention=retention,
             family=family,
-            cache_blocks_per_lcm_block=int(
-                getattr(spec, "cache_blocks_per_lcm_block", 1)
-            ),
+            cache_blocks_per_lcm_block=int(spec.cache_blocks_per_lcm_block),
         )
-        transfer_policy = getattr(spec, "transfer_policy", None)
+        transfer_policy = spec.transfer_policy
         if transfer_policy is not None:
             mapped_policy = _TRANSFER_POLICY_MAP.get(transfer_policy)
             if mapped_policy is None:
@@ -311,7 +331,7 @@ def pool_to_paged_cache_groups(pool: Any) -> list:
             kwargs["sliding_window_tokens"] = int(spec.sliding_window_tokens)
         cfg = PagedCacheGroupConfig(**kwargs)
         # Ctor default 0 = global base; a spec block_size sets the per-group granularity.
-        if getattr(spec, "block_size", None):
+        if spec.block_size:
             cfg.block_size = int(spec.block_size)
         out.append(cfg)
     return out
@@ -535,17 +555,16 @@ def flat_block_tables_from_forward_op(
     expected_group_ids: tuple[str, ...] | None = None,
     max_page_id: int | None = None,
     max_page_ids: Mapping[str, int] | None = None,
-) -> dict[str, torch.Tensor]:
-    """Bridge the flat per-group block tables to GPU int32 tensors: absolute
-    page indices, null hole = 0 preserved, ragged-row padding -1. No
-    base-offset companion -- the flat path never compacts.
+    _include_base_offsets: bool = False,
+    _required_base_offset_group_ids: frozenset[str] = frozenset(),
+) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Bridge flat per-group block tables to packed GPU int32 tensors.
 
-    All groups stage into ONE pinned buffer and ride ONE H2D copy; the
-    returned per-group views share a single storage, which is the
-    precondition of the backends' one-launch packed replay fill
-    (``_flat_try_packed_unpack``). Per-group uploads would fail its
-    same-storage check and fall back to per-group copy/fill chains
-    (~40 tiny transfers per decode step).
+    All groups stage into one pinned buffer and ride one H2D copy. Contract
+    callers may also include the scheduler's existing per-group paged-table
+    logical bases in that same allocation. This keeps compact Flat tables on
+    the canonical ``paged_cache_block_table_base_offsets`` seam instead of
+    introducing a parallel Flat-only field.
 
     Args:
         forward_op: Scheduler forward operation exporting CPU NumPy tables.
@@ -644,12 +663,55 @@ def flat_block_tables_from_forward_op(
             if max_page_ids is not None and group_max_page_id is None:
                 raise ValueError(f"max_page_ids is missing flat group {group_id!r}")
             if group_max_page_id is not None:
-                invalid = (arr < -1) | (arr > group_max_page_id)
-                if bool(invalid.any()):
+                min_page_id = int(arr.min())
+                max_seen_page_id = int(arr.max())
+                if min_page_id < -1 or max_seen_page_id > group_max_page_id:
                     raise ValueError(
                         f"flat group {group_id!r} contains a page ID outside "
                         f"-1..{group_max_page_id}"
                     )
+    base_arrays_by_id: dict[str, np.ndarray] = {}
+    if _include_base_offsets:
+        base_items = [
+            (str(group_id), value)
+            for group_id, value in forward_op.paged_cache_block_table_base_offsets_arrays().items()
+        ]
+        for group_id, base_array in base_items:
+            if group_id in base_arrays_by_id:
+                raise ValueError(
+                    "flat base-offset group keys collide after string "
+                    f"normalization: {group_id!r}"
+                )
+            if not isinstance(base_array, np.ndarray):
+                raise ValueError(
+                    f"flat group {group_id!r} base offsets must be a NumPy array"
+                )
+            if base_array.dtype != np.int32:
+                raise ValueError(f"flat group {group_id!r} base offsets must use int32")
+            if base_array.ndim != 1:
+                raise ValueError(
+                    f"flat group {group_id!r} base offsets have invalid shape"
+                )
+            if bool((base_array < 0).any()):
+                raise ValueError(
+                    f"flat group {group_id!r} contains a negative logical base"
+                )
+            base_arrays_by_id[group_id] = base_array
+        table_group_ids = {group_id for group_id, _ in ordered_items}
+        extra_base_groups = set(base_arrays_by_id).difference(table_group_ids)
+        if extra_base_groups:
+            raise ValueError(
+                "flat base-offset groups have no matching table: "
+                f"{sorted(extra_base_groups)}"
+            )
+        missing_required = _required_base_offset_group_ids.difference(base_arrays_by_id)
+        if missing_required:
+            raise ValueError(
+                "flat groups are missing logical base offsets required for "
+                "compact tables: "
+                f"{sorted(missing_required)}"
+            )
+
     device = torch.device(device) if isinstance(device, str) else device
     out: dict[str, torch.Tensor] = {}
     packable: list[tuple[str, Any, int]] = []
@@ -669,8 +731,30 @@ def flat_block_tables_from_forward_op(
             continue
         packable.append((key, arr, total))
         total += arr.shape[0] * arr.shape[1]
-    if not packable:
-        return out
+    base_spans: list[tuple[str, np.ndarray, int]] = []
+    if _include_base_offsets:
+        for group_id, arr in ordered_items:
+            rows = int(arr.shape[0])
+            bases = base_arrays_by_id.get(group_id)
+            if bases is None:
+                bases = np.zeros(rows, dtype=np.int32)
+            if bases.shape[0] != rows:
+                raise ValueError(
+                    "paged_cache_block_table_base_offsets_arrays"
+                    f"[{group_id}] has "
+                    f"{bases.shape[0]} rows but its table has {rows}"
+                )
+            if num_reqs is not None and bases.shape[0] != num_reqs:
+                raise ValueError(
+                    "paged_cache_block_table_base_offsets_arrays"
+                    f"[{group_id}] has "
+                    f"{bases.shape[0]} rows but forward op reported "
+                    f"num_reqs={num_reqs}"
+                )
+            base_spans.append((group_id, bases, total))
+            total += rows
+    if not packable and not base_spans:
+        return (out, {}) if _include_base_offsets else out
     # Fresh pinned stage per step (event-fenced; reuse races overlap).
     # arr is a read-only zero-copy view over the C++ buffer; np.copyto
     # reads it into our own writable pinned tensor (never writes back).
@@ -678,10 +762,46 @@ def flat_block_tables_from_forward_op(
     staged_np = staged.numpy()
     for key, arr, offset in packable:
         np.copyto(staged_np[offset : offset + arr.size].reshape(arr.shape), arr)
+    for _, bases, offset in base_spans:
+        np.copyto(staged_np[offset : offset + bases.size], bases)
     packed = staged.to(device, non_blocking=True)
     for key, arr, offset in packable:
         out[key] = packed[offset : offset + arr.size].view(arr.shape[0], arr.shape[1])
-    return out
+    if not _include_base_offsets:
+        return out
+    base_out = {
+        group_id: packed[offset : offset + bases.size]
+        for group_id, bases, offset in base_spans
+    }
+    return out, base_out
+
+
+def flat_cache_batch_from_forward_op(
+    forward_op: Any,
+    device: "torch.device | str",
+    *,
+    num_reqs: int,
+    expected_group_ids: tuple[str, ...],
+    max_page_ids: Mapping[str, int],
+    required_base_offset_group_ids: frozenset[str] = frozenset(),
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Pack one FlatKV table/base batch into a single device allocation.
+
+    Groups named in ``required_base_offset_group_ids`` must publish an exact
+    base. Other groups without an export receive a zero base view.
+    """
+
+    packed = flat_block_tables_from_forward_op(
+        forward_op,
+        device,
+        num_reqs=num_reqs,
+        expected_group_ids=expected_group_ids,
+        max_page_ids=max_page_ids,
+        _include_base_offsets=True,
+        _required_base_offset_group_ids=required_base_offset_group_ids,
+    )
+    assert isinstance(packed, tuple)
+    return packed
 
 
 def paged_cache_block_table_base_offsets_from_forward_op(

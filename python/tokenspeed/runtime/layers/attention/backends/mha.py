@@ -169,6 +169,7 @@ class MHAAttnBackend(FlatCacheGroupsMixin, AttentionBackend):
         self.flat_state_group_ids: frozenset[str] = frozenset()
         # Per-group page sizes (heterogeneous block sizes), learned with them.
         self.flat_group_page_sizes: dict[str, int] = {}
+        self.flat_group_specs_published = False
 
     # ------------------------------------------------------------------
     # Metadata initialization

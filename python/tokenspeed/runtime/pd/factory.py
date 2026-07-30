@@ -40,7 +40,7 @@ def _get_contiguous_buf_unit_lens(pool, item_lens):
 
 
 def _get_flatkv_contract(pool):
-    if getattr(pool, "supports_disaggregation", False) is not True:
+    if not pool.supports_disaggregation:
         return None
 
     contract_getter = getattr(pool, "get_flatkv_pd_contract", None)

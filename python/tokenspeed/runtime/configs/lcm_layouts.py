@@ -25,6 +25,118 @@ from __future__ import annotations
 from tokenspeed.runtime.configs.lcm_memory_plan import LcmFieldSpec
 
 
+def deepseek_v4_lcm_fields(
+    *,
+    layout,
+    group_specs,
+) -> tuple[LcmFieldSpec, ...]:
+    """Describe DeepSeek-V4 history and compressor-state cache fields.
+
+    Every V4 cache consumer receives the field tensor's runtime page stride.
+    Fields can therefore share the ordinal slot planes used by the common LCM
+    layout instead of reserving one plane per cache group.
+    """
+    from tokenspeed.runtime.configs.deepseek_v4_cache_spec import (
+        V4_INDEXER_COMPRESSOR_STATE_GROUP_ID,
+        V4_SWA_KV_GROUP_ID,
+        v4_compressed_kv_group_id,
+        v4_compressor_state_group_id,
+    )
+
+    group_specs = tuple(group_specs)
+    specs_by_id = {spec.group_id: spec for spec in group_specs}
+    if len(specs_by_id) != len(group_specs):
+        raise ValueError("DeepSeek V4 cache specs contain duplicate group IDs")
+
+    def rows(group_id: str) -> int:
+        try:
+            return int(specs_by_id[group_id].rows_per_page)
+        except KeyError as exc:
+            raise ValueError(
+                f"DeepSeek V4 LCM recipe is missing group {group_id!r}"
+            ) from exc
+
+    occurrences: dict[str, int] = {}
+
+    def slot(group_id: str) -> int:
+        return occurrences.get(group_id, 0)
+
+    def advance(group_id: str) -> None:
+        occurrences[group_id] = slot(group_id) + 1
+
+    fields = []
+    swa_rows = rows(V4_SWA_KV_GROUP_ID)
+    for layer_id, ratio in enumerate(layout.layer_ratio):
+        swa_plane = f"slot.{slot(V4_SWA_KV_GROUP_ID)}"
+        fields.append(
+            LcmFieldSpec(
+                V4_SWA_KV_GROUP_ID,
+                f"layer.{layer_id}.swa_kv",
+                swa_plane,
+                (layout.swa_block_bytes(swa_rows),),
+                1,
+                exact_page_stride=False,
+            )
+        )
+        advance(V4_SWA_KV_GROUP_ID)
+        if ratio <= 1:
+            continue
+
+        history_group = v4_compressed_kv_group_id(ratio)
+        state_group = v4_compressor_state_group_id(ratio)
+        history_rows = rows(history_group)
+        history_plane = f"slot.{slot(history_group)}"
+        state_plane = f"slot.{slot(state_group)}"
+        fields.extend(
+            (
+                LcmFieldSpec(
+                    history_group,
+                    f"layer.{layer_id}.compressed_kv",
+                    history_plane,
+                    (layout.swa_block_bytes(history_rows),),
+                    1,
+                    exact_page_stride=False,
+                ),
+                LcmFieldSpec(
+                    state_group,
+                    f"layer.{layer_id}.compressor_state",
+                    state_plane,
+                    (rows(state_group), layout.state_width(layer_id) * 2),
+                    4,
+                    exact_page_stride=False,
+                ),
+            )
+        )
+        if ratio == 4:
+            fields.extend(
+                (
+                    LcmFieldSpec(
+                        history_group,
+                        f"layer.{layer_id}.indexer_kv",
+                        history_plane,
+                        (history_rows * layout.indexer_row_bytes,),
+                        1,
+                        exact_page_stride=False,
+                    ),
+                    LcmFieldSpec(
+                        V4_INDEXER_COMPRESSOR_STATE_GROUP_ID,
+                        f"layer.{layer_id}.indexer_state",
+                        f"slot.{slot(V4_INDEXER_COMPRESSOR_STATE_GROUP_ID)}",
+                        (
+                            rows(V4_INDEXER_COMPRESSOR_STATE_GROUP_ID),
+                            layout.state_width(layer_id, indexer=True) * 2,
+                        ),
+                        4,
+                        exact_page_stride=False,
+                    ),
+                )
+            )
+            advance(V4_INDEXER_COMPRESSOR_STATE_GROUP_ID)
+        advance(history_group)
+        advance(state_group)
+    return tuple(fields)
+
+
 def mla_history_lcm_fields(
     *,
     layer_group_ids,

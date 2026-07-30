@@ -72,11 +72,12 @@ class DummyFlatTablesTest(unittest.TestCase):
             self.skipTest(f"needs torch + runtime deps: {exc}")
         self.PrefillGraph = PrefillGraph
 
-    def _bare(self, backend, pool):
+    def _bare(self, backend, pool, *, use_flat_cache_tables=True):
         pg = self.PrefillGraph.__new__(self.PrefillGraph)
         pg.attn_backend = backend
         pg.token_to_kv_pool = pool
         pg.config = SimpleNamespace(device="cpu")
+        pg.use_flat_cache_tables = use_flat_cache_tables
         return pg
 
     def test_flat_backend_gets_writable_state_tables(self):
@@ -88,9 +89,12 @@ class DummyFlatTablesTest(unittest.TestCase):
         )
         pool = SimpleNamespace(
             paged_cache_group_specs=(
-                SimpleNamespace(group_id="full_attention"),
-                SimpleNamespace(group_id="sliding_attention"),
-                SimpleNamespace(group_id="linear_attention"),  # state: included
+                SimpleNamespace(group_id="full_attention", family="history"),
+                SimpleNamespace(group_id="sliding_attention", family="history"),
+                SimpleNamespace(
+                    group_id="linear_attention",
+                    family="state",
+                ),
             )
         )
         tables = self._bare(backend, pool)._dummy_flat_tables(100)
@@ -117,7 +121,9 @@ class DummyFlatTablesTest(unittest.TestCase):
             flat_state_group_ids=frozenset(),
         )
         pool = SimpleNamespace(
-            paged_cache_group_specs=(SimpleNamespace(group_id="full_attention"),)
+            paged_cache_group_specs=(
+                SimpleNamespace(group_id="full_attention", family="history"),
+            )
         )
         tables = self._bare(backend, pool)._dummy_flat_tables(100)
         self.assertEqual(tables["full_attention"].shape, (1, 2500))
@@ -132,8 +138,8 @@ class DummyFlatTablesTest(unittest.TestCase):
         wrapper = SimpleNamespace(uses_flat_cache_groups=True, full_attn_backend=child)
         pool = SimpleNamespace(
             paged_cache_group_specs=(
-                SimpleNamespace(group_id="full_attention"),
-                SimpleNamespace(group_id="linear_attention"),
+                SimpleNamespace(group_id="full_attention", family="history"),
+                SimpleNamespace(group_id="linear_attention", family="state"),
             )
         )
         tables = self._bare(wrapper, pool)._dummy_flat_tables(64)
@@ -144,6 +150,17 @@ class DummyFlatTablesTest(unittest.TestCase):
         backend = SimpleNamespace(uses_flat_cache_groups=False)
         pool = SimpleNamespace(paged_cache_group_specs=())
         self.assertEqual(self._bare(backend, pool)._dummy_flat_tables(64), {})
+
+    def test_radix_transport_keeps_dual_capable_backend_on_paged_tables(self):
+        backend = SimpleNamespace(uses_flat_cache_groups=True)
+        pool = SimpleNamespace(
+            paged_cache_group_specs=(
+                SimpleNamespace(group_id="full_attention", family="history"),
+            )
+        )
+        graph = self._bare(backend, pool, use_flat_cache_tables=False)
+
+        self.assertEqual(graph._dummy_flat_tables(64), {})
 
     def test_runtime_contract_pool_is_eligible_for_capture(self):
         from unittest import mock
@@ -169,7 +186,7 @@ class DummyFlatTablesTest(unittest.TestCase):
         ):
             graph = self.PrefillGraph(
                 model_runner=model_runner,
-                attn_backend=object(),
+                attn_backend=SimpleNamespace(uses_flat_cache_groups=False),
                 token_to_kv_pool=pool,
                 input_buffers=object(),
                 config=config,

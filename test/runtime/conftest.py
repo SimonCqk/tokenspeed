@@ -130,7 +130,14 @@ def kda_layer_id(pool) -> int:
     )
 
 
-def flat_metadata_for(contract, tables, device, *, filler_page: int = 1):
+def flat_metadata_for(
+    contract,
+    tables,
+    device,
+    *,
+    filler_page: int = 1,
+    compact_tables: bool = False,
+):
     from tokenspeed.runtime.layers.attention.backends.flat_cache_metadata import (
         FlatCacheBatchMetadata,
     )
@@ -144,7 +151,11 @@ def flat_metadata_for(contract, tables, device, *, filler_page: int = 1):
             arrays[spec.group_id] = np.full((bs, 1), filler_page, dtype=np.int32)
     forward_op = SimpleNamespace(flat_block_tables_arrays=lambda: arrays)
     metadata = FlatCacheBatchMetadata.from_forward_op(
-        forward_op, device=device, contract=contract, num_requests=bs
+        forward_op,
+        device=device,
+        contract=contract,
+        num_requests=bs,
+        compact_tables=compact_tables,
     )
     return metadata, forward_op
 

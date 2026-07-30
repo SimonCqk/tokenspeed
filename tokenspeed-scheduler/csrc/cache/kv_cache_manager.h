@@ -137,7 +137,7 @@ public:
 
     void ClaimHitBlocks(BlockTable& table, PrefixMatch&& hit) {
         _assert(table.blocks_.empty(), "ClaimHitBlocks requires a fresh (empty) table");
-        table.blocks_ = std::move(hit.blocks);
+        table.replaceBlocks(std::move(hit.blocks));
     }
 
     bool Acquire(BlockPool& pool, BlockTable& table, std::int32_t num_tokens, std::int32_t reserve_tokens = 0) {
@@ -147,7 +147,6 @@ public:
             table.available_tokens_ -= num_tokens;
             return true;
         }
-        table.blocks_.reserve(table.blocks_.size() + static_cast<std::size_t>(num_pages));
         std::vector<CacheBlockRef> new_block_refs =
             pool.AcquireBlocks(group_id_, cache_blocks_per_lcm_block_, num_pages);
         if (static_cast<std::int32_t>(new_block_refs.size()) < num_pages) {
@@ -170,11 +169,11 @@ public:
         auto destination_it = destination_refs.begin();
         for (CacheBlockRef& host_block_ref : host_block_refs) {
             if (!host_block_ref) {
-                table.blocks_.emplace_back();
+                table.appendBlock({});
                 continue;
             }
             _assert(destination_it != destination_refs.end(), "missing host extension destination");
-            table.blocks_.push_back(std::move(*destination_it));
+            table.appendBlock(std::move(*destination_it));
             ++destination_it;
             load_pairs.push_back(BlockTransfer{
                 .group_id = group_id_,
@@ -230,9 +229,10 @@ public:
         const std::int64_t extent = static_cast<std::int64_t>(demand.num_tokens) + demand.reserve_tokens;
         const std::int32_t logical_blocks =
             static_cast<std::int32_t>((extent + cache_block_tokens_ - 1) / cache_block_tokens_);
-        table.blocks_.resize(static_cast<std::size_t>(logical_blocks));
+        table.resizeWithNullBlocks(logical_blocks);
         for (std::size_t i = 0; i < block_refs.size(); ++i) {
-            table.blocks_[static_cast<std::size_t>(demand.materialized_suffix_start) + i] = std::move(block_refs[i]);
+            table.setLiveBlock(demand.materialized_suffix_start + static_cast<std::int32_t>(i),
+                               std::move(block_refs[i]));
         }
         table.available_tokens_ = logical_blocks * cache_block_tokens_ - demand.num_tokens;
         return true;
@@ -403,7 +403,7 @@ public:
         for (auto it = table.blocks_.rbegin(); it != table.blocks_.rend(); ++it) {
             it->reset();
         }
-        table.blocks_.clear();
+        table.clearBlocks();
         table.available_tokens_ = 0;
     }
 
@@ -452,9 +452,7 @@ private:
         const std::int32_t added_tokens = static_cast<std::int32_t>(block_refs.size()) * cache_block_tokens_;
         _assert(num_tokens <= table.available_tokens_ + added_tokens,
                 "allocated blocks do not cover the immediate token demand");
-        for (CacheBlockRef& block_ref : block_refs) {
-            table.blocks_.push_back(std::move(block_ref));
-        }
+        table.appendLiveBlocks(std::move(block_refs));
         table.available_tokens_ += added_tokens - num_tokens;
     }
 

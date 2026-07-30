@@ -70,8 +70,10 @@ class FlatCacheGroupsMixin:
     # Wrapper-owned (Inkling conv) groups: mixin skips their write-loc math and capture buffers
     flat_engine_owned_group_ids: frozenset[str] = frozenset()
 
-    # Per-group page size in tokens (hetero block sizes); groups absent here use self.page_size
+    # Per-group page size in tokens (heterogeneous block sizes).
     flat_group_page_sizes: dict[str, int] = {}
+    # False is the Radix/legacy state before any Flat specs are published.
+    flat_group_specs_published: bool = False
 
     # Draft decode-window lookback rows (Inkling MTP): armed by the conv
     # wrapper's configure_draft_lookback BEFORE graph init, so the lookback
@@ -174,19 +176,27 @@ class FlatCacheGroupsMixin:
         flat_state_group_ids) and per-group page sizes (heterogeneous block
         sizes); called from init_cuda_graph_state, the one place the pool's
         specs reach every backend."""
+        specs = tuple(paged_cache_group_specs)
+        self.flat_group_specs_published = bool(specs)
         self.flat_state_group_ids = frozenset(
-            str(spec.group_id)
-            for spec in paged_cache_group_specs
-            if spec.family == "state"
+            str(spec.group_id) for spec in specs if spec.family == "state"
         )
         self.flat_group_page_sizes = {
             str(spec.group_id): int(spec.rows_per_page) * int(spec.entry_stride_tokens)
-            for spec in paged_cache_group_specs
+            for spec in specs
             if spec.family != "state"
         }
 
     def _group_page_size(self, gid: str) -> int:
-        return self.flat_group_page_sizes.get(gid, self.page_size)
+        page_size = self.flat_group_page_sizes.get(gid)
+        if page_size is not None:
+            return page_size
+        if not self.flat_group_specs_published:
+            return self.page_size
+        raise RuntimeError(
+            f"flat group {gid!r} is absent from the backend cache specs: "
+            f"{sorted(self.flat_group_page_sizes)}"
+        )
 
     def _layer_page_size(self, layer) -> int:
         """Page size of the layer's cache group (uniform when unknown)."""

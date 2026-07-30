@@ -337,8 +337,22 @@ class LayerMappedKVPool:
             global_id: pool_idx
             for pool_idx, global_id in enumerate(full_attention_layer_ids)
         }
-        # Expose page_size from inner pool for the scheduler
-        self.page_size = getattr(inner_pool, "page_size", 1)
+        self.page_size = inner_pool.page_size
+
+    @property
+    def runtime_contract(self):
+        """Forward the explicit FlatKV geometry contract."""
+        return self.inner.runtime_contract
+
+    @property
+    def paged_cache_group_specs(self):
+        """Forward scheduler-visible group geometry without dynamic probing."""
+        return self.inner.paged_cache_group_specs
+
+    @property
+    def paged_cache_group_page_counts(self):
+        """Forward the published per-group page counts."""
+        return self.inner.paged_cache_group_page_counts
 
     def _map(self, layer_id: int) -> int:
         return self.layer_map.get(layer_id, layer_id)
@@ -779,12 +793,10 @@ class MambaAttnBackend(AttentionBackend):
           delivered (radix ext / spec decode never publish).
         """
         self.kv_pool = kv_pool
-        contract = getattr(kv_pool, "runtime_contract", None)
+        contract = kv_pool.runtime_contract
         if contract is not None:
             state_group_ids = tuple(
-                spec.group_id
-                for spec in contract.group_specs
-                if getattr(spec, "family", "history") == "state"
+                spec.group_id for spec in contract.group_specs if spec.family == "state"
             )
             if not state_group_ids:
                 raise RuntimeError(
@@ -807,7 +819,7 @@ class MambaAttnBackend(AttentionBackend):
             return
         self._flat_contract_bound = False
         self._flat_state_group_ids = ()
-        specs = getattr(kv_pool, "paged_cache_group_specs", ())
+        specs = kv_pool.paged_cache_group_specs
         layer_types = tuple(getattr(kv_pool, "_layer_types", ()))
         layer_group_ids = tuple(getattr(kv_pool, "layer_cache_group_ids", ()))
         if layer_group_ids and len(layer_group_ids) != len(layer_types):
